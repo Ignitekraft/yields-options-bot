@@ -1,0 +1,76 @@
+from __future__ import annotations
+
+from app.config import settings
+from app.services.account_service import AccountService
+from app.services.auth_service import AuthService
+from app.services.deriv.auth import build_deriv_oauth_url
+from app.services.deriv.market_data import MarketDataService
+from app.services.scanner import YieldsScanner
+
+from .messages import CONNECTED_MESSAGE, NO_CONNECTION_MESSAGE, SCAN_MESSAGE, START_MESSAGE
+
+
+auth_service = AuthService()
+account_service = AccountService(auth_service)
+
+
+def handle_start() -> str:
+    return START_MESSAGE
+
+
+def handle_status(telegram_user_id: str) -> str:
+    account = account_service.get_account_status(str(telegram_user_id))
+    if not account["connected"]:
+        return NO_CONNECTION_MESSAGE
+
+    return (
+        "🟢 Deriv account connected.\n\n"
+        f"Account: {account['account_id']}\n"
+        f"Type: {account['type']}\n"
+        f"Currency: {account['currency']}\n"
+        f"Balance: {account['balance']}\n\n"
+        "Yields is ready."
+    )
+
+
+def handle_connect(telegram_user_id: str) -> str:
+    """Start a secure Deriv OAuth session for a Telegram user."""
+    session = auth_service.begin_oauth_session(str(telegram_user_id))
+    url = build_deriv_oauth_url(
+        settings.deriv_client_id,
+        settings.deriv_redirect_uri,
+        "trade account_manage",
+        session["state"],
+        session["code_challenge"],
+    )
+    return (
+        "Deriv account connection is required.\n\n"
+        "Tap the link below to continue securely:\n\n"
+        f"{url}"
+    )
+
+
+def handle_logout(telegram_user_id: str) -> str:
+    auth_service.disconnect_user(str(telegram_user_id))
+    return "🔒 Deriv account disconnected. You can reconnect any time with /connect."
+
+
+def handle_scan() -> str:
+    """Invoke the public-market-data flow without account auth."""
+    market_service = MarketDataService()
+    scanner = YieldsScanner()
+
+    symbol_list = market_service.get_active_symbols()
+    symbol = symbol_list[0]["symbol"] if symbol_list else "R_100"
+    history = market_service.get_historical_ticks(symbol, count=25)
+    live_tick = market_service.subscribe_ticks(symbol)
+
+    result = scanner.analyze_live_tick(history, live_tick, symbol=symbol)
+    response = [
+        SCAN_MESSAGE,
+        f"Symbol: {result.symbol}",
+        f"Signal: {result.signal}",
+        f"Confidence: {result.confidence:.2f}",
+        f"Message: {result.message}",
+    ]
+    return "\n".join(response)
