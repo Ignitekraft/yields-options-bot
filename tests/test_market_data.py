@@ -115,7 +115,7 @@ class MarketDataTests(unittest.TestCase):
         self.assertEqual(buy["status"], "accepted")
         self.assertIn("contract_id", buy)
 
-    def test_live_balance_fetch_uses_deriv_websocket_response(self):
+    def test_live_balance_fetch_uses_deriv_rest_account_response(self):
         async def run_test():
             auth = AuthService()
             auth.connect_user(
@@ -132,42 +132,24 @@ class MarketDataTests(unittest.TestCase):
                 },
             )
 
-            class FakeSocket:
-                def __init__(self):
-                    self.messages = [
-                        json.dumps({
-                            "authorize": {
-                                "account_list": [
-                                    {"is_virtual": False, "currency": "USD", "balance": 245.75},
-                                    {"is_virtual": True, "currency": "USD", "balance": 1250.0},
-                                ]
-                            }
-                        }),
-                        json.dumps({"msg_type": "balance", "balance": {"currency": "USD", "balance": 245.75}}),
-                    ]
-                    self._idx = 0
-                    self.sent = []
-
-                async def __aenter__(self):
-                    return self
-
-                async def __aexit__(self, exc_type, exc, tb):
+            class FakeResponse:
+                def raise_for_status(self):
                     return None
 
-                async def send(self, payload):
-                    self.sent.append(json.loads(payload))
+                def json(self):
+                    return {
+                        "data": {
+                            "account_list": [
+                                {"account_id": "real-001", "is_virtual": False, "currency": "USD", "balance": 245.75},
+                                {"account_id": "demo-001", "is_virtual": True, "currency": "USD", "balance": 1250.0},
+                            ]
+                        }
+                    }
 
-                async def recv(self):
-                    value = self.messages[self._idx]
-                    self._idx += 1
-                    return value
-
-            socket = FakeSocket()
-            with patch("app.services.account_service.websockets.connect", return_value=socket):
+            with patch("app.services.account_service.httpx.get", return_value=FakeResponse()) as get_mock:
                 balances = await AccountService(auth).get_live_balances("telegram-user-live-balance")
 
-            self.assertEqual(socket.sent[0], {"authorize": "abc"})
-            self.assertEqual(socket.sent[1], {"balance": 1, "subscribe": 1})
+            self.assertEqual(get_mock.call_args.kwargs["headers"]["Authorization"], "Bearer abc")
             self.assertEqual(balances["real"], "245.75 USD")
             self.assertEqual(balances["demo"], "1250.0 USD")
             self.assertEqual(balances["tokens"], 50)
