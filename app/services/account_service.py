@@ -1,11 +1,18 @@
 from __future__ import annotations
 
 import json
+import logging
+from typing import Any, Dict, Iterable, List, Optional
+
+import httpx
 import websockets
-from typing import Any, Dict
+
 from app.services.auth_service import AuthService
 
-DERIV_WS_URL = "wss://ws.derivws.com/websockets/v3?app_id=1089"
+logger = logging.getLogger(__name__)
+
+DERIV_ACCOUNTS_URL = "https://api.derivws.com/trading/v1/options/accounts"
+DERIV_OTP_URL = "https://api.derivws.com/trading/v1/options/accounts/{account_id}/otp"
 
 
 class AccountService:
@@ -22,11 +29,44 @@ class AccountService:
 
         return {
             "connected": True,
-            "account_id": "OAuth Active",
-            "type": "Demo / Real",
-            "currency": "USD",
-            "balance": "Ready",
+            "account_id": account.get("account_id", "OAuth Active"),
+            "type": account.get("account_type", "Demo / Real"),
+            "currency": account.get("currency", "USD"),
+            "balance": account.get("balance", "Ready"),
         }
+
+    @staticmethod
+    def _default_account_result(account_id: Optional[str] = None, currency: str = "USD") -> Dict[str, Any]:
+        return {
+            "available": False,
+            "balance": None,
+            "currency": currency,
+            "account_id": account_id,
+            "status": "unavailable",
+        }
+
+    @staticmethod
+    def _normalize_account_list(payload: Any) -> List[Dict[str, Any]]:
+        if payload is None:
+            return []
+
+        if isinstance(payload, list):
+            return [item for item in payload if isinstance(item, dict)]
+
+        if isinstance(payload, dict):
+            for key in ("data", "account_list", "accounts"):
+                value = payload.get(key)
+                if value is None:
+                    continue
+                if isinstance(value, list):
+                    return [item for item in value if isinstance(item, dict)]
+                if isinstance(value, dict):
+                    return [value]
+
+            if any(key in payload for key in ("account_id", "account_type", "loginid", "balance")):
+                return [payload]
+
+        return []
 
     async def get_live_balances(self, telegram_user_id: str | int) -> Dict[str, Any]:
         user_key = str(telegram_user_id)
@@ -36,55 +76,206 @@ class AccountService:
         if not token:
             return {"connected": False}
 
-        real_balance = "0.00 USD"
-        demo_balance = "0.00 USD"
-
-        try:
-            async with websockets.connect(DERIV_WS_URL) as websocket:
-                # 1. Authorize with OAuth token to retrieve account list
-                await websocket.send(json.dumps({"authorize": token}))
-                auth_response = json.loads(await websocket.recv())
-
-                if "error" in auth_response:
-                    return {"connected": True, "real": real_balance, "demo": demo_balance, "tokens": tokens_count}
-
-                authorize_data = auth_response.get("authorize", {})
-                account_list = authorize_data.get("account_list", [])
-
-                # 2. Iterate through accounts (Demo vs Real) and fetch balances
-                for acc in account_list:
-                    loginid = acc.get("loginid")
-                    is_virtual = acc.get("is_virtual", 0)
-                    
-                    if not loginid:
-                        continue
-
-                    # Open a separate auth call or socket request for each specific account loginid
-                    async with websockets.connect(DERIV_WS_URL) as sub_ws:
-                        await sub_ws.send(json.dumps({"authorize": token}))
-                        _ = await sub_ws.recv()  # consume auth response
-
-                        # Request balance for this specific loginid
-                        await sub_ws.send(json.dumps({"balance": 1, "loginid": loginid}))
-                        bal_resp = json.loads(await sub_ws.recv())
-
-                        if "balance" in bal_resp:
-                            bal_data = bal_resp["balance"]
-                            amount = bal_data.get("balance", 0.0)
-                            curr = bal_data.get("currency", "USD")
-                            formatted = f"{amount:.2f} {curr}"
-
-                            if is_virtual or "VRTC" in loginid:
-                                demo_balance = formatted
-                            else:
-                                real_balance = formatted
-
-        except Exception as e:
-            print(f"Error fetching Deriv live balances: {e}")
-
-        return {
+        result: Dict[str, Any] = {
             "connected": True,
-            "real": real_balance,
-            "demo": demo_balance,
+            "real": self._default_account_result(),
+            "demo": self._default_account_result(),
             "tokens": tokens_count,
         }
+
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            try:
+                accounts_response = await client.get(
+                    DERIV_ACCOUNTS_URL,
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Content-Type": "application/json",
+                    },
+                )
+                logger.info("Deriv accounts GET status=%s for user=%s", accounts_response.status_code, user_key)
+
+                if accounts_response.status_code != 200:
+                    logger.warning(
+                        "Deriv accounts request failed for user=%s status=%s body=%s",
+                        user_key,
+                        accounts_response.status_code,
+                        accounts_response.text[:500],
+                    )
+                    result["real"]["status"] = "error"
+                    result["demo"]["status"] = "error"
+                    return result
+
+                accounts_payload = accounts_response.json()
+                normalized_accounts = self._normalize_account_list(accounts_payload)
+                logger.info(
+                    "Normalized Deriv account list for user=%s: %s",
+                    user_key,
+                    [
+                        {"account_id": account.get("account_id"), "account_type": account.get("account_type")}
+                        for account in normalized_accounts
+                    ],
+                )
+
+                if not normalized_accounts:
+                    logger.warning("No Deriv accounts returned for user=%s", user_key)
+                    result["real"]["status"] = "error"
+                    result["demo"]["status"] = "error"
+                    return result
+
+                for account in normalized_accounts:
+                    account_id = account.get("account_id") or account.get("loginid") or account.get("id")
+                    account_type = str(account.get("account_type") or account.get("type") or "").lower()
+
+                    if not account_id:
+                        logger.warning("Skipping Deriv account entry without account_id for user=%s: %s", user_key, account)
+                        continue
+
+                    result_key = None
+                    if account_type in {"demo", "virtual"}:
+                        result_key = "demo"
+                    elif account_type in {"real", "live", "standard"}:
+                        result_key = "real"
+                    else:
+                        logger.info("Skipping unsupported Deriv account type for user=%s account_id=%s account_type=%s", user_key, account_id, account_type)
+                        continue
+
+                    account_entry = {
+                        "available": False,
+                        "balance": None,
+                        "currency": account.get("currency", "USD"),
+                        "account_id": account_id,
+                        "status": "unavailable",
+                    }
+
+                    try:
+                        otp_response = await client.post(
+                            DERIV_OTP_URL.format(account_id=account_id),
+                            headers={
+                                "Authorization": f"Bearer {token}",
+                                "Content-Type": "application/json",
+                            },
+                        )
+                        logger.info(
+                            "Deriv OTP status for user=%s account_id=%s account_type=%s status=%s",
+                            user_key,
+                            account_id,
+                            account_type,
+                            otp_response.status_code,
+                        )
+
+                        if otp_response.status_code != 200:
+                            logger.warning(
+                                "Deriv OTP request failed for user=%s account_id=%s status=%s body=%s",
+                                user_key,
+                                account_id,
+                                otp_response.status_code,
+                                otp_response.text[:500],
+                            )
+                            account_entry["status"] = "error"
+                            result[result_key] = account_entry
+                            continue
+
+                        otp_payload = otp_response.json()
+                        ws_url = otp_payload.get("data", {}).get("url") if isinstance(otp_payload, dict) else None
+                        if not ws_url:
+                            logger.warning("Deriv OTP response missing websocket URL for user=%s account_id=%s", user_key, account_id)
+                            account_entry["status"] = "error"
+                            result[result_key] = account_entry
+                            continue
+
+                        try:
+                            async with websockets.connect(ws_url) as websocket:
+                                await websocket.send(json.dumps({"balance": 1, "subscribe": 1, "req_id": 1}))
+                                raw_message = await websocket.recv()
+                        except Exception as exc:  # websocket connection/recv failure
+                            logger.exception(
+                                "Deriv websocket failure for user=%s account_id=%s account_type=%s",
+                                user_key,
+                                account_id,
+                                account_type,
+                            )
+                            account_entry["status"] = "error"
+                            result[result_key] = account_entry
+                            continue
+
+                        message = json.loads(raw_message) if isinstance(raw_message, str) else raw_message
+                        if isinstance(message, dict) and message.get("error"):
+                            logger.warning(
+                                "Deriv balance error for user=%s account_id=%s: %s",
+                                user_key,
+                                account_id,
+                                message.get("error"),
+                            )
+                            account_entry["status"] = "error"
+                            result[result_key] = account_entry
+                            continue
+
+                        balance_payload = message.get("balance") if isinstance(message, dict) else None
+                        if not isinstance(balance_payload, dict):
+                            logger.warning(
+                                "Deriv balance response missing balance payload for user=%s account_id=%s message=%s",
+                                user_key,
+                                account_id,
+                                message,
+                            )
+                            account_entry["status"] = "error"
+                            result[result_key] = account_entry
+                            continue
+
+                        balance_value = balance_payload.get("balance")
+                        if balance_value is None:
+                            logger.warning(
+                                "Deriv balance value missing for user=%s account_id=%s payload=%s",
+                                user_key,
+                                account_id,
+                                balance_payload,
+                            )
+                            account_entry["status"] = "error"
+                            result[result_key] = account_entry
+                            continue
+
+                        currency = balance_payload.get("currency", "USD")
+                        account_entry = {
+                            "available": True,
+                            "balance": float(balance_value),
+                            "currency": currency,
+                            "account_id": account_id,
+                            "status": "ok",
+                        }
+                        result[result_key] = account_entry
+
+                    except ValueError as exc:
+                        logger.exception(
+                            "Invalid Deriv balance payload for user=%s account_id=%s account_type=%s",
+                            user_key,
+                            account_id,
+                            account_type,
+                        )
+                        result[result_key] = {
+                            **account_entry,
+                            "status": "error",
+                        }
+                    except httpx.HTTPError as exc:
+                        logger.exception(
+                            "HTTP error while fetching Deriv OTP or balance for user=%s account_id=%s account_type=%s",
+                            user_key,
+                            account_id,
+                            account_type,
+                        )
+                        result[result_key] = {
+                            **account_entry,
+                            "status": "error",
+                        }
+
+            except httpx.HTTPError as exc:
+                logger.exception("Deriv accounts request failed for user=%s", user_key)
+                result["real"] = {**result["real"], "status": "error"}
+                result["demo"] = {**result["demo"], "status": "error"}
+                return result
+            except ValueError as exc:
+                logger.exception("Invalid Deriv accounts payload for user=%s", user_key)
+                result["real"] = {**result["real"], "status": "error"}
+                result["demo"] = {**result["demo"], "status": "error"}
+                return result
+
+        return result

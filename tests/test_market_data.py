@@ -132,17 +132,53 @@ class MarketDataTests(unittest.TestCase):
                 },
             )
 
-            class FakeOtpResponse:
-                def raise_for_status(self):
-                    return None
+            class FakeAccountsResponse:
+                status_code = 200
 
                 def json(self):
-                    return {"data": {"url": "wss://api.derivws.com/trading/v1/options/ws/demo?otp=secret"}}
+                    return {
+                        "data": [
+                            {"account_id": "demo-001", "account_type": "demo", "currency": "USD", "balance": 10000.0},
+                            {"account_id": "real-001", "account_type": "real", "currency": "USD", "balance": 245.75},
+                        ]
+                    }
+
+            class FakeOtpResponse:
+                def __init__(self, url):
+                    self.status_code = 200
+                    self._url = url
+                    self.text = ""
+
+                def json(self):
+                    return {"data": {"url": self._url}}
+
+            class FakeAsyncClient:
+                def __init__(self):
+                    self.calls = []
+
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, exc_type, exc, tb):
+                    return None
+
+                async def get(self, url, headers=None):
+                    self.calls.append(("GET", url, headers))
+                    return FakeAccountsResponse()
+
+                async def post(self, url, headers=None):
+                    self.calls.append(("POST", url, headers))
+                    if url.endswith("/demo-001/otp"):
+                        return FakeOtpResponse("wss://demo.example/ws?otp=demo")
+                    if url.endswith("/real-001/otp"):
+                        return FakeOtpResponse("wss://real.example/ws?otp=real")
+                    return FakeOtpResponse("wss://demo.example/ws?otp=demo")
 
             class FakeSocket:
-                def __init__(self):
+                def __init__(self, url):
+                    self.url = url
                     self.sent = []
-                    self._recv = [json.dumps({"msg_type": "balance", "balance": {"currency": "USD", "balance": 245.75}})]
+                    self._recv = [json.dumps({"msg_type": "balance", "balance": {"currency": "USD", "balance": 10000.0}})] if "demo" in url else [json.dumps({"msg_type": "balance", "balance": {"currency": "USD", "balance": 245.75}})]
 
                 async def __aenter__(self):
                     return self
@@ -156,16 +192,17 @@ class MarketDataTests(unittest.TestCase):
                 async def recv(self):
                     return self._recv.pop(0)
 
-            socket = FakeSocket()
+            fake_demo_socket = FakeSocket("wss://demo.example/ws?otp=demo")
+            fake_real_socket = FakeSocket("wss://real.example/ws?otp=real")
 
-            with patch("app.services.account_service.httpx.get", return_value=FakeOtpResponse()), \
-                 patch("app.services.account_service.httpx.post", return_value=FakeOtpResponse()), \
-                 patch("app.services.account_service.websockets.connect", return_value=socket):
+            with patch("app.services.account_service.httpx.AsyncClient", return_value=FakeAsyncClient()), \
+                 patch("app.services.account_service.websockets.connect", side_effect=[fake_demo_socket, fake_real_socket]):
                 balances = await AccountService(auth).get_live_balances("telegram-user-live-balance")
 
-            self.assertEqual(socket.sent[0], {"balance": 1, "subscribe": 1, "req_id": 1})
-            self.assertEqual(balances["real"], "245.75 USD")
-            self.assertEqual(balances["demo"], "0.00 USD")
+            self.assertEqual(fake_demo_socket.sent[0], {"balance": 1, "subscribe": 1, "req_id": 1})
+            self.assertEqual(fake_real_socket.sent[0], {"balance": 1, "subscribe": 1, "req_id": 1})
+            self.assertEqual(balances["demo"]["balance"], 10000.0)
+            self.assertEqual(balances["real"]["balance"], 245.75)
             self.assertEqual(balances["tokens"], 50)
 
         import asyncio

@@ -30,17 +30,33 @@ def handle_status(telegram_user_id: str | int) -> str:
 
 
 async def handle_balance(telegram_user_id: str | int) -> str:
-    """Return formatted real/demo balances and bot usage tokens."""
+    """Return formatted Deriv balances and Yields token count."""
     status = account_service.get_account_status(str(telegram_user_id))
     if not status["connected"]:
         return "🔴 Deriv account not connected. Use /connect to link your account."
 
     balances = await account_service.get_live_balances(str(telegram_user_id))
-    
+    real = balances.get("real", {"available": False, "balance": None, "currency": "USD", "account_id": None, "status": "unavailable"})
+    demo = balances.get("demo", {"available": False, "balance": None, "currency": "USD", "account_id": None, "status": "unavailable"})
+    tokens = balances.get("tokens", 50)
+
+    def format_value(entry: dict, label: str) -> str:
+        if entry.get("available"):
+            balance = entry.get("balance")
+            currency = entry.get("currency", "USD")
+            if balance is None:
+                return f"{label}: Not available"
+            return f"{label}: ${balance:,.2f} {currency}"
+
+        if entry.get("status") == "error":
+            return f"{label}: Unable to fetch"
+        return f"{label}: Not available"
+
     return (
-        f"💰 **Real:** {balances.get('real', '0.00 USD')}\n"
-        f"🎮 **Demo:** {balances.get('demo', '0.00 USD')}\n"
-        f"💎 **Tokens:** {balances.get('tokens', 50)}"
+        "💰 **Deriv Balances**\n\n"
+        f"💵 {format_value(real, 'Real')}\n"
+        f"🎮 {format_value(demo, 'Demo')}\n\n"
+        f"💎 **Yields Tokens:** `{tokens}`"
     )
 
 
