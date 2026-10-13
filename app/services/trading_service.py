@@ -208,7 +208,6 @@ class TradingService:
                         "duration": int(duration_seconds),
                         "duration_unit": "s",
                         "symbol": resolved_symbol,
-                        "underlying_symbol": resolved_symbol,
                         "subscribe": 1,
                     }
                     await asyncio.wait_for(websocket.send(json.dumps(proposal_req)), timeout=15)

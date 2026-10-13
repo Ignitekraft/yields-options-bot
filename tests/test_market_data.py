@@ -487,6 +487,12 @@ class MarketDataTests(unittest.TestCase):
         self.assertEqual(payload["duration"], 30)
         self.assertEqual(payload["duration_unit"], "s")
 
+    def test_proposal_payload_uses_symbol_field_not_underlying_symbol(self):
+        payload = TradeExecutionService.build_proposal_payload("step_300", "BULLISH", 10.0, expiry_seconds=30)
+        self.assertEqual(payload["symbol"], "R_300")
+        self.assertNotIn("underlying_symbol", payload)
+        self.assertEqual(payload["contract_type"], "CALL")
+
     def test_martingale_state_machine(self):
         service = AutoTradeService()
         run = service.start_run("martingale-user", "step_300", "BULLISH", 10.0)

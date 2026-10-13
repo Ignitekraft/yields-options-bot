@@ -122,8 +122,8 @@ class TradeExecutionService:
 
     @staticmethod
     async def _send_ws_request(access_token: str, payload: dict[str, Any], account_id: str, app_id: str | int | None = None) -> dict[str, Any]:
-        otp_url = await TradeExecutionService.request_otp_url(access_token, account_id)
-        parsed = urlparse(otp_url)
+        ws_url = TradeExecutionService.get_ws_url(app_id)
+        parsed = urlparse(ws_url)
         safe_target = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
         logger.info(
             "Deriv websocket stage=handshake_start account_id=%s account_type=%s host=%s path=%s",
@@ -134,7 +134,12 @@ class TradeExecutionService:
         )
 
         try:
-            async with websockets.connect(otp_url, open_timeout=15, ping_timeout=20, ping_interval=20) as websocket:
+            async with websockets.connect(ws_url, open_timeout=15, ping_timeout=20, ping_interval=20) as websocket:
+                await asyncio.wait_for(websocket.send(json.dumps({"authorize": access_token})), timeout=15)
+                auth_response = json.loads(await asyncio.wait_for(websocket.recv(), timeout=20))
+                if isinstance(auth_response, dict) and auth_response.get("error"):
+                    raise ValueError(str(auth_response.get("error")))
+
                 await asyncio.wait_for(websocket.send(json.dumps(payload)), timeout=15)
                 response_text = await asyncio.wait_for(websocket.recv(), timeout=20)
         except Exception as exc:  # pragma: no cover - network failure guard
@@ -178,7 +183,7 @@ class TradeExecutionService:
             "currency": str(currency or "USD"),
             "duration": int(expiry_seconds),
             "duration_unit": "s",
-            "underlying_symbol": resolved_symbol,
+            "symbol": resolved_symbol,
             "req_id": f"proposal-{user_id}-{int(stake)}-{expiry_seconds}",
             "subscribe": 1,
         }
@@ -204,7 +209,7 @@ class TradeExecutionService:
             "proposal_id": str(proposal_id),
             "contract_type": contract_type,
             "market_symbol": resolved_symbol,
-            "underlying_symbol": resolved_symbol,
+            "symbol": resolved_symbol,
             "amount": float(stake),
             "currency": str(currency or "USD"),
             "duration": int(expiry_seconds),
@@ -343,6 +348,7 @@ class TradeExecutionService:
     @staticmethod
     def build_proposal_payload(symbol: str, direction: str, stake: float, expiry_seconds: int = settings.default_expiry_seconds) -> dict[str, Any]:
         contract_type = TradeExecutionService.resolve_contract_direction(direction)
+        resolved_symbol = TradeExecutionService.resolve_market_symbol(symbol)
         return {
             "proposal": 1,
             "amount": float(stake),
@@ -351,6 +357,6 @@ class TradeExecutionService:
             "currency": "USD",
             "duration": int(expiry_seconds),
             "duration_unit": "s",
-            "underlying_symbol": TradeExecutionService.resolve_market_symbol(symbol),
+            "symbol": resolved_symbol,
             "req_id": f"proposal-{symbol}-{expiry_seconds}",
         }
