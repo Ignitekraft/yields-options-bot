@@ -1,3 +1,4 @@
+import asyncio
 import importlib
 import json
 import os
@@ -5,6 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+from app.bot.callbacks import dispatch_callback
 from app.bot.handlers import build_auto_trade_setup, handle_auto_trade_start, handle_start
 from app.config import settings
 from app.main import app
@@ -170,6 +172,37 @@ class MarketDataTests(unittest.TestCase):
         self.assertGreater(setup["confidence"], 0.0)
         self.assertIn("AI", setup["reasoning"])
         self.assertIn("Technical", setup["reasoning"])
+
+    def test_confirmation_callback_executes_trade(self):
+        class FakeQuery:
+            def __init__(self):
+                self.data = "AUTO_TRADE_CONFIRM"
+                self.edited = None
+
+            async def answer(self):
+                return None
+
+            async def edit_message_text(self, text, **kwargs):
+                self.edited = text
+
+        class FakeUpdate:
+            def __init__(self):
+                self.callback_query = FakeQuery()
+                self.effective_user = type("User", (), {"id": "confirm-user"})()
+
+        run_state = AutoTradeService()
+        run_state.start_run("confirm-user", "step_300", "BULLISH", 1.0)
+
+        with patch("app.bot.callbacks.auto_trade_service", run_state), \
+             patch("app.bot.callbacks.execute_trade", new=AsyncMock(return_value={
+                 "status": "accepted",
+                 "contract_id": "con-123",
+                 "proposal_id": "prop-123",
+                 "buy_price": 1.0,
+             })) as execute_trade_mock:
+            asyncio.run(dispatch_callback(FakeUpdate(), None))
+
+        execute_trade_mock.assert_called_once()
 
     def test_oauth_state_and_pkce_flow(self):
         service = AuthService()

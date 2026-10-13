@@ -25,6 +25,10 @@ class TradeRunState:
     total_staked: float = 0.0
     total_profit_loss: float = 0.0
     trade_count: int = 0
+    proposal_id: str | None = None
+    contract_id: str | None = None
+    market_symbol: str | None = None
+    contract_type: str | None = None
 
 
 class AutoTradeService:
@@ -33,6 +37,7 @@ class AutoTradeService:
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self._runs: dict[str, TradeRunState] = {}
+        self._executing: set[str] = set()
 
     def is_running(self, user_id: str | int) -> bool:
         with self._lock:
@@ -80,6 +85,7 @@ class AutoTradeService:
             return None
         state.status = "cancelled"
         state.completed_at = datetime.now(timezone.utc).isoformat()
+        self._executing.discard(key)
         return state
 
     def finish_run(self, user_id: str | int, status: str = "completed") -> TradeRunState | None:
@@ -89,6 +95,7 @@ class AutoTradeService:
             return None
         state.status = status
         state.completed_at = datetime.now(timezone.utc).isoformat()
+        self._executing.discard(key)
         return state
 
     def advance_after_result(self, user_id: str | int, won: bool) -> TradeRunState:
@@ -105,8 +112,10 @@ class AutoTradeService:
             if state.cycle >= state.max_cycles:
                 state.status = "completed"
                 state.completed_at = datetime.now(timezone.utc).isoformat()
+                self._executing.discard(key)
                 return state
             state.cycle += 1
+            self._executing.discard(key)
             return state
 
         state.martingale_step += 1
@@ -116,7 +125,19 @@ class AutoTradeService:
         if state.martingale_step > settings.max_martingale_steps:
             state.status = "safety_limit_reached"
             state.completed_at = datetime.now(timezone.utc).isoformat()
+        self._executing.discard(key)
         return state
+
+    def mark_executing(self, user_id: str | int) -> bool:
+        key = str(user_id)
+        with self._lock:
+            if key in self._executing:
+                return False
+            self._executing.add(key)
+            return True
+
+    def clear_execution_lock(self, user_id: str | int) -> None:
+        self._executing.discard(str(user_id))
 
     def log_run(self, user_id: str | int, **kwargs: Any) -> dict[str, Any]:
         state = self.get_run(user_id)
@@ -128,3 +149,4 @@ class AutoTradeService:
 
     def clear_run(self, user_id: str | int) -> None:
         self._runs.pop(str(user_id), None)
+        self._executing.discard(str(user_id))

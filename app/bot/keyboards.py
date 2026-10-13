@@ -65,6 +65,17 @@ class TelegramKeyboard:
         )
 
     @staticmethod
+    def confirmation_keyboard() -> object:
+        if InlineKeyboardMarkup is None:
+            return [["✅ Confirm & Start"], ["✕ Cancel"]]
+        return InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("✅ Confirm & Start", callback_data="AUTO_TRADE_CONFIRM")],
+                [InlineKeyboardButton("✕ Cancel", callback_data="AUTO_TRADE_CANCEL")],
+            ]
+        )
+
+    @staticmethod
     def status_keyboard() -> object:
         if InlineKeyboardMarkup is None:
             return [["Refresh"], ["Disconnect"]]
