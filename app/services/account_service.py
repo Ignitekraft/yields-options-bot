@@ -11,17 +11,15 @@ class AccountService:
         self.auth_service = auth_service
 
     def get_account_status(self, telegram_user_id: str) -> Dict[str, Any]:
-        """Retrieve connection status and account details for a Telegram user."""
-        account = self.auth_service.get_connected_account(telegram_user_id)
+        """Retrieve connection status for a Telegram user from the global token store."""
+        account = self.auth_service.get_connected_account(str(telegram_user_id))
         if not account or not account.get("access_token"):
-            return {
-                "connected": False,
-            }
+            return {"connected": False}
 
         return {
             "connected": True,
-            "account_id": account.get("account_id", "Demo Account"),
-            "type": account.get("type", "Demo"),
-            "currency": account.get("currency", "USD"),
-            "balance": account.get("balance", "0.00"),
+            "account_id": "OAuth Connected",
+            "type": "Demo/Real",
+            "currency": "USD",
+            "balance": "Ready",
         }
