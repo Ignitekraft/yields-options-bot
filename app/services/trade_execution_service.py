@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any
+from urllib.parse import urlparse
 
+import httpx
 import websockets
 
 from app.config import settings
@@ -75,15 +78,76 @@ class TradeExecutionService:
         return f"wss://ws.derivws.com/websockets/v3?app_id={app_id_value}"
 
     @staticmethod
-    async def _send_ws_request(access_token: str, payload: dict[str, Any], app_id: str | int | None = None) -> dict[str, Any]:
-        ws_url = TradeExecutionService.get_ws_url(app_id)
-        async with websockets.connect(ws_url) as websocket:
-            await websocket.send(json.dumps({"authorize": access_token}))
-            auth_response = json.loads(await websocket.recv())
-            if isinstance(auth_response, dict) and auth_response.get("error"):
-                raise ValueError(str(auth_response.get("error")).replace("\n", " "))
-            await websocket.send(json.dumps(payload))
-            response_text = await websocket.recv()
+    async def request_otp_url(access_token: str, account_id: str) -> str:
+        if not access_token:
+            raise ValueError("Missing Deriv access token.")
+        if not account_id:
+            raise ValueError("Missing Deriv account_id.")
+
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            response = await client.post(
+                f"https://api.derivws.com/trading/v1/options/accounts/{account_id}/otp",
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Content-Type": "application/json",
+                },
+            )
+
+        if response.status_code != 200:
+            details = (response.text or "")[:200].replace("\n", " ")
+            raise ValueError(f"OTP request rejected: HTTP {response.status_code}. {details}")
+
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise ValueError("OTP response was not valid JSON.") from exc
+
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(data, dict):
+            raise ValueError("OTP response was malformed: missing data object.")
+
+        ws_url = data.get("url")
+        if not isinstance(ws_url, str) or not ws_url.strip():
+            raise ValueError("OTP response missing a valid data.url.")
+
+        parsed = urlparse(ws_url)
+        if parsed.scheme != "wss":
+            raise ValueError("OTP returned a non-secure WebSocket URL.")
+        if not parsed.netloc:
+            raise ValueError("OTP returned an invalid WebSocket URL.")
+        if "/websockets/" not in parsed.path.lower():
+            raise ValueError("OTP URL is not a Deriv WebSocket endpoint.")
+
+        return ws_url.strip()
+
+    @staticmethod
+    async def _send_ws_request(access_token: str, payload: dict[str, Any], account_id: str, app_id: str | int | None = None) -> dict[str, Any]:
+        otp_url = await TradeExecutionService.request_otp_url(access_token, account_id)
+        parsed = urlparse(otp_url)
+        safe_target = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+        logger.info(
+            "Deriv websocket stage=handshake_start account_id=%s account_type=%s host=%s path=%s",
+            account_id,
+            "real" if str(account_id).lower().startswith("real") else "demo",
+            parsed.netloc,
+            parsed.path,
+        )
+
+        try:
+            async with websockets.connect(otp_url, open_timeout=15, ping_timeout=20, ping_interval=20) as websocket:
+                await asyncio.wait_for(websocket.send(json.dumps(payload)), timeout=15)
+                response_text = await asyncio.wait_for(websocket.recv(), timeout=20)
+        except Exception as exc:  # pragma: no cover - network failure guard
+            logger.warning(
+                "Deriv websocket stage=handshake_failed account_id=%s account_type=%s target=%s exception=%s: %s",
+                account_id,
+                "real" if str(account_id).lower().startswith("real") else "demo",
+                safe_target,
+                type(exc).__name__,
+                str(exc)[:300],
+            )
+            raise
+
         response = json.loads(response_text) if isinstance(response_text, str) else response_text
         if isinstance(response, dict) and response.get("error"):
             raise ValueError(str(response.get("error")))
@@ -118,7 +182,12 @@ class TradeExecutionService:
             "req_id": f"proposal-{user_id}-{int(stake)}-{expiry_seconds}",
             "subscribe": 1,
         }
-        response = await self._send_ws_request(access_token, payload, app_id=settings.deriv_app_id or settings.deriv_client_id)
+        response = await self._send_ws_request(
+            access_token,
+            payload,
+            account_id,
+            app_id=settings.deriv_app_id or settings.deriv_client_id,
+        )
         proposal = response.get("proposal") if isinstance(response, dict) else None
         if proposal is None and isinstance(response, dict) and response.get("proposal_id"):
             proposal = response
@@ -162,7 +231,12 @@ class TradeExecutionService:
             "contract_type": contract_type,
             "symbol": market_symbol,
         }
-        response = await self._send_ws_request(access_token, payload, app_id=settings.deriv_app_id or settings.deriv_client_id)
+        response = await self._send_ws_request(
+            access_token,
+            payload,
+            account_id,
+            app_id=settings.deriv_app_id or settings.deriv_client_id,
+        )
         if isinstance(response, dict) and response.get("error"):
             raise ValueError(str(response.get("error")))
 
@@ -198,7 +272,12 @@ class TradeExecutionService:
             "subscribe": 1,
             "req_id": f"monitor-{user_id}-{contract_id}",
         }
-        response = await self._send_ws_request(access_token, payload, app_id=settings.deriv_app_id or settings.deriv_client_id)
+        response = await self._send_ws_request(
+            access_token,
+            payload,
+            account_id,
+            app_id=settings.deriv_app_id or settings.deriv_client_id,
+        )
         contract = response.get("proposal_open_contract") if isinstance(response, dict) else None
         if not isinstance(contract, dict):
             contract = response if isinstance(response, dict) else {}

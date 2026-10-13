@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from typing import Any, Dict, Iterable, List, Optional
+from urllib.parse import urlparse
 
 import httpx
 import websockets
@@ -44,6 +45,51 @@ class AccountService:
             "account_id": account_id,
             "status": "unavailable",
         }
+
+    @staticmethod
+    async def request_account_otp_url(access_token: str, account_id: str) -> str:
+        if not access_token:
+            raise ValueError("Missing Deriv access token.")
+        if not account_id:
+            raise ValueError("Missing Deriv account_id.")
+
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            response = await client.post(
+                DERIV_OTP_URL.format(account_id=account_id),
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Content-Type": "application/json",
+                },
+            )
+
+        if response.status_code != 200:
+            details = (response.text or "")[:200].replace("\n", " ")
+            raise ValueError(f"OTP request rejected: HTTP {response.status_code}. {details}")
+
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise ValueError("OTP response was not valid JSON.") from exc
+
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(data, dict):
+            raise ValueError("OTP response was malformed: missing data object.")
+
+        ws_url = data.get("url")
+        if not isinstance(ws_url, str) or not ws_url.strip():
+            raise ValueError("OTP response missing a valid data.url.")
+
+        parsed = urlparse(ws_url)
+        if parsed.scheme != "wss":
+            raise ValueError("OTP returned a non-secure WebSocket URL.")
+        if not parsed.netloc:
+            raise ValueError("OTP returned an invalid WebSocket URL.")
+        normalized_path = (parsed.path or "").lower()
+        normalized_query = (parsed.query or "").lower()
+        if "websocket" not in normalized_path and "websocket" not in normalized_query and "ws" not in normalized_path and "ws" not in normalized_query:
+            raise ValueError("OTP URL is not a valid WebSocket endpoint.")
+
+        return ws_url.strip()
 
     @staticmethod
     def _normalize_account_list(payload: Any) -> List[Dict[str, Any]]:
@@ -148,43 +194,19 @@ class AccountService:
                     }
 
                     try:
-                        otp_response = await client.post(
-                            DERIV_OTP_URL.format(account_id=account_id),
-                            headers={
-                                "Authorization": f"Bearer {token}",
-                                "Content-Type": "application/json",
-                            },
-                        )
+                        ws_url = await AccountService.request_account_otp_url(token, account_id)
+                        parsed = urlparse(ws_url)
                         logger.info(
-                            "Deriv OTP status for user=%s account_id=%s account_type=%s status=%s",
+                            "Deriv OTP ready for user=%s account_id=%s account_type=%s host=%s path=%s",
                             user_key,
                             account_id,
                             account_type,
-                            otp_response.status_code,
+                            parsed.netloc,
+                            parsed.path,
                         )
 
-                        if otp_response.status_code != 200:
-                            logger.warning(
-                                "Deriv OTP request failed for user=%s account_id=%s status=%s body=%s",
-                                user_key,
-                                account_id,
-                                otp_response.status_code,
-                                otp_response.text[:500],
-                            )
-                            account_entry["status"] = "error"
-                            result[result_key] = account_entry
-                            continue
-
-                        otp_payload = otp_response.json()
-                        ws_url = otp_payload.get("data", {}).get("url") if isinstance(otp_payload, dict) else None
-                        if not ws_url:
-                            logger.warning("Deriv OTP response missing websocket URL for user=%s account_id=%s", user_key, account_id)
-                            account_entry["status"] = "error"
-                            result[result_key] = account_entry
-                            continue
-
                         try:
-                            async with websockets.connect(ws_url) as websocket:
+                            async with websockets.connect(ws_url, open_timeout=15, ping_timeout=20, ping_interval=20) as websocket:
                                 await websocket.send(json.dumps({"balance": 1, "subscribe": 1, "req_id": 1}))
                                 raw_message = await websocket.recv()
                         except Exception as exc:  # websocket connection/recv failure

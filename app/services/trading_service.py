@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
+from urllib.parse import urlparse
 
+import httpx
 import websockets
 
 from app.config import settings
@@ -124,6 +127,51 @@ class TradingService:
                 return {"status": "closed", "contract_id": contract_id, "settlement": settlement_price}
         return {"status": "not_found", "contract_id": contract_id}
 
+    @staticmethod
+    async def request_otp_url(access_token: str, account_id: str) -> str:
+        if not access_token:
+            raise ValueError("User not authenticated with Deriv.")
+        if not account_id:
+            raise ValueError("No Deriv account_id is available for this user.")
+
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            response = await client.post(
+                f"https://api.derivws.com/trading/v1/options/accounts/{account_id}/otp",
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Content-Type": "application/json",
+                },
+            )
+
+        if response.status_code != 200:
+            details = (response.text or "")[:200].replace("\n", " ")
+            raise ValueError(f"OTP request rejected: HTTP {response.status_code}. {details}")
+
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise ValueError("OTP response was not valid JSON.") from exc
+
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(data, dict):
+            raise ValueError("OTP response was malformed: missing data object.")
+
+        ws_url = data.get("url")
+        if not isinstance(ws_url, str) or not ws_url.strip():
+            raise ValueError("OTP response missing a valid data.url.")
+
+        parsed = urlparse(ws_url)
+        if parsed.scheme != "wss":
+            raise ValueError("OTP returned a non-secure WebSocket URL.")
+        if not parsed.netloc:
+            raise ValueError("OTP returned an invalid WebSocket URL.")
+        normalized_path = (parsed.path or "").lower()
+        normalized_query = (parsed.query or "").lower()
+        if "websocket" not in normalized_path and "websocket" not in normalized_query and "ws" not in normalized_path and "ws" not in normalized_query:
+            raise ValueError("OTP URL is not a valid WebSocket endpoint.")
+
+        return ws_url.strip()
+
     async def execute_trade_cycles(
         self,
         telegram_user_id: str | int,
@@ -137,17 +185,18 @@ class TradingService:
         if not token:
             raise ValueError("User not authenticated with Deriv.")
 
+        if self.auth_service is not None and hasattr(self.auth_service, "get_connected_account"):
+            account_record = self.auth_service.get_connected_account(str(telegram_user_id)) or {}
+            account_id = account_record.get("account_id") if isinstance(account_record, dict) else None
+        else:
+            account_id = None
+
         resolved_symbol = self.normalize_step_symbol(symbol)
         resolved_contract_type = self.resolve_contract_type(contract_type)
         executed_trades: list[dict[str, Any]] = []
-        ws_url = self.get_deriv_ws_url()
+        ws_url = self.get_deriv_ws_url() if not account_id else await self.request_otp_url(token, account_id)
 
-        async with websockets.connect(ws_url) as websocket:
-            await websocket.send(json.dumps({"authorize": token}))
-            auth_response = json.loads(await websocket.recv())
-            if isinstance(auth_response, dict) and "error" in auth_response:
-                raise ValueError(f"Deriv Auth Error: {auth_response['error']['message']}")
-
+        async with websockets.connect(ws_url, open_timeout=15, ping_timeout=20, ping_interval=20) as websocket:
             for cycle_index in range(max(1, int(cycles))):
                 try:
                     proposal_req = {
@@ -162,11 +211,14 @@ class TradingService:
                         "underlying_symbol": resolved_symbol,
                         "subscribe": 1,
                     }
-                    await websocket.send(json.dumps(proposal_req))
-                    proposal_response = json.loads(await websocket.recv())
-                    if isinstance(proposal_response, dict) and "error" in proposal_response:
-                        print(f"Cycle {cycle_index + 1} Proposal Error: {proposal_response['error']['message']}")
-                        continue
+                    await asyncio.wait_for(websocket.send(json.dumps(proposal_req)), timeout=15)
+                    proposal_response = json.loads(await asyncio.wait_for(websocket.recv(), timeout=20))
+                    if isinstance(proposal_response, dict):
+                        if "echo_req" in proposal_response and "authorize" in proposal_response["echo_req"]:
+                            proposal_response = json.loads(await asyncio.wait_for(websocket.recv(), timeout=20))
+                        if "error" in proposal_response:
+                            print(f"Cycle {cycle_index + 1} Proposal Error: {proposal_response['error']['message']}")
+                            continue
 
                     proposal = proposal_response.get("proposal") if isinstance(proposal_response, dict) else None
                     if not isinstance(proposal, dict):
@@ -179,8 +231,8 @@ class TradingService:
                         continue
 
                     buy_req = {"buy": proposal_id, "price": float(ask_price), "req_id": f"buy-{cycle_index + 1}"}
-                    await websocket.send(json.dumps(buy_req))
-                    buy_response = json.loads(await websocket.recv())
+                    await asyncio.wait_for(websocket.send(json.dumps(buy_req)), timeout=15)
+                    buy_response = json.loads(await asyncio.wait_for(websocket.recv(), timeout=20))
                     if isinstance(buy_response, dict) and "error" in buy_response:
                         print(f"Cycle {cycle_index + 1} Buy Error: {buy_response['error']['message']}")
                         continue
