@@ -36,10 +36,10 @@ async def handle_balance(telegram_user_id: str | int) -> str:
         return "🔴 Deriv account not connected. Use /connect to link your account."
 
     balances = await account_service.get_live_balances(str(telegram_user_id))
-    
+
     return (
-        f"💰 **Real:** {balances.get('real', '0.00 USD')}\n"
-        f"🎮 **Demo:** {balances.get('demo', '0.00 USD')}\n"
+        f"💰 **Real:** {balances.get('real', '0.00 USD')}\n\n"
+        f"🎮 **Demo:** {balances.get('demo', '0.00 USD')}\n\n"
         f"💎 **Tokens:** {balances.get('tokens', 50)}"
     )
 

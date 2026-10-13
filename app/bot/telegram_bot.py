@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from app.config import settings
-from app.bot.handlers import handle_connect, handle_logout, handle_scan, handle_start, handle_status
+from app.bot.handlers import handle_balance, handle_connect, handle_logout, handle_scan, handle_start, handle_status
 
 try:
     from telegram import Update
@@ -30,7 +30,12 @@ def create_application():
         await update.message.reply_text(handle_connect(user_id))
 
     async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await update.message.reply_text(handle_status(False))
+        user_id = update.effective_user.id
+        await update.message.reply_text(handle_status(user_id))
+
+    async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        user_id = update.effective_user.id
+        await update.message.reply_text(await handle_balance(user_id))
 
     async def logout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = update.effective_user.id
@@ -42,6 +47,7 @@ def create_application():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("connect", connect))
     application.add_handler(CommandHandler("status", status))
+    application.add_handler(CommandHandler("balance", balance))
     application.add_handler(CommandHandler("logout", logout))
     application.add_handler(CommandHandler("scan", scan))
     return application

@@ -22,10 +22,10 @@ class AccountService:
 
         return {
             "connected": True,
-            "account_id": "OAuth Active",
-            "type": "Demo / Real",
-            "currency": "USD",
-            "balance": "Ready",
+            "account_id": account.get("account_id", "OAuth Active"),
+            "type": account.get("account_type", "Demo / Real"),
+            "currency": account.get("currency", "USD"),
+            "balance": account.get("balance", "Ready"),
         }
 
     async def get_live_balances(self, telegram_user_id: str | int) -> Dict[str, Any]:
