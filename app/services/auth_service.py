@@ -5,12 +5,30 @@ import hashlib
 import json
 import os
 import secrets
+from pathlib import Path
 from typing import Any, Dict, Optional
 import httpx
 
-STATE_FILE = "/tmp/yields_oauth_states.json"
-TOKEN_FILE = "/tmp/yields_token_store.json"
-TOKEN_COUNT_FILE = "/tmp/yields_user_tokens.json"
+STATE_DIR = os.getenv(
+    "YIELDS_STATE_DIR",
+    os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".yields_state"),
+)
+
+
+def _ensure_state_dir() -> Path:
+    path = Path(STATE_DIR)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _state_file(filename: str) -> str:
+    _ensure_state_dir()
+    return str(Path(STATE_DIR) / filename)
+
+
+STATE_FILE = _state_file("yields_oauth_states.json")
+TOKEN_FILE = _state_file("yields_token_store.json")
+TOKEN_COUNT_FILE = _state_file("yields_user_tokens.json")
 
 
 class AuthService:

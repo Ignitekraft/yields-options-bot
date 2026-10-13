@@ -2,12 +2,19 @@ import json
 import unittest
 from unittest.mock import patch
 
+from app.bot.handlers import handle_start
+from app.config import settings
 from app.main import app
+from app.models.ai_analysis import AutoTradeAnalysis
+from app.models.market import MarketSnapshot
 from app.services.account_service import AccountService
 from app.services.auth_service import AuthService
+from app.services.auto_trade_service import AutoTradeService
 from app.services.deriv.auth import build_deriv_oauth_url
 from app.services.deriv.market_data import MarketDataService
+from app.services.gemini_service import GeminiService
 from app.services.scanner import SignalResult, YieldsScanner
+from app.services.trade_execution_service import TradeExecutionService
 from app.services.trading_service import TradingService
 
 
@@ -210,6 +217,65 @@ class MarketDataTests(unittest.TestCase):
 
     def test_fastapi_app_registers_startup_hook(self):
         self.assertTrue(app.router.on_startup)
+
+    def test_unauthenticated_user_sees_onboarding_screen(self):
+        message = handle_start("missing-user")
+        self.assertIn("🤖 YIELDS", message)
+        self.assertIn("Connect your Deriv account", message)
+        self.assertIn("OAuth", message)
+
+    def test_authenticated_user_sees_dashboard(self):
+        auth = AuthService()
+        auth.connect_user(
+            "dashboard-user",
+            {
+                "access_token": "abc123",
+                "refresh_token": "def456",
+                "expires_in": 3600,
+                "token_type": "Bearer",
+            },
+        )
+
+        message = handle_start("dashboard-user")
+        self.assertIn("Welcome back", message)
+        self.assertIn("Gemini scans 5 Step Indices", message)
+        self.assertIn("Expiry: 30 seconds", message)
+
+    def test_exactly_five_step_markets_are_normalized(self):
+        scanner = YieldsScanner()
+        snapshots = scanner.collect_step_market_snapshots(MarketDataService())
+        self.assertEqual(len(snapshots), 5)
+        self.assertEqual([snapshot.symbol for snapshot in snapshots], list(settings.auto_trade_markets))
+
+    def test_gemini_service_returns_valid_structured_analysis(self):
+        scanner = YieldsScanner()
+        snapshots = scanner.collect_step_market_snapshots(MarketDataService())
+        analysis = GeminiService(api_key="fake-key", model="gemini-2.0-flash").analyze(snapshots)
+        self.assertIsInstance(analysis, AutoTradeAnalysis)
+        self.assertIn(analysis.winner_symbol, settings.auto_trade_markets)
+
+    def test_fixed_expiry_is_always_thirty_seconds(self):
+        payload = TradeExecutionService.build_proposal_payload("step_300", "BULLISH", 10.0, expiry_seconds=30)
+        self.assertEqual(payload["duration"], 30)
+        self.assertEqual(payload["duration_unit"], "s")
+
+    def test_martingale_state_machine(self):
+        service = AutoTradeService()
+        run = service.start_run("martingale-user", "step_300", "BULLISH", 10.0)
+        self.assertEqual(run.current_stake, 10.0)
+        service.advance_after_result("martingale-user", False)
+        self.assertEqual(service.get_run("martingale-user").current_stake, 20.0)
+        service.advance_after_result("martingale-user", False)
+        self.assertEqual(service.get_run("martingale-user").current_stake, 40.0)
+        service.advance_after_result("martingale-user", True)
+        self.assertEqual(service.get_run("martingale-user").cycle, 2)
+        self.assertEqual(service.get_run("martingale-user").current_stake, 10.0)
+
+    def test_duplicate_auto_trade_start_is_rejected(self):
+        service = AutoTradeService()
+        service.start_run("dup-user", "step_200", "BEARISH", 5.0)
+        with self.assertRaises(RuntimeError):
+            service.start_run("dup-user", "step_200", "BEARISH", 5.0)
 
 
 if __name__ == "__main__":

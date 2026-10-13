@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+from app.bot.callbacks import dispatch_callback
+from app.bot.handlers import auth_service, handle_balance, handle_connect, handle_logout, handle_scan, handle_start, handle_status
+from app.bot.keyboards import TelegramKeyboard
 from app.config import settings
-from app.bot.handlers import handle_balance, handle_connect, handle_logout, handle_scan, handle_start, handle_status
 
 try:
     from telegram import Update
-    from telegram.ext import Application, CommandHandler, ContextTypes
+    from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
 except ImportError:  # pragma: no cover - optional dependency in local dev sandbox
     Update = object
     ContextTypes = object
     Application = None
+    CallbackQueryHandler = None
     CommandHandler = None
 
 
@@ -23,11 +26,14 @@ def create_application():
     application = Application.builder().token(settings.telegram_bot_token).build()
 
     async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await update.message.reply_text(handle_start())
+        user_id = update.effective_user.id
+        connected = bool(auth_service.get_valid_access_token(str(user_id)))
+        keypad = TelegramKeyboard.dashboard_keyboard() if connected else TelegramKeyboard.start_keyboard()
+        await update.message.reply_text(handle_start(user_id), reply_markup=keypad)
 
     async def connect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = update.effective_user.id
-        await update.message.reply_text(handle_connect(user_id))
+        await update.message.reply_text(handle_connect(user_id), reply_markup=TelegramKeyboard.start_keyboard())
 
     async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = update.effective_user.id
@@ -50,4 +56,6 @@ def create_application():
     application.add_handler(CommandHandler("balance", balance))
     application.add_handler(CommandHandler("logout", logout))
     application.add_handler(CommandHandler("scan", scan))
+    if CallbackQueryHandler is not None:
+        application.add_handler(CallbackQueryHandler(dispatch_callback))
     return application

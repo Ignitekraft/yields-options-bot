@@ -3,6 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
+from app.config import settings
+from app.models.market import MarketSnapshot
+
 
 @dataclass
 class SignalResult:
@@ -61,3 +64,56 @@ class YieldsScanner:
             analysis_history.append(live_tick)
             return self.analyze_history(analysis_history, symbol=symbol or live_tick.get("symbol"))
         return self.analyze_history(history, symbol=symbol)
+
+    def normalize_step_market(self, symbol: str, display_name: str, history: List[Dict[str, Any]]) -> MarketSnapshot:
+        if not history:
+            return MarketSnapshot(
+                symbol=symbol,
+                display_name=display_name,
+                current_price=0.0,
+                prices=[],
+                timestamps=[],
+                trend="neutral",
+                momentum=0.0,
+                volatility=0.0,
+                recent_high=0.0,
+                recent_low=0.0,
+                indicators={},
+                data_quality="insufficient",
+            )
+
+        prices = [float(item.get("quote", 0.0)) for item in history]
+        recent_high = max(prices)
+        recent_low = min(prices)
+        current_price = prices[-1]
+        previous_price = prices[-2] if len(prices) > 1 else current_price
+        momentum = round(current_price - previous_price, 4)
+        volatility = round((recent_high - recent_low) / max(len(prices), 1), 4)
+        trend = "bullish" if momentum >= 0 else "bearish"
+
+        return MarketSnapshot(
+            symbol=symbol,
+            display_name=display_name,
+            current_price=current_price,
+            prices=prices,
+            timestamps=[str(item.get("timestamp", "")) for item in history],
+            trend=trend,
+            momentum=momentum,
+            volatility=volatility,
+            recent_high=recent_high,
+            recent_low=recent_low,
+            indicators={
+                "price_change": momentum,
+                "range": round(recent_high - recent_low, 4),
+                "trend_strength": round(abs(momentum) / max(volatility, 0.01), 4),
+            },
+            data_quality="good",
+        )
+
+    def collect_step_market_snapshots(self, market_data_service) -> List[MarketSnapshot]:
+        snapshots: List[MarketSnapshot] = []
+        for symbol in settings.auto_trade_markets:
+            display_name = symbol.replace("step_", "Step ").replace("_", " ").title()
+            history = market_data_service.get_historical_ticks(symbol, count=25)
+            snapshots.append(self.normalize_step_market(symbol, display_name, history))
+        return snapshots
