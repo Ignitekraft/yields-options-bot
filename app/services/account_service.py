@@ -39,20 +39,52 @@ class AccountService:
         real_balance = "0.00 USD"
         demo_balance = "0.00 USD"
 
+        def _format_balance(entry: Dict[str, Any]) -> str:
+            currency = entry.get("currency", "USD")
+            balance = entry.get("balance")
+            if balance is None:
+                balance = entry.get("amount", 0.0)
+            return f"{balance} {currency}"
+
         try:
             async with websockets.connect(DERIV_WS_URL) as websocket:
                 await websocket.send(json.dumps({"authorize": token}))
                 auth_resp = json.loads(await websocket.recv())
-                
+
                 if "error" not in auth_resp:
                     account_list = auth_resp.get("authorize", {}).get("account_list", [])
-                    for acc in account_list:
-                        curr = acc.get("currency", "USD")
-                        bal = acc.get("balance", 0.0)
-                        if acc.get("is_virtual"):
-                            demo_balance = f"{bal} {curr}"
-                        else:
-                            real_balance = f"{bal} {curr}"
+                    if account_list:
+                        for acc in account_list:
+                            curr = acc.get("currency", "USD")
+                            bal = acc.get("balance")
+                            if bal is None:
+                                bal = acc.get("amount", 0.0)
+                            if acc.get("is_virtual"):
+                                demo_balance = f"{bal} {curr}"
+                            else:
+                                real_balance = f"{bal} {curr}"
+
+                await websocket.send(json.dumps({"balance": 1, "subscribe": 1}))
+                balance_resp = json.loads(await websocket.recv())
+
+                if isinstance(balance_resp, dict):
+                    balance_entry = balance_resp.get("balance")
+                    if isinstance(balance_entry, dict):
+                        if balance_entry.get("currency"):
+                            if balance_entry.get("demo"):
+                                demo_balance = _format_balance(balance_entry)
+                            elif balance_entry.get("amount") is not None:
+                                real_balance = _format_balance(balance_entry)
+
+                    if isinstance(balance_resp.get("authorize"), dict):
+                        account_list = balance_resp.get("authorize", {}).get("account_list", [])
+                        for acc in account_list:
+                            curr = acc.get("currency", "USD")
+                            bal = acc.get("balance", acc.get("amount", 0.0))
+                            if acc.get("is_virtual"):
+                                demo_balance = f"{bal} {curr}"
+                            else:
+                                real_balance = f"{bal} {curr}"
         except Exception:
             pass
 

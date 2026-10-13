@@ -1,3 +1,4 @@
+import json
 import unittest
 from unittest.mock import patch
 
@@ -113,6 +114,66 @@ class MarketDataTests(unittest.TestCase):
         buy = trading.buy_contract(proposal["proposal_id"], float(proposal["ask_price"]), "R_100")
         self.assertEqual(buy["status"], "accepted")
         self.assertIn("contract_id", buy)
+
+    def test_live_balance_fetch_uses_deriv_websocket_response(self):
+        async def run_test():
+            auth = AuthService()
+            auth.connect_user(
+                "telegram-user-live-balance",
+                {
+                    "access_token": "abc",
+                    "refresh_token": "def",
+                    "expires_in": 3600,
+                    "token_type": "Bearer",
+                    "account_id": "demo-account-001",
+                    "account_type": "Demo",
+                    "currency": "USD",
+                    "balance": 1234.56,
+                },
+            )
+
+            class FakeSocket:
+                def __init__(self):
+                    self.messages = [
+                        json.dumps({
+                            "authorize": {
+                                "account_list": [
+                                    {"is_virtual": False, "currency": "USD", "balance": 245.75},
+                                    {"is_virtual": True, "currency": "USD", "balance": 1250.0},
+                                ]
+                            }
+                        }),
+                        json.dumps({"msg_type": "balance", "balance": {"currency": "USD", "balance": 245.75}}),
+                    ]
+                    self._idx = 0
+                    self.sent = []
+
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, exc_type, exc, tb):
+                    return None
+
+                async def send(self, payload):
+                    self.sent.append(json.loads(payload))
+
+                async def recv(self):
+                    value = self.messages[self._idx]
+                    self._idx += 1
+                    return value
+
+            socket = FakeSocket()
+            with patch("app.services.account_service.websockets.connect", return_value=socket):
+                balances = await AccountService(auth).get_live_balances("telegram-user-live-balance")
+
+            self.assertEqual(socket.sent[0], {"authorize": "abc"})
+            self.assertEqual(socket.sent[1], {"balance": 1, "subscribe": 1})
+            self.assertEqual(balances["real"], "245.75 USD")
+            self.assertEqual(balances["demo"], "1250.0 USD")
+            self.assertEqual(balances["tokens"], 50)
+
+        import asyncio
+        asyncio.run(run_test())
 
     def test_fastapi_app_registers_startup_hook(self):
         self.assertTrue(app.router.on_startup)
