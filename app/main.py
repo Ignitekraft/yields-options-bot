@@ -27,7 +27,7 @@ async def startup_event() -> None:
     if application is None:
         return
 
-    application.initialize()
+    await application.initialize()
     thread = threading.Thread(
         target=application.run_polling,
         kwargs={"poll_interval": 5, "timeout": 30},
@@ -40,7 +40,7 @@ async def startup_event() -> None:
 async def shutdown_event() -> None:
     application = get_bot_application()
     if application is not None:
-        application.shutdown()
+        await application.shutdown()
 
 
 @app.get("/health")
