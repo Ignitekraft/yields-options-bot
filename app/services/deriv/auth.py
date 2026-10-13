@@ -20,18 +20,18 @@ def generate_pkce_pair() -> Tuple[str, str]:
 
 
 def build_deriv_oauth_url(client_id: str, redirect_uri: str, scope: str, state: str, code_challenge: str) -> str:
-    """Build a Deriv OAuth authorization URL with PKCE, app_id, and state validation requirements."""
+    """Build a Deriv OAuth authorization URL using the official auth.deriv.com endpoint."""
     params = {
         "response_type": "code",
         "client_id": client_id,
-        "app_id": client_id,  # Required by Deriv OAuth to prevent silent redirect drop
+        "app_id": client_id,
         "redirect_uri": redirect_uri,
         "scope": scope,
         "state": state,
         "code_challenge": code_challenge,
         "code_challenge_method": "S256",
     }
-    return "https://oauth.deriv.com/oauth2/authorize?" + urlencode(params)
+    return "https://auth.deriv.com/oauth2/auth?" + urlencode(params)
 
 
 def create_deriv_oauth_link(client_id: str, redirect_uri: str, scope: str) -> Tuple[str, str, str]:
