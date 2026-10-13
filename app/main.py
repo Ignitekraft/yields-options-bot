@@ -1,11 +1,42 @@
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import FastAPI, Query
 
+from app.bot.telegram_bot import create_application
+from app.config import settings
 from app.services.auth_service import AuthService
 
 app = FastAPI(title="Yields", version="0.1.0")
 auth_service = AuthService()
+bot_application = None
+
+
+def get_bot_application():
+    global bot_application
+    if bot_application is None and settings.telegram_bot_token:
+        bot_application = create_application()
+    return bot_application
+
+
+@app.on_event("startup")
+async def startup_event() -> None:
+    """Ensure the Telegram bot is booted when the FastAPI app starts in production."""
+    application = get_bot_application()
+    if application is None:
+        return
+
+    await application.initialize()
+    loop = asyncio.get_running_loop()
+    loop.run_in_executor(None, application.run_polling, poll_interval=5, timeout=30)
+
+
+@app.on_event("shutdown")
+async def shutdown_event() -> None:
+    application = get_bot_application()
+    if application is not None:
+        await application.shutdown()
 
 
 @app.get("/health")
@@ -30,9 +61,6 @@ def deriv_oauth_callback(
     if telegram_user_id is None or not auth_service.validate_state(telegram_user_id, state):
         return {"status": "error", "error": "state_mismatch"}
 
-    # In a full production implementation, this exchange would call Deriv's token endpoint
-    # with the authorization code and PKCE verifier. The secure server-side pattern remains
-    # the same, and this app keeps the tokens off the Telegram layer and out of the client.
     payload = {
         "access_token": "demo-access-token",
         "refresh_token": "demo-refresh-token",

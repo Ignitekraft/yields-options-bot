@@ -14,8 +14,10 @@ except ImportError:  # pragma: no cover - optional dependency in local dev sandb
 
 
 def create_application():
-    """Create the Telegram bot application if the library is available."""
+    """Create the Telegram bot application if the library and token are available."""
     if Application is None:
+        return None
+    if not settings.telegram_bot_token:
         return None
 
     application = Application.builder().token(settings.telegram_bot_token).build()

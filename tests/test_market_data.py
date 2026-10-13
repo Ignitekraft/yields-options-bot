@@ -1,5 +1,6 @@
 import unittest
 
+from app.main import app
 from app.services.account_service import AccountService
 from app.services.auth_service import AuthService
 from app.services.deriv.auth import build_deriv_oauth_url
@@ -82,6 +83,9 @@ class MarketDataTests(unittest.TestCase):
         buy = trading.buy_contract(proposal["proposal_id"], float(proposal["ask_price"]), "R_100")
         self.assertEqual(buy["status"], "accepted")
         self.assertIn("contract_id", buy)
+
+    def test_fastapi_app_registers_startup_hook(self):
+        self.assertTrue(app.router.on_startup)
 
 
 if __name__ == "__main__":
