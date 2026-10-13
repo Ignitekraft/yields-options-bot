@@ -81,10 +81,7 @@ def deriv_oauth_callback(
     state: str | None = Query(default=None),
     error: str | None = Query(default=None),
 ) -> dict[str, str]:
-    """
-    Validate the Deriv OAuth return, reject mismatches,
-    and acknowledge a successful connection.
-    """
+    """Callback from Deriv after OAuth login. Exchange the code for real tokens and complete the Telegram session."""
 
     if error:
         return {
@@ -112,23 +109,37 @@ def deriv_oauth_callback(
             "error": "state_mismatch",
         }
 
-    payload = {
-        "access_token": "demo-access-token",
-        "refresh_token": "demo-refresh-token",
-        "expires_in": 3600,
-        "token_type": "Bearer",
-        "connected_at": "2026-10-13T00:00:00Z",
-    }
+    client_id = settings.deriv_app_id or settings.deriv_client_id
 
-    auth_service.complete_oauth_session(
-        telegram_user_id,
-        payload,
-    )
+    try:
+        payload = auth_service.exchange_oauth_code(
+            telegram_user_id,
+            code,
+            settings.deriv_redirect_uri,
+            client_id,
+            settings.deriv_client_secret,
+        )
+    except Exception as exc:  # pragma: no cover - real OAuth exchange is exercised in live app flow
+        return {
+            "status": "error",
+            "error": f"oauth_exchange_failed:{exc}",
+        }
+
+    application = get_bot_application()
+    if application is not None:
+        try:
+            application.bot.send_message(
+                chat_id=int(telegram_user_id),
+                text="✅ Deriv account connected. You can now use /status, /scan, and the account tools.",
+            )
+        except Exception:
+            pass
 
     return {
         "status": "success",
         "message": "Deriv connected",
         "telegram_user_id": telegram_user_id,
+        "access_token": payload.get("access_token"),
     }
 
 

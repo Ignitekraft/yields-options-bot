@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 from app.main import app
 from app.services.account_service import AccountService
@@ -53,6 +54,35 @@ class MarketDataTests(unittest.TestCase):
         self.assertIn("response_type=code", url)
         self.assertIn("state=" + session["state"], url)
         self.assertIn("code_challenge=" + session["code_challenge"], url)
+
+    def test_oauth_code_exchange_uses_pkce_verifier(self):
+        service = AuthService()
+        session = service.begin_oauth_session("telegram-user-99")
+
+        class FakeResponse:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {
+                    "access_token": "real-access-token",
+                    "refresh_token": "real-refresh-token",
+                    "expires_in": 3600,
+                    "token_type": "Bearer",
+                }
+
+        with patch("app.services.auth_service.httpx.post", return_value=FakeResponse()) as post_mock:
+            tokens = service.exchange_oauth_code(
+                "telegram-user-99",
+                "auth-code-123",
+                "https://example.com/auth/deriv/callback",
+                "my-client-id",
+            )
+
+        self.assertEqual(tokens["access_token"], "real-access-token")
+        self.assertEqual(tokens["refresh_token"], "real-refresh-token")
+        self.assertEqual(post_mock.call_args.kwargs["data"]["code"], "auth-code-123")
+        self.assertEqual(post_mock.call_args.kwargs["data"]["code_verifier"], session["code_verifier"])
 
     def test_account_status_and_demo_trading_flow(self):
         auth = AuthService()
