@@ -74,9 +74,6 @@ class AuthService:
             "expires_in": token_payload.get("expires_in"),
             "token_type": token_payload.get("token_type", "Bearer"),
         }
-        for key, value in token_payload.items():
-            if key not in {"access_token", "refresh_token", "expires_in", "token_type"}:
-                token_data[key] = value
         tokens[user_key] = token_data
         self._save_json(TOKEN_FILE, tokens)
 
@@ -119,10 +116,6 @@ class AuthService:
         response.raise_for_status()
         data = response.json()
         return self.complete_oauth_session(telegram_user_id, data)
-
-    def connect_user(self, telegram_user_id: str | int, token_payload: Dict[str, Any]) -> Dict[str, Any]:
-        """Compatibility wrapper for the legacy user-connection flow."""
-        return self.complete_oauth_session(telegram_user_id, token_payload)
 
     def get_valid_access_token(self, telegram_user_id: str | int) -> Optional[str]:
         user_key = str(telegram_user_id)
