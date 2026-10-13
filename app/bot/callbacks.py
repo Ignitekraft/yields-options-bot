@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import asyncio
+
 from app.bot.handlers import (
+    account_mode_service,
     account_service,
-    auto_trade_service,
     auth_service,
+    auto_trade_service,
     build_auto_trade_setup,
+    build_start_message,
+    handle_account_mode_settings,
     handle_auto_trade_start,
     handle_balance,
     handle_connect,
@@ -25,52 +30,48 @@ async def execute_trade(user_id: str | int, state=None) -> dict:
     state = state or auto_trade_service.get_run(user_id)
 
     if state is None:
-        return {
-            "status": "rejected",
-            "reason": "AUTO_TRADE_NOT_FOUND",
-        }
+        return {"status": "rejected", "reason": "AUTO_TRADE_NOT_FOUND"}
 
-    if (
-        state.status == "executing"
-        or not auto_trade_service.mark_executing(user_id)
-    ):
-        return {
-            "status": "rejected",
-            "reason": "DUPLICATE_EXECUTION",
-        }
+    if state.status == "executing" or not auto_trade_service.mark_executing(user_id):
+        return {"status": "rejected", "reason": "DUPLICATE_EXECUTION"}
 
     state.status = "executing"
 
     try:
         user_key = str(user_id)
-
-        access_token = auth_service.get_valid_access_token(
-            user_key
-        )
+        access_token = auth_service.get_valid_access_token(user_key)
 
         if not access_token:
             state.status = "rejected"
+            return {"status": "rejected", "reason": "DERIV_NOT_AUTHENTICATED"}
 
-            return {
-                "status": "rejected",
-                "reason": "DERIV_NOT_AUTHENTICATED",
-            }
+        selected_mode = account_mode_service.get_mode(user_key)
 
-        # IMPORTANT:
-        # Do not trust the stale account_id stored during OAuth.
-        # Resolve the current Options account from Deriv.
+        # The preference must not change silently between setup and execution.
+        if selected_mode != state.account_mode:
+            state.status = "rejected"
+            return {"status": "rejected", "reason": "ACCOUNT_MODE_CHANGED"}
+
         account = await account_service.get_trade_account(
-            user_key
+            user_key,
+            account_mode=state.account_mode,
         )
 
-        verified_account_id = account["account_id"]
+        verified_mode = str(account.get("account_type") or "").lower()
+        if verified_mode != state.account_mode:
+            state.status = "rejected"
+            return {"status": "rejected", "reason": "ACCOUNT_MODE_VERIFICATION_FAILED"}
+
+        account_id = account.get("account_id")
         currency = account.get("currency") or "USD"
 
-        # OTP is one-use and short-lived, so request it immediately
-        # before establishing the trading WebSocket.
+        if not account_id:
+            state.status = "rejected"
+            return {"status": "rejected", "reason": "MISSING_OPTIONS_ACCOUNT_ID"}
+
         ws_url = await account_service.request_account_otp_url(
             access_token=access_token,
-            account_id=verified_account_id,
+            account_id=account_id,
         )
 
         result = await trade_execution_service.execute_trade(
@@ -78,49 +79,215 @@ async def execute_trade(user_id: str | int, state=None) -> dict:
             market_symbol=state.symbol,
             direction=state.direction,
             stake=state.current_stake,
-            account_id=verified_account_id,
+            account_id=account_id,
             access_token=access_token,
             currency=currency,
             ws_url=ws_url,
+            account_type=state.account_mode,
         )
 
-        if result.get("status") == "accepted":
-            state.proposal_id = result.get(
-                "proposal_id"
-            )
-            state.contract_id = result.get(
-                "contract_id"
-            )
-            state.status = "running"
-
-        elif result.get("status") == "unknown_buy_outcome":
-            # NEVER automatically retry a purchase whose outcome is unknown.
+        if result.get("account_type") != state.account_mode:
             state.status = "rejected"
+            return {
+                "status": "rejected",
+                "reason": "EXECUTION_ACCOUNT_MODE_MISMATCH",
+            }
 
+        if result.get("status") == "accepted":
+            state.proposal_id = result.get("proposal_id")
+            state.contract_id = result.get("contract_id")
+            state.market_symbol = result.get("underlying_symbol")
+            state.contract_type = result.get("contract_type")
+            state.status = "monitoring"
+            auto_trade_service.record_trade_stake(
+                user_id,
+                state.current_stake,
+            )
+        elif result.get("status") == "unknown_buy_outcome":
+            state.status = "unknown_buy_outcome"
         else:
             state.status = "rejected"
 
         return result
 
     except UnknownBuyOutcome as exc:
-        state.status = "rejected"
-
-        return {
-            "status": "unknown_buy_outcome",
-            "reason": str(exc),
-        }
+        state.status = "unknown_buy_outcome"
+        return {"status": "unknown_buy_outcome", "reason": str(exc)}
 
     except Exception as exc:
         state.status = "rejected"
-
-        return {
-            "status": "rejected",
-            "reason": str(exc),
-        }
+        return {"status": "rejected", "reason": str(exc)}
 
     finally:
-        auto_trade_service.clear_execution_lock(
-            user_id
+        auto_trade_service.clear_execution_lock(user_id)
+
+
+async def _monitor_settlement(user_id: str | int, state) -> dict:
+    user_key = str(user_id)
+    access_token = auth_service.get_valid_access_token(user_key)
+
+    if not access_token:
+        raise RuntimeError("DERIV_NOT_AUTHENTICATED_DURING_MONITORING")
+
+    account = await account_service.get_trade_account(
+        user_key,
+        account_mode=state.account_mode,
+    )
+
+    if str(account.get("account_type") or "").lower() != state.account_mode:
+        raise RuntimeError("ACCOUNT_MODE_VERIFICATION_FAILED_DURING_MONITORING")
+
+    ws_url = await account_service.request_account_otp_url(
+        access_token=access_token,
+        account_id=account["account_id"],
+    )
+
+    return await trade_execution_service.monitor_contract(
+        contract_id=state.contract_id,
+        ws_url=ws_url,
+        timeout_seconds=75,
+    )
+
+
+async def _run_auto_trade(update, state) -> None:
+    query = update.callback_query
+    user_id = update.effective_user.id
+    settled_contracts: list[dict] = []
+
+    while True:
+        current = auto_trade_service.get_run(user_id)
+
+        if current is None:
+            await query.edit_message_text("⚠️ Auto Trade state was not found.")
+            return
+
+        if current.status == "cancelled":
+            await query.edit_message_text("🛑 Auto Trade cancelled.")
+            return
+
+        if current.status == "completed":
+            await query.edit_message_text(
+                "🏁 AUTO TRADE COMPLETE\n\n"
+                f"Winning cycles: {current.wins}/{current.max_cycles}\n"
+                f"Settled contracts: {current.trade_count}\n"
+                f"Total staked: ${current.total_staked:.2f}\n"
+                f"Net profit/loss: ${current.total_profit_loss:.2f}\n"
+                f"Account mode: {current.account_mode.upper()}"
+            )
+            return
+
+        if current.status == "safety_limit_reached":
+            await query.edit_message_text(
+                "🛑 MARTINGALE SAFETY LIMIT REACHED\n\n"
+                f"Winning cycles: {current.wins}/{current.max_cycles}\n"
+                f"Settled contracts: {current.trade_count}\n"
+                f"Total staked: ${current.total_staked:.2f}\n"
+                f"Net profit/loss: ${current.total_profit_loss:.2f}\n\n"
+                "Auto Trade has stopped. No further purchase will be attempted."
+            )
+            return
+
+        if current.status not in {"running", "monitoring"}:
+            await query.edit_message_text(
+                "⚠️ Auto Trade stopped.\n\n"
+                f"State: {current.status}"
+            )
+            return
+
+        if current.status == "monitoring":
+            try:
+                settlement = await _monitor_settlement(user_id, current)
+            except Exception as exc:
+                auto_trade_service.finish_run(user_id, "monitoring_error")
+                await query.edit_message_text(
+                    "⚠️ CONTRACT MONITORING STOPPED\n\n"
+                    "The contract was purchased, but settlement could not be "
+                    "verified. The bot will not place another trade.\n\n"
+                    f"Details: {exc}"
+                )
+                return
+
+            try:
+                profit = float(settlement.get("profit") or 0.0)
+            except (TypeError, ValueError):
+                auto_trade_service.finish_run(user_id, "settlement_data_error")
+                await query.edit_message_text(
+                    "⚠️ Settlement returned an invalid profit value. "
+                    "Auto Trade has stopped without placing another trade."
+                )
+                return
+
+            won = profit > 0
+            settled_contracts.append(settlement)
+            current = auto_trade_service.advance_after_result(
+                user_id,
+                won=won,
+                profit=profit,
+            )
+
+            await query.edit_message_text(
+                "🤖 AUTO TRADE RUNNING\n\n"
+                f"Account mode: {current.account_mode.upper()}\n"
+                f"Market: {current.symbol}\n"
+                f"Direction: {current.direction}\n"
+                f"Last result: {'WIN' if won else 'LOSS'}\n"
+                f"Last contract P/L: ${profit:.2f}\n\n"
+                f"Winning cycles: {current.wins}/{current.max_cycles}\n"
+                f"Current cycle: {current.cycle}/{current.max_cycles}\n"
+                f"Next stake: ${current.current_stake:.2f}\n"
+                f"Settled contracts: {current.trade_count}\n"
+                f"Total staked: ${current.total_staked:.2f}\n"
+                f"Net profit/loss: ${current.total_profit_loss:.2f}\n\n"
+                "The selected market and direction remain fixed."
+            )
+
+            if current.status != "running":
+                continue
+
+            await asyncio.sleep(1)
+            continue
+
+        # Check the selected mode again before every purchase.
+        if account_mode_service.get_mode(user_id) != current.account_mode:
+            auto_trade_service.finish_run(user_id, "account_mode_changed")
+            await query.edit_message_text(
+                "🛑 Account mode changed during Auto Trade. "
+                "No further purchase will be attempted."
+            )
+            return
+
+        result = await execute_trade(user_id, current)
+
+        if result.get("status") != "accepted":
+            status = result.get("status")
+            reason = result.get("reason", "Unknown error")
+
+            auto_trade_service.finish_run(
+                user_id,
+                "unknown_buy_outcome" if status == "unknown_buy_outcome" else "rejected",
+            )
+
+            if status == "unknown_buy_outcome":
+                message = (
+                    "⚠️ PURCHASE OUTCOME UNKNOWN\n\n"
+                    "The purchase may have succeeded, but confirmation was not "
+                    "received. Auto Trade has stopped to avoid a duplicate buy.\n\n"
+                )
+            else:
+                message = "⚠️ TRADE NOT PLACED\n\nAuto Trade has stopped.\n\n"
+
+            await query.edit_message_text(message + f"Reason: {reason}")
+            return
+
+        await query.edit_message_text(
+            "⏳ CONTRACT PURCHASED\n\n"
+            f"Account mode: {current.account_mode.upper()}\n"
+            f"Market: {current.symbol}\n"
+            f"Direction: {current.direction}\n"
+            f"Stake: ${current.current_stake:.2f}\n"
+            f"Contract ID: {current.contract_id}\n\n"
+            f"Waiting for the 30-second contract to settle.\n"
+            f"Winning cycles: {current.wins}/{current.max_cycles}"
         )
 
 
@@ -133,11 +300,10 @@ async def dispatch_callback(update, context) -> None:
 
     data = query.data or ""
     user_id = update.effective_user.id
+    user_key = str(user_id)
 
     if data == "START_CONNECT":
-        await query.edit_message_text(
-            handle_connect(user_id)
-        )
+        await query.edit_message_text(handle_connect(user_id))
         return
 
     if data == "START_INFO":
@@ -147,27 +313,87 @@ async def dispatch_callback(update, context) -> None:
             "How it works:\n"
             "• AI ranks the 5 fixed Step Indices\n"
             "• You choose the stake\n"
-            "• The app executes the deterministic Auto Trade cycle\n"
-            "• Results are monitored in real time"
+            "• Auto Trade executes the selected Rise/Fall setup\n"
+            "• Contract results are monitored before the next trade\n"
+            "• The run stops after five winning cycles or a safety stop"
+        )
+        return
+
+    if data == "START_DASHBOARD":
+        await query.edit_message_text(
+            await build_start_message(user_id),
+            reply_markup=TelegramKeyboard.dashboard_keyboard(),
         )
         return
 
     if data == "START_BALANCE":
-        await query.edit_message_text(
-            await handle_balance(user_id)
-        )
+        await query.edit_message_text(await handle_balance(user_id))
         return
 
     if data == "START_STATUS":
+        await query.edit_message_text(handle_status(user_id))
+        return
+
+    if data == "START_SETTINGS":
         await query.edit_message_text(
-            handle_status(user_id)
+            handle_account_mode_settings(user_id),
+            reply_markup=TelegramKeyboard.account_mode_keyboard(
+                account_mode_service.get_mode(user_id)
+            ),
+        )
+        return
+
+    if data == "ACCOUNT_MODE_DEMO":
+        if not auth_service.get_valid_access_token(user_key):
+            await query.edit_message_text(
+                "🔴 Connect your Deriv account before changing account mode."
+            )
+            return
+
+        account_mode_service.set_mode(user_id, "demo")
+        await query.edit_message_text(
+            "🟡 Demo Mode selected.\n\n"
+            "Auto Trade will use a verified Demo Options account. "
+            "It will not fall back to Real.",
+            reply_markup=TelegramKeyboard.account_mode_keyboard("demo"),
+        )
+        return
+
+    if data == "ACCOUNT_MODE_REAL":
+        if not auth_service.get_valid_access_token(user_key):
+            await query.edit_message_text(
+                "🔴 Connect your Deriv account before changing account mode."
+            )
+            return
+
+        await query.edit_message_text(
+            "⚠️ CONFIRM REAL MODE\n\n"
+            "Real Mode can place trades using real funds. Losses and "
+            "martingale stake increases can affect your actual balance.\n\n"
+            "Confirm only if you intend to trade your Real account.",
+            reply_markup=TelegramKeyboard.real_mode_confirmation_keyboard(),
+        )
+        return
+
+    if data == "ACCOUNT_MODE_REAL_CONFIRM":
+        if not auth_service.get_valid_access_token(user_key):
+            await query.edit_message_text(
+                "🔴 Connect your Deriv account before changing account mode."
+            )
+            return
+
+        account_mode_service.set_mode(user_id, "real")
+        await query.edit_message_text(
+            "🟢 Real Mode selected.\n\n"
+            "Before trading, Yields will verify that a Real Options account "
+            "is available. If verification fails, the trade will stop rather "
+            "than falling back to Demo.",
+            reply_markup=TelegramKeyboard.account_mode_keyboard("real"),
         )
         return
 
     if data == "START_LOGOUT":
-        await query.edit_message_text(
-            handle_logout(user_id)
-        )
+        await query.edit_message_text(handle_logout(user_id))
         return
 
     if data == "START_AUTO_TRADE":
@@ -185,9 +411,18 @@ async def dispatch_callback(update, context) -> None:
         return
 
     if data == "AUTO_TRADE_CANCEL":
-        await query.edit_message_text(
-            "🛑 Auto Trade cancelled. No trade has been placed."
-        )
+        state = auto_trade_service.cancel_run(user_id)
+        if state is None:
+            await query.edit_message_text(
+                "🛑 Auto Trade cancelled. No trade has been placed."
+            )
+        else:
+            await query.edit_message_text(
+                "🛑 Auto Trade cancellation requested.\n\n"
+                "If a contract has already been purchased, it cannot be "
+                "cancelled by this button; the bot will not initiate another "
+                "purchase after the current monitoring step."
+            )
         return
 
     if data == "AUTO_TRADE_CONFIRM":
@@ -199,76 +434,85 @@ async def dispatch_callback(update, context) -> None:
             )
             return
 
-        result = await execute_trade(
-            user_id,
-            state,
-        )
-
-        if result.get("status") == "accepted":
+        try:
+            auto_trade_service.confirm_run(user_id)
+        except RuntimeError as exc:
             await query.edit_message_text(
-                "✅ Trade confirmed and submitted.\n\n"
-                f"Market: {state.symbol}\n"
-                f"Direction: {state.direction}\n"
-                f"Stake: ${state.current_stake:.2f}\n"
-                f"Contract ID: {result.get('contract_id', 'pending')}\n"
-                f"Proposal ID: {result.get('proposal_id', 'pending')}"
+                f"⚠️ Auto Trade could not start: {exc}"
+            )
+            return
+
+        await _run_auto_trade(update, state)
+        return
+
+    if data.startswith("AUTO_TRADE_STAKE_"):
+        raw_stake = data.removeprefix("AUTO_TRADE_STAKE_")
+
+        try:
+            stake_value = float(raw_stake)
+        except (TypeError, ValueError):
+            await query.edit_message_text(
+                "⚠️ Invalid stake selection. Choose one of the available stake buttons."
+            )
+            return
+
+        if stake_value not in {1.0, 2.0, 5.0, 10.0}:
+            await query.edit_message_text(
+                "⚠️ Unsupported stake selection."
+            )
+            return
+
+        setup = build_auto_trade_setup(user_id)
+
+        if (
+            setup.get("symbol") == "NO_SETUP"
+            or setup.get("direction") not in {"BULLISH", "BEARISH"}
+        ):
+            await query.edit_message_text(
+                "⚠️ No tradable setup is currently available.\n\n"
+                "No trade has been placed."
+            )
+            return
+
+        if auto_trade_service.is_running(user_id):
+            await query.edit_message_text(
+                "⚠️ An Auto Trade run is already active."
+            )
+            return
+
+        mode = account_mode_service.get_mode(user_id)
+
+        try:
+            auto_trade_service.start_run(
+                user_id=user_id,
+                symbol=setup["symbol"],
+                direction=setup["direction"],
+                base_stake=stake_value,
+                account_mode=mode,
+            )
+        except (RuntimeError, ValueError) as exc:
+            await query.edit_message_text(
+                f"⚠️ Unable to prepare Auto Trade: {exc}"
             )
             return
 
         await query.edit_message_text(
-            "⚠️ Trade was not placed.\n\n"
-            f"Reason: {result.get('reason', 'Unknown error')}"
-        )
-        return
-
-    if data.startswith("AUTO_TRADE_STAKE_"):
-        try:
-            stake_value = float(
-                data.replace(
-                    "AUTO_TRADE_STAKE_",
-                    "",
-                ).split("_")[0]
-                or 1
-            )
-        except ValueError:
-            stake_value = 1.0
-
-        setup = build_auto_trade_setup(user_id)
-
-        try:
-            auto_trade_service.start_run(
-                user_id,
-                setup.get("symbol", "step_100"),
-                setup.get("direction", "BULLISH"),
-                stake_value,
-            )
-
-        except RuntimeError:
-            existing = auto_trade_service.get_run(user_id)
-
-            if existing is not None:
-                existing.current_stake = stake_value
-                existing.direction = setup.get(
-                    "direction",
-                    existing.direction,
-                )
-                existing.symbol = setup.get(
-                    "symbol",
-                    existing.symbol,
-                )
-
-        await query.edit_message_text(
-            f"⚡ TRADE CONFIRMATION\n\n"
-            f"Stake selected: ${stake_value:.2f}.\n\n"
-            f"The cycle begins in the analyzed direction: "
-            f"{setup.get('direction', 'BULLISH')}.\n"
-            f"All 5 trades in this session will remain in that direction.\n\n"
-            f"Expiry: 30 seconds\n"
-            f"Cycles: 5",
+            "⚡ TRADE CONFIRMATION\n\n"
+            f"Market: {setup.get('display_name', setup['symbol'])}\n"
+            f"Direction: {setup['direction']}\n"
+            f"Account mode: {mode.upper()}\n"
+            f"Initial stake: ${stake_value:.2f}\n"
+            "Expiry: 30 seconds\n"
+            "Target: 5 winning cycles\n\n"
+            "A loss stays in the current cycle and increases the next stake "
+            "according to your configured martingale and safety limit. "
+            "A settled win advances the cycle and resets the stake.\n\n"
+            "Confirm to begin.",
             reply_markup=TelegramKeyboard.confirmation_keyboard(),
         )
         return
 
     await query.edit_message_text(
-        handle_start(user_id)
+        handle_start(user_id),
+        reply_markup=TelegramKeyboard.dashboard_keyboard(),
     )

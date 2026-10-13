@@ -7,7 +7,14 @@ import os
 import secrets
 from pathlib import Path
 from typing import Any, Dict, Optional
+
 import httpx
+
+
+DERIV_OPTIONS_ACCOUNTS_URL = (
+    "https://api.derivws.com/trading/v1/options/accounts"
+)
+
 
 def _resolve_state_dir() -> str:
     candidates = []
@@ -33,9 +40,11 @@ def _resolve_state_dir() -> str:
         try:
             path = Path(candidate).expanduser()
             path.mkdir(parents=True, exist_ok=True)
+
             probe = path / ".yields_state_write_test"
             with open(probe, "w", encoding="utf-8") as handle:
                 handle.write("ok")
+
             probe.unlink(missing_ok=True)
             return str(path)
         except Exception:
@@ -51,18 +60,19 @@ STATE_DIR = _resolve_state_dir()
 
 def _ensure_state_dir() -> Path:
     path = Path(STATE_DIR)
+
     try:
         path.mkdir(parents=True, exist_ok=True)
     except PermissionError:
         fallback = Path.cwd() / ".yields_state"
         fallback.mkdir(parents=True, exist_ok=True)
         return fallback
+
     return path
 
 
 def _state_file(filename: str) -> str:
-    _ensure_state_dir()
-    return str(Path(STATE_DIR) / filename)
+    return str(_ensure_state_dir() / filename)
 
 
 STATE_FILE = _state_file("yields_oauth_states.json")
@@ -71,7 +81,7 @@ TOKEN_COUNT_FILE = _state_file("yields_user_tokens.json")
 
 
 class AuthService:
-    """Secure backend service managing Deriv OAuth states, tokens, and bot usage tokens with disk persistence."""
+    """Manage Deriv OAuth, persisted tokens, and account metadata."""
 
     def __init__(self) -> None:
         pass
@@ -79,26 +89,41 @@ class AuthService:
     def _load_json(self, path: str) -> dict:
         if not os.path.exists(path):
             return {}
+
         try:
-            with open(path, "r") as f:
-                return json.load(f)
-        except Exception:
+            with open(path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+                return data if isinstance(data, dict) else {}
+        except (OSError, ValueError, TypeError):
             return {}
 
     def _save_json(self, path: str, data: dict) -> None:
         try:
-            with open(path, "w") as f:
-                json.dump(data, f)
-        except Exception:
-            pass
+            _ensure_state_dir()
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump(data, handle)
+        except OSError:
+            # Do not expose tokens or credential contents in logs.
+            return
 
-    def begin_oauth_session(self, telegram_user_id: str | int) -> Dict[str, str]:
+    def begin_oauth_session(
+        self,
+        telegram_user_id: str | int,
+    ) -> Dict[str, str]:
         user_key = str(telegram_user_id)
+
         state = secrets.token_urlsafe(32)
         code_verifier = secrets.token_urlsafe(48)
-        code_challenge = base64.urlsafe_b64encode(
-            hashlib.sha256(code_verifier.encode("utf-8")).digest()
-        ).rstrip(b"=").decode("utf-8")
+
+        code_challenge = (
+            base64.urlsafe_b64encode(
+                hashlib.sha256(
+                    code_verifier.encode("utf-8")
+                ).digest()
+            )
+            .rstrip(b"=")
+            .decode("utf-8")
+        )
 
         states = self._load_json(STATE_FILE)
         states[user_key] = {
@@ -106,102 +131,217 @@ class AuthService:
             "code_verifier": code_verifier,
             "code_challenge": code_challenge,
         }
+
         self._save_json(STATE_FILE, states)
-        return {"state": state, "code_verifier": code_verifier, "code_challenge": code_challenge}
 
-    def validate_state(self, telegram_user_id: str | int, state: str) -> bool:
-        user_key = str(telegram_user_id)
-        states = self._load_json(STATE_FILE)
-        session = states.get(user_key, {})
-        return bool(session.get("state")) and session["state"] == state
+        return {
+            "state": state,
+            "code_verifier": code_verifier,
+            "code_challenge": code_challenge,
+        }
 
-    def get_pending_user_for_state(self, state: str) -> Optional[str]:
+    def validate_state(
+        self,
+        telegram_user_id: str | int,
+        state: str,
+    ) -> bool:
         states = self._load_json(STATE_FILE)
+        session = states.get(str(telegram_user_id), {})
+
+        return (
+            bool(session.get("state"))
+            and secrets.compare_digest(session["state"], state)
+        )
+
+    def get_pending_user_for_state(
+        self,
+        state: str,
+    ) -> Optional[str]:
+        states = self._load_json(STATE_FILE)
+
         for telegram_user_id, session in states.items():
-            if session.get("state") == state:
+            stored_state = session.get("state")
+
+            if (
+                isinstance(stored_state, str)
+                and secrets.compare_digest(stored_state, state)
+            ):
                 return telegram_user_id
+
         return None
 
-    def _hydrate_account_metadata(self, access_token: str, existing: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    @staticmethod
+    def _normalize_accounts(payload: Any) -> list[dict[str, Any]]:
+        """Normalize the common account-list response shapes."""
+        if isinstance(payload, list):
+            return [
+                item for item in payload
+                if isinstance(item, dict)
+            ]
+
+        if not isinstance(payload, dict):
+            return []
+
+        for key in ("data", "accounts", "account_list"):
+            value = payload.get(key)
+
+            if isinstance(value, list):
+                return [
+                    item for item in value
+                    if isinstance(item, dict)
+                ]
+
+            if isinstance(value, dict):
+                # Some APIs wrap the list inside another object.
+                for nested_key in ("data", "accounts", "account_list"):
+                    nested = value.get(nested_key)
+
+                    if isinstance(nested, list):
+                        return [
+                            item for item in nested
+                            if isinstance(item, dict)
+                        ]
+
+                if any(
+                    value.get(key)
+                    for key in ("account_id", "loginid", "id")
+                ):
+                    return [value]
+
+        return []
+
+    @staticmethod
+    def _account_id(account: dict[str, Any]) -> Optional[str]:
+        value = (
+            account.get("account_id")
+            or account.get("loginid")
+            or account.get("id")
+        )
+
+        return str(value) if value else None
+
+    @staticmethod
+    def _account_type(account: dict[str, Any]) -> str:
+        value = (
+            account.get("account_type")
+            or account.get("type")
+            or ""
+        )
+
+        return str(value).strip().lower()
+
+    @classmethod
+    def _select_demo_account(
+        cls,
+        accounts: list[dict[str, Any]],
+    ) -> Optional[dict[str, Any]]:
+        """
+        Select Demo explicitly.
+
+        Never silently fall back to Real for trading-related metadata.
+        """
+        for account in accounts:
+            if not cls._account_id(account):
+                continue
+
+            account_type = cls._account_type(account)
+
+            if account_type in {"demo", "virtual", "practice"}:
+                return account
+
+        return None
+
+    def _hydrate_account_metadata(
+        self,
+        access_token: str,
+        existing: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Fetch account metadata and prefer Demo.
+
+        If Deriv cannot provide a verified Demo account, retain the
+        existing metadata for compatibility, but callers must not
+        assume it represents a Demo trading account.
+        """
         if not access_token:
             return existing
 
         try:
             response = httpx.get(
-                "https://api.derivws.com/trading/v1/options/accounts",
+                DERIV_OPTIONS_ACCOUNTS_URL,
                 headers={
                     "Authorization": f"Bearer {access_token}",
                     "Content-Type": "application/json",
                 },
                 timeout=20.0,
             )
+
             if response.status_code != 200:
                 return existing
 
-            payload = response.json()
-            accounts: list[dict[str, Any]] = []
-            if isinstance(payload, list):
-                accounts = [item for item in payload if isinstance(item, dict)]
-            elif isinstance(payload, dict):
-                for key in ("data", "accounts", "account_list"):
-                    value = payload.get(key)
-                    if isinstance(value, list):
-                        accounts = [item for item in value if isinstance(item, dict)]
-                        break
-                    if isinstance(value, dict):
-                        accounts = [value]
-                        break
+            accounts = self._normalize_accounts(response.json())
+            selected = self._select_demo_account(accounts)
 
-            preferred_account = None
-            for account in accounts:
-                account_id = account.get("account_id") or account.get("loginid") or account.get("id")
-                if not account_id:
-                    continue
-                account_type = str(account.get("account_type") or account.get("type") or "").lower()
-                if account_type in {"real", "live", "standard"}:
-                    preferred_account = account
-                    break
-                if preferred_account is None:
-                    preferred_account = account
-
-            if preferred_account is None:
+            if selected is None:
                 return existing
 
-            resolved = {
-                "account_id": preferred_account.get("account_id") or preferred_account.get("loginid") or preferred_account.get("id"),
-                "account_type": preferred_account.get("account_type") or preferred_account.get("type") or "real",
-                "currency": preferred_account.get("currency", "USD"),
+            account_id = self._account_id(selected)
+
+            if not account_id:
+                return existing
+
+            resolved: Dict[str, Any] = {
+                "account_id": account_id,
+                "account_type": "demo",
+                "currency": selected.get("currency") or "USD",
             }
-            if "balance" in preferred_account:
-                resolved["balance"] = preferred_account.get("balance")
-            if existing:
-                existing.update({k: v for k, v in resolved.items() if v is not None})
-                return existing
-            return resolved
-        except Exception:
+
+            if selected.get("balance") is not None:
+                resolved["balance"] = selected["balance"]
+
+            result = dict(existing or {})
+            result.update(resolved)
+
+            return result
+
+        except (httpx.HTTPError, ValueError, TypeError):
             return existing
 
-    def complete_oauth_session(self, telegram_user_id: str | int, token_payload: Dict[str, Any]) -> Dict[str, Any]:
+    def complete_oauth_session(
+        self,
+        telegram_user_id: str | int,
+        token_payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
         user_key = str(telegram_user_id)
         tokens = self._load_json(TOKEN_FILE)
+
         token_data = {
             "access_token": token_payload.get("access_token"),
             "refresh_token": token_payload.get("refresh_token"),
             "expires_in": token_payload.get("expires_in"),
             "token_type": token_payload.get("token_type", "Bearer"),
         }
+
+        # Preserve additional OAuth fields, if present.
         for key, value in token_payload.items():
-            if key not in {"access_token", "refresh_token", "expires_in", "token_type"}:
+            if key not in {
+                "access_token",
+                "refresh_token",
+                "expires_in",
+                "token_type",
+            }:
                 token_data[key] = value
 
-        account_metadata = self._hydrate_account_metadata(token_data.get("access_token"), token_data)
-        if account_metadata:
-            token_data.update({k: v for k, v in account_metadata.items() if v is not None})
+        token_data = self._hydrate_account_metadata(
+            token_data.get("access_token"),
+            token_data,
+        ) or token_data
 
         tokens[user_key] = token_data
         self._save_json(TOKEN_FILE, tokens)
 
         user_tokens = self._load_json(TOKEN_COUNT_FILE)
+
         if user_key not in user_tokens:
             user_tokens[user_key] = 50
             self._save_json(TOKEN_COUNT_FILE, user_tokens)
@@ -209,6 +349,7 @@ class AuthService:
         states = self._load_json(STATE_FILE)
         states.pop(user_key, None)
         self._save_json(STATE_FILE, states)
+
         return token_data
 
     def exchange_oauth_code(
@@ -223,6 +364,7 @@ class AuthService:
         states = self._load_json(STATE_FILE)
         session = states.get(user_key, {})
         code_verifier = session.get("code_verifier")
+
         if not code_verifier:
             raise ValueError("missing_code_verifier")
 
@@ -233,54 +375,98 @@ class AuthService:
             "code": code,
             "code_verifier": code_verifier,
         }
+
         if client_secret:
             payload["client_secret"] = client_secret
 
-        response = httpx.post("https://auth.deriv.com/oauth2/token", data=payload, timeout=20.0)
+        response = httpx.post(
+            "https://auth.deriv.com/oauth2/token",
+            data=payload,
+            timeout=20.0,
+        )
         response.raise_for_status()
-        data = response.json()
-        return self.complete_oauth_session(telegram_user_id, data)
 
-    def connect_user(self, telegram_user_id: str | int, token_payload: Dict[str, Any]) -> Dict[str, Any]:
-        """Backward-compatible alias for the legacy user-connection flow."""
-        return self.complete_oauth_session(telegram_user_id, token_payload)
+        return self.complete_oauth_session(
+            telegram_user_id,
+            response.json(),
+        )
 
-    def get_valid_access_token(self, telegram_user_id: str | int) -> Optional[str]:
+    def connect_user(
+        self,
+        telegram_user_id: str | int,
+        token_payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Backward-compatible alias for the OAuth completion flow."""
+        return self.complete_oauth_session(
+            telegram_user_id,
+            token_payload,
+        )
+
+    def get_valid_access_token(
+        self,
+        telegram_user_id: str | int,
+    ) -> Optional[str]:
+        tokens = self._load_json(TOKEN_FILE)
+        record = tokens.get(str(telegram_user_id))
+
+        if not isinstance(record, dict):
+            return None
+
+        token = record.get("access_token")
+        return token if isinstance(token, str) and token else None
+
+    def get_connected_account(
+        self,
+        telegram_user_id: str | int,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Refresh account metadata from Deriv rather than trusting a
+        previously stored account ID.
+
+        This method prefers Demo when metadata can be resolved. The
+        trading account service must still verify the account returned
+        by the live Deriv account-list endpoint before requesting OTP.
+        """
         user_key = str(telegram_user_id)
         tokens = self._load_json(TOKEN_FILE)
         record = tokens.get(user_key)
-        if not record:
-            return None
-        return record.get("access_token")
 
-    def get_connected_account(self, telegram_user_id: str | int) -> Optional[Dict[str, Any]]:
-        user_key = str(telegram_user_id)
-        tokens = self._load_json(TOKEN_FILE)
-        record = tokens.get(user_key)
-        if not record:
+        if not isinstance(record, dict):
             return None
-
-        if record.get("account_id"):
-            return record
 
         access_token = record.get("access_token")
-        if access_token:
-            refreshed = self._hydrate_account_metadata(access_token, record)
-            if refreshed:
-                tokens[user_key] = refreshed
-                self._save_json(TOKEN_FILE, tokens)
-                return refreshed
+
+        if not access_token:
+            return record
+
+        refreshed = self._hydrate_account_metadata(
+            access_token,
+            record,
+        )
+
+        if refreshed is not None:
+            tokens[user_key] = refreshed
+            self._save_json(TOKEN_FILE, tokens)
+            return refreshed
+
         return record
 
-    def disconnect_user(self, telegram_user_id: str | int) -> bool:
+    def disconnect_user(
+        self,
+        telegram_user_id: str | int,
+    ) -> bool:
         user_key = str(telegram_user_id)
         tokens = self._load_json(TOKEN_FILE)
+
         if user_key in tokens:
             del tokens[user_key]
             self._save_json(TOKEN_FILE, tokens)
+
         return True
 
-    def get_user_tokens(self, telegram_user_id: str | int) -> int:
-        user_key = str(telegram_user_id)
+    def get_user_tokens(
+        self,
+        telegram_user_id: str | int,
+    ) -> int:
         user_tokens = self._load_json(TOKEN_COUNT_FILE)
-        return user_tokens.get(user_key, 50)
+        return user_tokens.get(str(telegram_user_id), 50)

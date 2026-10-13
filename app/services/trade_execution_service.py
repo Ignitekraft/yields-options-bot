@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import itertools
 import json
+import math
 from typing import Any
 
 import websockets
@@ -11,30 +12,11 @@ from app.config import settings
 
 
 class UnknownBuyOutcome(RuntimeError):
-    """
-    Raised when the buy request may have reached Deriv but the client cannot
-    determine whether the contract was purchased.
-
-    IMPORTANT:
-    Never automatically retry a buy after this exception.
-    """
-
-    pass
+    """The purchase may have succeeded; never automatically retry it."""
 
 
 class TradeExecutionService:
-    """
-    Canonical real Deriv Rise/Fall execution service.
-
-    Authentication is handled outside this class:
-        OAuth token
-            -> Options account resolution
-            -> OTP request
-            -> authenticated WebSocket URL
-
-    This service receives the already-authenticated OTP WebSocket URL and
-    performs proposal + buy over that connection.
-    """
+    """Execute Deriv Rise/Fall contracts on a verified Options account."""
 
     STEP_MARKET_MAP = {
         "step_100": "R_100",
@@ -58,32 +40,18 @@ class TradeExecutionService:
     @classmethod
     def normalize_step_symbol(cls, symbol: str) -> str:
         value = str(symbol or "").strip()
-
         if not value:
             raise ValueError("MISSING_MARKET_SYMBOL")
 
         lowered = value.lower()
-
         if lowered in cls.STEP_MARKET_MAP:
             return cls.STEP_MARKET_MAP[lowered]
 
-        if lowered.startswith("step_"):
-            suffix = lowered.split("_", 1)[1]
-
-            if suffix.isdigit():
-                return f"R_{suffix}"
-
         upper = value.upper()
-
         if upper in cls.STEP_MARKET_MAP.values():
             return upper
 
-        if upper.startswith("R_"):
-            return upper
-
-        raise ValueError(
-            f"UNSUPPORTED_STEP_MARKET:{symbol}"
-        )
+        raise ValueError(f"UNSUPPORTED_STEP_MARKET:{symbol}")
 
     @staticmethod
     def resolve_contract_type(direction: str) -> str:
@@ -91,13 +59,17 @@ class TradeExecutionService:
 
         if normalized in {"BULLISH", "RISE", "CALL"}:
             return "CALL"
-
         if normalized in {"BEARISH", "FALL", "PUT"}:
             return "PUT"
 
-        raise ValueError(
-            f"UNSUPPORTED_RISE_FALL_DIRECTION:{direction}"
-        )
+        raise ValueError(f"UNSUPPORTED_RISE_FALL_DIRECTION:{direction}")
+
+    @staticmethod
+    def validate_account_mode(account_mode: str | None) -> str:
+        normalized = str(account_mode or "").strip().lower()
+        if normalized not in {"demo", "real"}:
+            raise ValueError("INVALID_ACCOUNT_MODE")
+        return normalized
 
     @staticmethod
     def validate_stake(stake: float) -> float:
@@ -106,19 +78,20 @@ class TradeExecutionService:
         except (TypeError, ValueError) as exc:
             raise ValueError("INVALID_STAKE") from exc
 
-        if value <= 0:
-            raise ValueError("STAKE_MUST_BE_GREATER_THAN_ZERO")
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError("STAKE_MUST_BE_FINITE_AND_GREATER_THAN_ZERO")
 
         return round(value, 2)
 
     @staticmethod
     def validate_expiry(expiry_seconds: int) -> int:
-        value = int(expiry_seconds)
+        try:
+            value = int(expiry_seconds)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("INVALID_EXPIRY") from exc
 
         if value != 30:
-            raise ValueError(
-                "YIELDS_EXPIRY_MUST_BE_30_SECONDS"
-            )
+            raise ValueError("YIELDS_EXPIRY_MUST_BE_30_SECONDS")
 
         return 30
 
@@ -131,69 +104,49 @@ class TradeExecutionService:
         expiry_seconds: int = 30,
         currency: str = "USD",
     ) -> dict[str, Any]:
-        resolved_symbol = cls.normalize_step_symbol(symbol)
-        contract_type = cls.resolve_contract_type(direction)
-        amount = cls.validate_stake(stake)
-        expiry = cls.validate_expiry(expiry_seconds)
-
         return {
             "proposal": 1,
-            "amount": amount,
+            "amount": cls.validate_stake(stake),
             "basis": "stake",
-            "contract_type": contract_type,
+            "contract_type": cls.resolve_contract_type(direction),
             "currency": str(currency or "USD").upper(),
-            "duration": expiry,
+            "duration": cls.validate_expiry(expiry_seconds),
             "duration_unit": "s",
-            "underlying_symbol": resolved_symbol,
+            "underlying_symbol": cls.normalize_step_symbol(symbol),
             "req_id": cls.next_req_id(),
         }
 
     @staticmethod
     def _error_message(response: dict[str, Any]) -> str:
         error = response.get("error")
-
         if isinstance(error, dict):
             code = error.get("code")
             message = error.get("message")
-
             if code and message:
                 return f"{code}:{message}"
-
             if message:
                 return str(message)
-
         return "DERIV_REQUEST_FAILED"
 
     @classmethod
-    async def _request(
+    async def _receive_response(
         cls,
         websocket: Any,
-        payload: dict[str, Any],
         expected_key: str,
+        req_id: int,
         timeout: float = 20.0,
     ) -> dict[str, Any]:
-        req_id = payload.get("req_id")
-
-        try:
-            await asyncio.wait_for(
-                websocket.send(json.dumps(payload)),
-                timeout=15,
-            )
-        except Exception as exc:
-            raise RuntimeError(
-                "DERIV_REQUEST_SEND_FAILED"
-            ) from exc
+        deadline = asyncio.get_running_loop().time() + timeout
 
         while True:
-            try:
-                raw = await asyncio.wait_for(
-                    websocket.recv(),
-                    timeout=timeout,
-                )
-            except asyncio.TimeoutError as exc:
-                raise RuntimeError(
-                    f"DERIV_{expected_key.upper()}_TIMEOUT"
-                ) from exc
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                raise TimeoutError(f"DERIV_{expected_key.upper()}_TIMEOUT")
+
+            raw = await asyncio.wait_for(
+                websocket.recv(),
+                timeout=remaining,
+            )
 
             if isinstance(raw, bytes):
                 raw = raw.decode("utf-8")
@@ -206,25 +159,44 @@ class TradeExecutionService:
             if not isinstance(response, dict):
                 continue
 
-            if "error" in response:
-                raise RuntimeError(
-                    cls._error_message(response)
-                )
-
             echo_req = response.get("echo_req")
+            if isinstance(echo_req, dict):
+                response_req_id = echo_req.get("req_id")
+                if response_req_id is not None and response_req_id != req_id:
+                    continue
 
-            if (
-                req_id is not None
-                and isinstance(echo_req, dict)
-                and echo_req.get("req_id") not in {None, req_id}
-            ):
-                continue
+            if "error" in response:
+                raise RuntimeError(cls._error_message(response))
 
             if expected_key in response:
                 return response
 
             if response.get("msg_type") == expected_key:
                 return response
+
+    @classmethod
+    async def _request(
+        cls,
+        websocket: Any,
+        payload: dict[str, Any],
+        expected_key: str,
+        timeout: float = 20.0,
+    ) -> dict[str, Any]:
+        req_id = payload.get("req_id")
+        if not isinstance(req_id, int):
+            raise ValueError("DERIV_REQUEST_ID_MISSING")
+
+        await asyncio.wait_for(
+            websocket.send(json.dumps(payload)),
+            timeout=15,
+        )
+
+        return await cls._receive_response(
+            websocket,
+            expected_key,
+            req_id,
+            timeout,
+        )
 
     @classmethod
     async def _create_proposal_on_ws(
@@ -244,43 +216,26 @@ class TradeExecutionService:
             currency=currency,
         )
 
-        response = await cls._request(
-            websocket,
-            payload,
-            expected_key="proposal",
-        )
-
+        response = await cls._request(websocket, payload, "proposal")
         proposal = response.get("proposal")
 
         if not isinstance(proposal, dict):
-            raise RuntimeError(
-                "DERIV_PROPOSAL_RESPONSE_MALFORMED"
-            )
+            raise RuntimeError("DERIV_PROPOSAL_RESPONSE_MALFORMED")
 
         proposal_id = proposal.get("id")
-        ask_price = proposal.get("ask_price")
+        try:
+            ask_price = float(proposal.get("ask_price"))
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("DERIV_PROPOSAL_PRICE_MISSING") from exc
 
         if not proposal_id:
-            raise RuntimeError(
-                "DERIV_PROPOSAL_ID_MISSING"
-            )
-
-        try:
-            ask_price = float(ask_price)
-        except (TypeError, ValueError) as exc:
-            raise RuntimeError(
-                "DERIV_PROPOSAL_PRICE_MISSING"
-            ) from exc
-
-        if ask_price <= 0:
-            raise RuntimeError(
-                "DERIV_PROPOSAL_PRICE_INVALID"
-            )
+            raise RuntimeError("DERIV_PROPOSAL_ID_MISSING")
+        if not math.isfinite(ask_price) or ask_price <= 0:
+            raise RuntimeError("DERIV_PROPOSAL_PRICE_INVALID")
 
         return {
             "proposal_id": str(proposal_id),
             "ask_price": ask_price,
-            "response": response,
         }
 
     @classmethod
@@ -291,13 +246,13 @@ class TradeExecutionService:
         price: float,
     ) -> dict[str, Any]:
         req_id = cls.next_req_id()
-
         payload = {
             "buy": str(proposal_id),
             "price": float(price),
             "req_id": req_id,
         }
 
+        # After the send begins, an unconfirmed outcome is never retried.
         try:
             await asyncio.wait_for(
                 websocket.send(json.dumps(payload)),
@@ -309,78 +264,31 @@ class TradeExecutionService:
             ) from exc
 
         try:
-            while True:
-                raw = await asyncio.wait_for(
-                    websocket.recv(),
-                    timeout=20,
-                )
-
-                if isinstance(raw, bytes):
-                    raw = raw.decode("utf-8")
-
-                response = json.loads(raw)
-
-                if not isinstance(response, dict):
-                    continue
-
-                if "error" in response:
-                    raise RuntimeError(
-                        cls._error_message(response)
-                    )
-
-                echo_req = response.get("echo_req")
-
-                if (
-                    isinstance(echo_req, dict)
-                    and echo_req.get("req_id") not in {None, req_id}
-                ):
-                    continue
-
-                if "buy" not in response:
-                    continue
-
-                buy = response.get("buy")
-
-                if not isinstance(buy, dict):
-                    raise RuntimeError(
-                        "DERIV_BUY_RESPONSE_MALFORMED"
-                    )
-
-                contract_id = (
-                    buy.get("contract_id")
-                    or buy.get("id")
-                )
-
-                if not contract_id:
-                    raise RuntimeError(
-                        "DERIV_CONTRACT_ID_MISSING"
-                    )
-
-                return {
-                    "contract_id": str(contract_id),
-                    "buy_price": buy.get(
-                        "buy_price",
-                        price,
-                    ),
-                    "balance_after": buy.get(
-                        "balance_after"
-                    ),
-                    "shortcode": buy.get(
-                        "shortcode"
-                    ),
-                    "response": response,
-                }
-
-        except UnknownBuyOutcome:
-            raise
-        except asyncio.TimeoutError as exc:
+            response = await cls._receive_response(
+                websocket,
+                "buy",
+                req_id,
+                timeout=20,
+            )
+        except Exception as exc:
             raise UnknownBuyOutcome(
-                "BUY_OUTCOME_UNKNOWN_AFTER_TIMEOUT"
+                f"BUY_OUTCOME_UNKNOWN:{type(exc).__name__}"
             ) from exc
-        except websockets.exceptions.ConnectionClosed as exc:
-            raise UnknownBuyOutcome(
-                "BUY_OUTCOME_UNKNOWN_AFTER_CONNECTION_CLOSED"
-            ) from exc
+
+        buy = response.get("buy")
+        if not isinstance(buy, dict):
+            raise UnknownBuyOutcome("DERIV_BUY_RESPONSE_MALFORMED")
+
+        contract_id = buy.get("contract_id") or buy.get("id")
+        if not contract_id:
+            raise UnknownBuyOutcome("DERIV_CONTRACT_ID_MISSING")
+
+        return {
+            "contract_id": str(contract_id),
+            "buy_price": buy.get("buy_price", price),
+            "balance_after": buy.get("balance_after"),
+            "shortcode": buy.get("shortcode"),
+        }
 
     async def execute_trade(
         self,
@@ -392,44 +300,34 @@ class TradeExecutionService:
         access_token: str | None = None,
         currency: str = "USD",
         ws_url: str | None = None,
+        account_type: str | None = None,
     ) -> dict[str, Any]:
-        """
-        Execute exactly one Rise/Fall contract.
-
-        `ws_url` must be the fresh OTP URL generated for `account_id`.
-
-        access_token is retained in the signature for compatibility but is
-        deliberately NOT sent over the WebSocket.
-        """
+        """Place one contract on the verified, explicitly selected account."""
         del user_id
         del access_token
 
-        if not account_id:
-            return {
-                "status": "rejected",
-                "reason": "MISSING_OPTIONS_ACCOUNT_ID",
-            }
-
-        if not ws_url:
-            return {
-                "status": "rejected",
-                "reason": "MISSING_AUTHENTICATED_WS_URL",
-            }
-
-        resolved_symbol = self.normalize_step_symbol(
-            market_symbol
-        )
-        resolved_contract_type = self.resolve_contract_type(
-            direction
-        )
+        proposal_id: str | None = None
+        account_mode = str(account_type or "").strip().lower()
 
         try:
+            account_mode = self.validate_account_mode(account_mode)
+
+            if not account_id:
+                raise ValueError("MISSING_OPTIONS_ACCOUNT_ID")
+            if not ws_url:
+                raise ValueError("MISSING_AUTHENTICATED_WS_URL")
+
+            symbol = self.normalize_step_symbol(market_symbol)
+            contract_type = self.resolve_contract_type(direction)
             amount = self.validate_stake(stake)
             expiry = self.validate_expiry(30)
+
         except ValueError as exc:
             return {
                 "status": "rejected",
                 "reason": str(exc),
+                "account_type": account_mode or None,
+                "account_id": account_id or None,
             }
 
         try:
@@ -440,30 +338,32 @@ class TradeExecutionService:
                 ping_interval=20,
             ) as websocket:
                 proposal = await self._create_proposal_on_ws(
-                    websocket=websocket,
-                    symbol=resolved_symbol,
-                    direction=resolved_contract_type,
-                    stake=amount,
-                    expiry_seconds=expiry,
-                    currency=currency,
+                    websocket,
+                    symbol,
+                    contract_type,
+                    amount,
+                    expiry,
+                    currency,
                 )
+                proposal_id = proposal["proposal_id"]
 
                 buy = await self._buy_on_ws(
-                    websocket=websocket,
-                    proposal_id=proposal["proposal_id"],
-                    price=proposal["ask_price"],
+                    websocket,
+                    proposal_id,
+                    proposal["ask_price"],
                 )
 
                 return {
                     "status": "accepted",
+                    "account_type": account_mode,
                     "account_id": account_id,
-                    "symbol": resolved_symbol,
-                    "underlying_symbol": resolved_symbol,
+                    "symbol": symbol,
+                    "underlying_symbol": symbol,
                     "direction": direction,
-                    "contract_type": resolved_contract_type,
+                    "contract_type": contract_type,
                     "stake": amount,
                     "expiry_seconds": expiry,
-                    "proposal_id": proposal["proposal_id"],
+                    "proposal_id": proposal_id,
                     "contract_id": buy["contract_id"],
                     "buy_price": buy["buy_price"],
                     "balance_after": buy["balance_after"],
@@ -474,18 +374,22 @@ class TradeExecutionService:
             return {
                 "status": "unknown_buy_outcome",
                 "reason": str(exc),
+                "account_type": account_mode,
                 "account_id": account_id,
-                "symbol": resolved_symbol,
-                "contract_type": resolved_contract_type,
+                "symbol": symbol,
+                "contract_type": contract_type,
+                "proposal_id": proposal_id,
             }
 
         except Exception as exc:
             return {
                 "status": "rejected",
                 "reason": str(exc),
+                "account_type": account_mode,
                 "account_id": account_id,
-                "symbol": resolved_symbol,
-                "contract_type": resolved_contract_type,
+                "symbol": symbol,
+                "contract_type": contract_type,
+                "proposal_id": proposal_id,
             }
 
     async def monitor_contract(
@@ -494,19 +398,13 @@ class TradeExecutionService:
         ws_url: str,
         timeout_seconds: int = 75,
     ) -> dict[str, Any]:
-        """
-        Monitor a purchased contract using a fresh authenticated OTP URL.
-
-        A fresh OTP is required because each OTP URL is one-use.
-        """
+        """Monitor a contract until Deriv reports it has settled."""
         if not contract_id:
             raise ValueError("MISSING_CONTRACT_ID")
-
         if not ws_url:
             raise ValueError("MISSING_AUTHENTICATED_WS_URL")
 
         req_id = self.next_req_id()
-
         payload = {
             "proposal_open_contract": 1,
             "contract_id": str(contract_id),
@@ -520,19 +418,15 @@ class TradeExecutionService:
             ping_timeout=20,
             ping_interval=20,
         ) as websocket:
-            await websocket.send(
-                json.dumps(payload)
+            await websocket.send(json.dumps(payload))
+            deadline = (
+                asyncio.get_running_loop().time() + timeout_seconds
             )
-
-            deadline = asyncio.get_running_loop().time() + timeout_seconds
 
             while True:
                 remaining = deadline - asyncio.get_running_loop().time()
-
                 if remaining <= 0:
-                    raise TimeoutError(
-                        "CONTRACT_MONITOR_TIMEOUT"
-                    )
+                    raise TimeoutError("CONTRACT_MONITOR_TIMEOUT")
 
                 raw = await asyncio.wait_for(
                     websocket.recv(),
@@ -542,58 +436,46 @@ class TradeExecutionService:
                 if isinstance(raw, bytes):
                     raw = raw.decode("utf-8")
 
-                response = json.loads(raw)
+                try:
+                    response = json.loads(raw)
+                except (TypeError, ValueError):
+                    continue
 
                 if not isinstance(response, dict):
                     continue
 
                 if "error" in response:
-                    raise RuntimeError(
-                        self._error_message(response)
-                    )
+                    raise RuntimeError(self._error_message(response))
 
-                contract = response.get(
-                    "proposal_open_contract"
-                )
-
+                contract = response.get("proposal_open_contract")
                 if not isinstance(contract, dict):
                     continue
 
-                if str(contract.get("contract_id")) != str(
-                    contract_id
-                ):
+                if str(contract.get("contract_id")) != str(contract_id):
                     continue
 
-                is_sold = bool(
-                    contract.get("is_sold")
-                )
+                if bool(contract.get("is_sold")):
+                    try:
+                        profit = float(contract.get("profit") or 0.0)
+                    except (TypeError, ValueError):
+                        profit = 0.0
 
-                if is_sold:
+                    try:
+                        payout = float(contract.get("payout") or 0.0)
+                    except (TypeError, ValueError):
+                        payout = 0.0
+
                     return {
                         "status": "settled",
                         "contract_id": str(contract_id),
                         "is_sold": True,
-                        "status_text": contract.get(
-                            "status"
-                        ),
-                        "profit": contract.get(
-                            "profit"
-                        ),
-                        "payout": contract.get(
-                            "payout"
-                        ),
-                        "buy_price": contract.get(
-                            "buy_price"
-                        ),
-                        "sell_price": contract.get(
-                            "sell_price"
-                        ),
-                        "entry_tick": contract.get(
-                            "entry_tick"
-                        ),
-                        "exit_tick": contract.get(
-                            "exit_tick"
-                        ),
+                        "status_text": contract.get("status"),
+                        "profit": profit,
+                        "payout": payout,
+                        "buy_price": contract.get("buy_price"),
+                        "sell_price": contract.get("sell_price"),
+                        "entry_tick": contract.get("entry_tick"),
+                        "exit_tick": contract.get("exit_tick"),
                         "contract": contract,
                     }
 
@@ -605,13 +487,9 @@ class TradeExecutionService:
         multiplier: float = 2.0,
     ) -> float:
         base = cls.validate_stake(base_stake)
+        step = max(1, int(martingale_step))
 
-        step = max(
-            1,
-            int(martingale_step),
-        )
+        if not math.isfinite(float(multiplier)) or float(multiplier) <= 0:
+            raise ValueError("INVALID_MARTINGALE_MULTIPLIER")
 
-        return round(
-            base * (float(multiplier) ** (step - 1)),
-            2,
-        )
+        return round(base * (float(multiplier) ** (step - 1)), 2)

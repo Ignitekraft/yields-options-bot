@@ -8,80 +8,107 @@ except ImportError:  # pragma: no cover
 
 
 class TelegramKeyboard:
-    """Inline button layouts for the Yields dashboard and Auto Trade flow."""
+    """Inline keyboard layouts for the Yields dashboard and Auto Trade flow."""
+
+    @staticmethod
+    def _keyboard(rows: list[list[tuple[str, str]]]) -> object:
+        if InlineKeyboardMarkup is None:
+            return [[label for label, _ in row] for row in rows]
+
+        return InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(label, callback_data=data)
+                    for label, data in row
+                ]
+                for row in rows
+            ]
+        )
 
     @staticmethod
     def start_keyboard() -> object:
-        if InlineKeyboardMarkup is None:
-            return [["🔐 Connect Deriv"], ["ℹ️ How Yields Works"]]
-        return InlineKeyboardMarkup(
+        return TelegramKeyboard._keyboard(
             [
-                [InlineKeyboardButton("🔐 Connect Deriv", callback_data="START_CONNECT")],
-                [InlineKeyboardButton("ℹ️ How Yields Works", callback_data="START_INFO")],
+                [("🔐 Connect Deriv", "START_CONNECT")],
+                [("ℹ️ How Yields Works", "START_INFO")],
             ]
         )
 
     @staticmethod
     def dashboard_keyboard() -> object:
-        if InlineKeyboardMarkup is None:
-            return [["🤖 Auto Trade"], ["💰 Balance"], ["📊 Status"], ["⚙️ Settings"], ["🔌 Disconnect"]]
-        return InlineKeyboardMarkup(
+        return TelegramKeyboard._keyboard(
             [
-                [InlineKeyboardButton("🤖 Auto Trade", callback_data="START_AUTO_TRADE")],
+                [("🤖 Auto Trade", "START_AUTO_TRADE")],
                 [
-                    InlineKeyboardButton("💰 Balance", callback_data="START_BALANCE"),
-                    InlineKeyboardButton("📊 Status", callback_data="START_STATUS"),
+                    ("💰 Balance", "START_BALANCE"),
+                    ("📊 Status", "START_STATUS"),
                 ],
                 [
-                    InlineKeyboardButton("⚙️ Settings", callback_data="START_SETTINGS"),
-                    InlineKeyboardButton("🔌 Disconnect", callback_data="START_LOGOUT"),
+                    ("⚙️ Account Mode", "START_SETTINGS"),
+                    ("🔌 Disconnect", "START_LOGOUT"),
                 ],
+            ]
+        )
+
+    @staticmethod
+    def account_mode_keyboard(current_mode: str) -> object:
+        mode = str(current_mode or "demo").lower()
+
+        demo_label = "🟡 Demo ✓" if mode == "demo" else "🟡 Demo"
+        real_label = "🟢 Real ✓" if mode == "real" else "🟢 Real"
+
+        return TelegramKeyboard._keyboard(
+            [
+                [(demo_label, "ACCOUNT_MODE_DEMO")],
+                [(real_label, "ACCOUNT_MODE_REAL")],
+                [("↩️ Back to Dashboard", "START_DASHBOARD")],
+            ]
+        )
+
+    @staticmethod
+    def real_mode_confirmation_keyboard() -> object:
+        return TelegramKeyboard._keyboard(
+            [
+                [("✅ Confirm Real Mode", "ACCOUNT_MODE_REAL_CONFIRM")],
+                [("✕ Cancel", "START_SETTINGS")],
             ]
         )
 
     @staticmethod
     def auto_trade_keyboard() -> object:
-        if InlineKeyboardMarkup is None:
-            return [["🚀 Start Scan"], ["✕ Cancel"]]
-        return InlineKeyboardMarkup(
+        return TelegramKeyboard._keyboard(
             [
-                [InlineKeyboardButton("🚀 Start Scan", callback_data="AUTO_TRADE_START_SCAN")],
-                [InlineKeyboardButton("✕ Cancel", callback_data="AUTO_TRADE_CANCEL")],
+                [("🚀 Start Scan", "AUTO_TRADE_START_SCAN")],
+                [("✕ Cancel", "AUTO_TRADE_CANCEL")],
             ]
         )
 
     @staticmethod
     def stake_keyboard() -> object:
-        if InlineKeyboardMarkup is None:
-            return [["$1"], ["$2"], ["$5"], ["$10"], ["Custom"]]
-        return InlineKeyboardMarkup(
+        return TelegramKeyboard._keyboard(
             [
-                [InlineKeyboardButton("$1", callback_data="AUTO_TRADE_STAKE_1")],
-                [InlineKeyboardButton("$2", callback_data="AUTO_TRADE_STAKE_2")],
-                [InlineKeyboardButton("$5", callback_data="AUTO_TRADE_STAKE_5")],
-                [InlineKeyboardButton("$10", callback_data="AUTO_TRADE_STAKE_10")],
-                [InlineKeyboardButton("Custom Stake", callback_data="AUTO_TRADE_STAKE_CUSTOM")],
+                [("$1", "AUTO_TRADE_STAKE_1")],
+                [("$2", "AUTO_TRADE_STAKE_2")],
+                [("$5", "AUTO_TRADE_STAKE_5")],
+                [("$10", "AUTO_TRADE_STAKE_10")],
+                [("✕ Cancel", "AUTO_TRADE_CANCEL")],
             ]
         )
 
     @staticmethod
     def confirmation_keyboard() -> object:
-        if InlineKeyboardMarkup is None:
-            return [["✅ Confirm & Start"], ["✕ Cancel"]]
-        return InlineKeyboardMarkup(
+        return TelegramKeyboard._keyboard(
             [
-                [InlineKeyboardButton("✅ Confirm & Start", callback_data="AUTO_TRADE_CONFIRM")],
-                [InlineKeyboardButton("✕ Cancel", callback_data="AUTO_TRADE_CANCEL")],
+                [("✅ Confirm & Start", "AUTO_TRADE_CONFIRM")],
+                [("✕ Cancel", "AUTO_TRADE_CANCEL")],
             ]
         )
 
     @staticmethod
     def status_keyboard() -> object:
-        if InlineKeyboardMarkup is None:
-            return [["Refresh"], ["Disconnect"]]
-        return InlineKeyboardMarkup(
+        return TelegramKeyboard._keyboard(
             [
-                [InlineKeyboardButton("Refresh", callback_data="START_STATUS")],
-                [InlineKeyboardButton("Disconnect", callback_data="START_LOGOUT")],
+                [("Refresh", "START_STATUS")],
+                [("Disconnect", "START_LOGOUT")],
             ]
         )
