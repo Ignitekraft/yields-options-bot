@@ -35,7 +35,8 @@ class AuthService:
         except Exception:
             pass
 
-    def begin_oauth_session(self, telegram_user_id: str) -> Dict[str, str]:
+    def begin_oauth_session(self, telegram_user_id: str | int) -> Dict[str, str]:
+        user_key = str(telegram_user_id)
         state = secrets.token_urlsafe(32)
         code_verifier = secrets.token_urlsafe(48)
         code_challenge = base64.urlsafe_b64encode(
@@ -43,7 +44,7 @@ class AuthService:
         ).rstrip(b"=").decode("utf-8")
 
         states = self._load_json(STATE_FILE)
-        states[str(telegram_user_id)] = {
+        states[user_key] = {
             "state": state,
             "code_verifier": code_verifier,
             "code_challenge": code_challenge,
@@ -51,9 +52,10 @@ class AuthService:
         self._save_json(STATE_FILE, states)
         return {"state": state, "code_verifier": code_verifier, "code_challenge": code_challenge}
 
-    def validate_state(self, telegram_user_id: str, state: str) -> bool:
+    def validate_state(self, telegram_user_id: str | int, state: str) -> bool:
+        user_key = str(telegram_user_id)
         states = self._load_json(STATE_FILE)
-        session = states.get(str(telegram_user_id), {})
+        session = states.get(user_key, {})
         return bool(session.get("state")) and session["state"] == state
 
     def get_pending_user_for_state(self, state: str) -> Optional[str]:
@@ -63,7 +65,8 @@ class AuthService:
                 return telegram_user_id
         return None
 
-    def complete_oauth_session(self, telegram_user_id: str, token_payload: Dict[str, Any]) -> Dict[str, Any]:
+    def complete_oauth_session(self, telegram_user_id: str | int, token_payload: Dict[str, Any]) -> Dict[str, Any]:
+        user_key = str(telegram_user_id)
         tokens = self._load_json(TOKEN_FILE)
         token_data = {
             "access_token": token_payload.get("access_token"),
@@ -71,29 +74,30 @@ class AuthService:
             "expires_in": token_payload.get("expires_in"),
             "token_type": token_payload.get("token_type", "Bearer"),
         }
-        tokens[str(telegram_user_id)] = token_data
+        tokens[user_key] = token_data
         self._save_json(TOKEN_FILE, tokens)
 
         user_tokens = self._load_json(TOKEN_COUNT_FILE)
-        if str(telegram_user_id) not in user_tokens:
-            user_tokens[str(telegram_user_id)] = 50
+        if user_key not in user_tokens:
+            user_tokens[user_key] = 50
             self._save_json(TOKEN_COUNT_FILE, user_tokens)
 
         states = self._load_json(STATE_FILE)
-        states.pop(str(telegram_user_id), None)
+        states.pop(user_key, None)
         self._save_json(STATE_FILE, states)
         return token_data
 
     def exchange_oauth_code(
         self,
-        telegram_user_id: str,
+        telegram_user_id: str | int,
         code: str,
         redirect_uri: str,
         client_id: str,
         client_secret: str = "",
     ) -> Dict[str, Any]:
+        user_key = str(telegram_user_id)
         states = self._load_json(STATE_FILE)
-        session = states.get(str(telegram_user_id), {})
+        session = states.get(user_key, {})
         code_verifier = session.get("code_verifier")
         if not code_verifier:
             raise ValueError("missing_code_verifier")
@@ -113,24 +117,28 @@ class AuthService:
         data = response.json()
         return self.complete_oauth_session(telegram_user_id, data)
 
-    def get_valid_access_token(self, telegram_user_id: str) -> Optional[str]:
+    def get_valid_access_token(self, telegram_user_id: str | int) -> Optional[str]:
+        user_key = str(telegram_user_id)
         tokens = self._load_json(TOKEN_FILE)
-        record = tokens.get(str(telegram_user_id))
+        record = tokens.get(user_key)
         if not record:
             return None
         return record.get("access_token")
 
-    def get_connected_account(self, telegram_user_id: str) -> Optional[Dict[str, Any]]:
+    def get_connected_account(self, telegram_user_id: str | int) -> Optional[Dict[str, Any]]:
+        user_key = str(telegram_user_id)
         tokens = self._load_json(TOKEN_FILE)
-        return tokens.get(str(telegram_user_id))
+        return tokens.get(user_key)
 
-    def disconnect_user(self, telegram_user_id: str) -> bool:
+    def disconnect_user(self, telegram_user_id: str | int) -> bool:
+        user_key = str(telegram_user_id)
         tokens = self._load_json(TOKEN_FILE)
-        if str(telegram_user_id) in tokens:
-            del tokens[str(telegram_user_id)]
+        if user_key in tokens:
+            del tokens[user_key]
             self._save_json(TOKEN_FILE, tokens)
         return True
 
-    def get_user_tokens(self, telegram_user_id: str) -> int:
+    def get_user_tokens(self, telegram_user_id: str | int) -> int:
+        user_key = str(telegram_user_id)
         user_tokens = self._load_json(TOKEN_COUNT_FILE)
-        return user_tokens.get(str(telegram_user_id), 50)
+        return user_tokens.get(user_key, 50)

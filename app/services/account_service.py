@@ -14,8 +14,9 @@ class AccountService:
     def __init__(self, auth_service: AuthService) -> None:
         self.auth_service = auth_service
 
-    def get_account_status(self, telegram_user_id: str) -> Dict[str, Any]:
-        account = self.auth_service.get_connected_account(str(telegram_user_id))
+    def get_account_status(self, telegram_user_id: str | int) -> Dict[str, Any]:
+        user_key = str(telegram_user_id)
+        account = self.auth_service.get_connected_account(user_key)
         if not account or not account.get("access_token"):
             return {"connected": False}
 
@@ -27,9 +28,10 @@ class AccountService:
             "balance": "Ready",
         }
 
-    async def get_live_balances(self, telegram_user_id: str) -> Dict[str, Any]:
-        token = self.auth_service.get_valid_access_token(str(telegram_user_id))
-        tokens_count = self.auth_service.get_user_tokens(str(telegram_user_id))
+    async def get_live_balances(self, telegram_user_id: str | int) -> Dict[str, Any]:
+        user_key = str(telegram_user_id)
+        token = self.auth_service.get_valid_access_token(user_key)
+        tokens_count = self.auth_service.get_user_tokens(user_key)
 
         if not token:
             return {"connected": False}

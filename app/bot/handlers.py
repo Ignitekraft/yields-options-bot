@@ -18,7 +18,7 @@ def handle_start() -> str:
     return START_MESSAGE
 
 
-def handle_status(telegram_user_id: str) -> str:
+def handle_status(telegram_user_id: str | int) -> str:
     account = account_service.get_account_status(str(telegram_user_id))
     if not account["connected"]:
         return NO_CONNECTION_MESSAGE
@@ -29,7 +29,7 @@ def handle_status(telegram_user_id: str) -> str:
     )
 
 
-async def handle_balance(telegram_user_id: str) -> str:
+async def handle_balance(telegram_user_id: str | int) -> str:
     """Return formatted real/demo balances and bot usage tokens."""
     status = account_service.get_account_status(str(telegram_user_id))
     if not status["connected"]:
@@ -44,7 +44,7 @@ async def handle_balance(telegram_user_id: str) -> str:
     )
 
 
-def handle_connect(telegram_user_id: str) -> str:
+def handle_connect(telegram_user_id: str | int) -> str:
     """Start a secure Deriv OAuth session for a Telegram user."""
     session = auth_service.begin_oauth_session(str(telegram_user_id))
     client_id = settings.deriv_app_id or settings.deriv_client_id
@@ -62,7 +62,7 @@ def handle_connect(telegram_user_id: str) -> str:
     )
 
 
-def handle_logout(telegram_user_id: str) -> str:
+def handle_logout(telegram_user_id: str | int) -> str:
     auth_service.disconnect_user(str(telegram_user_id))
     return "🔒 Deriv account disconnected. You can reconnect any time with /connect."
 
