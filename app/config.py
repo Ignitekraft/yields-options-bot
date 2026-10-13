@@ -12,7 +12,7 @@ class Settings:
     deriv_client_secret: str = os.getenv("DERIV_CLIENT_SECRET", "")
     deriv_redirect_uri: str = os.getenv("DERIV_REDIRECT_URI", "https://example.com/auth/deriv/callback")
     deriv_app_id: str = os.getenv("DERIV_APP_ID", os.getenv("DERIV_CLIENT_ID", ""))
-    deriv_public_ws_url: str = os.getenv("DERIV_PUBLIC_WS_URL", "wss://ws.binaryws.com/websockets/v3")
+    deriv_public_ws_url: str = os.getenv("DERIV_PUBLIC_WS_URL", "wss://ws.derivws.com/websockets/v3")
     environment: str = os.getenv("APP_ENV", "development")
     gemini_api_key: str = os.getenv("GEMINI_API_KEY", "")
     gemini_model: str = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")

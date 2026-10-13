@@ -14,7 +14,7 @@ class AuthenticatedDerivWebSocket:
     def get_connection_url(self) -> str:
         if self.otp_url:
             return self.otp_url
-        return "wss://ws.binaryws.com/websockets/v3"
+        return "wss://ws.derivws.com/websockets/v3"
 
     def build_message(self, action: str, **kwargs: Any) -> dict[str, Any]:
         payload: dict[str, Any] = {"req_id": kwargs.get("req_id", 1)}

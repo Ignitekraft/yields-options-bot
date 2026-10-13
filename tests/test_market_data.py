@@ -284,6 +284,43 @@ class MarketDataTests(unittest.TestCase):
         self.assertEqual(buy["status"], "accepted")
         self.assertIn("contract_id", buy)
 
+    def test_trading_service_uses_deriv_websocket_protocol(self):
+        class MockAuthService:
+            def get_valid_access_token(self, user_id):
+                return "mock-access-token"
+
+        class FakeWebSocket:
+            def __init__(self):
+                self.sent = []
+                self.responses = iter([
+                    '{"echo_req": {"authorize": "mock-access-token"}}',
+                    '{"proposal": {"id": "proposal-123", "ask_price": 1.25}}',
+                    '{"buy": {"contract_id": "contract-123", "buy_price": 1.25, "balance_after": 1000.0, "shortcode": "CALL"}}',
+                ])
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return None
+
+            async def send(self, payload):
+                self.sent.append(json.loads(payload))
+
+            async def recv(self):
+                return next(self.responses)
+
+        trading = TradingService(MockAuthService())
+
+        with patch("app.services.trading_service.websockets.connect", return_value=FakeWebSocket()) as connect_mock:
+            result = asyncio.run(trading.execute_trade_cycles("telegram-user-200", "step_100", "CALL", 10.0, 30, 1))
+
+        self.assertEqual(connect_mock.call_args.args[0], trading.get_deriv_ws_url())
+        self.assertEqual(result[0]["contract_id"], "contract-123")
+        self.assertEqual(result[0]["symbol"], "R_100")
+        self.assertEqual(result[0]["contract_type"], "CALL")
+        self.assertEqual(trading.resolve_contract_type("CALL"), "CALL")
+
     def test_live_balance_fetch_uses_deriv_otp_websocket_flow(self):
         async def run_test():
             auth = AuthService()

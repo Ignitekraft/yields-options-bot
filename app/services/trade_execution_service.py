@@ -4,7 +4,6 @@ import json
 import logging
 from typing import Any
 
-import httpx
 import websockets
 
 from app.config import settings
@@ -69,28 +68,20 @@ class TradeExecutionService:
         raise ValueError(f"Market {step_market} could not be resolved to a supported Deriv underlying symbol.")
 
     @staticmethod
-    async def _fetch_authenticated_ws_url(access_token: str, account_id: str) -> str:
-        response = httpx.post(
-            f"https://api.derivws.com/trading/v1/options/accounts/{account_id}/otp",
-            headers={
-                "Authorization": f"Bearer {access_token}",
-                "Content-Type": "application/json",
-            },
-            timeout=20.0,
-        )
-        response.raise_for_status()
-        payload = response.json()
-        ws_url = None
-        if isinstance(payload, dict):
-            data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
-            ws_url = data.get("url") if isinstance(data, dict) else None
-        if not ws_url:
-            raise ValueError(f"No authenticated websocket URL returned for account {account_id}")
-        return str(ws_url)
+    def get_ws_url(app_id: str | int | None = None) -> str:
+        app_id_value = str(app_id or settings.deriv_app_id or settings.deriv_client_id or "1089").strip()
+        if not app_id_value:
+            app_id_value = "1089"
+        return f"wss://ws.derivws.com/websockets/v3?app_id={app_id_value}"
 
     @staticmethod
-    async def _send_ws_request(ws_url: str, payload: dict[str, Any]) -> dict[str, Any]:
+    async def _send_ws_request(access_token: str, payload: dict[str, Any], app_id: str | int | None = None) -> dict[str, Any]:
+        ws_url = TradeExecutionService.get_ws_url(app_id)
         async with websockets.connect(ws_url) as websocket:
+            await websocket.send(json.dumps({"authorize": access_token}))
+            auth_response = json.loads(await websocket.recv())
+            if isinstance(auth_response, dict) and auth_response.get("error"):
+                raise ValueError(str(auth_response.get("error")).replace("\n", " "))
             await websocket.send(json.dumps(payload))
             response_text = await websocket.recv()
         response = json.loads(response_text) if isinstance(response_text, str) else response_text
@@ -127,8 +118,7 @@ class TradeExecutionService:
             "req_id": f"proposal-{user_id}-{int(stake)}-{expiry_seconds}",
             "subscribe": 1,
         }
-        ws_url = await self._fetch_authenticated_ws_url(access_token, account_id)
-        response = await self._send_ws_request(ws_url, payload)
+        response = await self._send_ws_request(access_token, payload, app_id=settings.deriv_app_id or settings.deriv_client_id)
         proposal = response.get("proposal") if isinstance(response, dict) else None
         if proposal is None and isinstance(response, dict) and response.get("proposal_id"):
             proposal = response
@@ -165,7 +155,6 @@ class TradeExecutionService:
         direction: str,
     ) -> dict[str, Any]:
         contract_type = self.resolve_contract_direction(direction)
-        ws_url = await self._fetch_authenticated_ws_url(access_token, account_id)
         payload = {
             "buy": proposal_id,
             "price": float(ask_price),
@@ -173,7 +162,7 @@ class TradeExecutionService:
             "contract_type": contract_type,
             "symbol": market_symbol,
         }
-        response = await self._send_ws_request(ws_url, payload)
+        response = await self._send_ws_request(access_token, payload, app_id=settings.deriv_app_id or settings.deriv_client_id)
         if isinstance(response, dict) and response.get("error"):
             raise ValueError(str(response.get("error")))
 
@@ -203,14 +192,13 @@ class TradeExecutionService:
         account_id: str,
         contract_id: str,
     ) -> dict[str, Any]:
-        ws_url = await self._fetch_authenticated_ws_url(access_token, account_id)
         payload = {
             "proposal_open_contract": 1,
             "contract_id": contract_id,
             "subscribe": 1,
             "req_id": f"monitor-{user_id}-{contract_id}",
         }
-        response = await self._send_ws_request(ws_url, payload)
+        response = await self._send_ws_request(access_token, payload, app_id=settings.deriv_app_id or settings.deriv_client_id)
         contract = response.get("proposal_open_contract") if isinstance(response, dict) else None
         if not isinstance(contract, dict):
             contract = response if isinstance(response, dict) else {}
