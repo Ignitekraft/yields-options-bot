@@ -7,7 +7,7 @@ from app.services.deriv.auth import build_deriv_oauth_url
 from app.services.deriv.market_data import MarketDataService
 from app.services.scanner import YieldsScanner
 
-from .messages import CONNECTED_MESSAGE, NO_CONNECTION_MESSAGE, SCAN_MESSAGE, START_MESSAGE
+from .messages import NO_CONNECTION_MESSAGE, SCAN_MESSAGE, START_MESSAGE
 
 
 auth_service = AuthService()
@@ -24,12 +24,23 @@ def handle_status(telegram_user_id: str) -> str:
         return NO_CONNECTION_MESSAGE
 
     return (
-        "🟢 Deriv account connected.\n\n"
-        f"Account: {account['account_id']}\n"
-        f"Type: {account['type']}\n"
-        f"Currency: {account['currency']}\n"
-        f"Balance: {account['balance']}\n\n"
-        "Yields is ready."
+        "🟢 Deriv account connected successfully.\n\n"
+        "You can now use /balance, /scan, and trading tools."
+    )
+
+
+async def handle_balance(telegram_user_id: str) -> str:
+    """Return formatted real/demo balances and bot usage tokens."""
+    status = account_service.get_account_status(str(telegram_user_id))
+    if not status["connected"]:
+        return "🔴 Deriv account not connected. Use /connect to link your account."
+
+    balances = await account_service.get_live_balances(str(telegram_user_id))
+    
+    return (
+        f"💰 **Real:** {balances.get('real', '0.00 USD')}\n"
+        f"🎮 **Demo:** {balances.get('demo', '0.00 USD')}\n"
+        f"💎 **Tokens:** {balances.get('tokens', 50)}"
     )
 
 
@@ -57,7 +68,6 @@ def handle_logout(telegram_user_id: str) -> str:
 
 
 def handle_scan() -> str:
-    """Invoke the public-market-data flow without account auth."""
     market_service = MarketDataService()
     scanner = YieldsScanner()
 
