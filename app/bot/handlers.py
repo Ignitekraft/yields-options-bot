@@ -53,7 +53,7 @@ async def handle_balance(telegram_user_id: str | int) -> str:
         return f"{label}: Not available"
 
     return (
-        "💰 **Deriv Balances**\n\n"
+        "💰 Deriv Balances\n\n"
         f"💵 {format_value(real, 'Real')}\n"
         f"🎮 {format_value(demo, 'Demo')}\n\n"
         f"💎 Yields Tokens: {tokens}"
