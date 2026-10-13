@@ -1,21 +1,40 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
-import logging
 from typing import Any
-from urllib.parse import urlparse
 
-import httpx
 import websockets
 
 from app.config import settings
 
-logger = logging.getLogger(__name__)
+
+class UnknownBuyOutcome(RuntimeError):
+    """
+    Raised when the buy request may have reached Deriv but the client cannot
+    determine whether the contract was purchased.
+
+    IMPORTANT:
+    Never automatically retry a buy after this exception.
+    """
+
+    pass
 
 
 class TradeExecutionService:
-    """Authenticated trade execution helpers for Deriv Rise/Fall contracts only."""
+    """
+    Canonical real Deriv Rise/Fall execution service.
+
+    Authentication is handled outside this class:
+        OAuth token
+            -> Options account resolution
+            -> OTP request
+            -> authenticated WebSocket URL
+
+    This service receives the already-authenticated OTP WebSocket URL and
+    performs proposal + buy over that connection.
+    """
 
     STEP_MARKET_MAP = {
         "step_100": "R_100",
@@ -25,276 +44,343 @@ class TradeExecutionService:
         "step_500": "R_500",
     }
 
-    @staticmethod
-    def calculate_next_stake(base_stake: float, martingale_step: int, multiplier: float | None = None) -> float:
-        multiplier = float(multiplier if multiplier is not None else settings.martingale_multiplier)
-        step_index = max(0, int(martingale_step) - 1)
-        next_stake = float(base_stake) * (multiplier ** step_index)
-        return round(next_stake, 2)
+    _req_counter = itertools.count(1)
 
-    @staticmethod
-    def validate_stake(stake: float, account_balance: float | None = None) -> tuple[bool, str | None]:
-        if stake is None or not isinstance(stake, (int, float)):
-            return False, "invalid_stake"
-        amount = float(stake)
-        if amount <= 0:
-            return False, "invalid_stake"
-        if amount > 1000000:
-            return False, "stake_too_large"
-        if account_balance is not None and amount > float(account_balance):
-            return False, "insufficient_balance"
-        return True, None
-
-    @staticmethod
-    def resolve_contract_direction(direction: str) -> str:
-        normalized = str(direction).upper()
-        if normalized in {"BULLISH", "CALL"}:
-            return "CALL"
-        if normalized in {"BEARISH", "PUT"}:
-            return "PUT"
-        raise ValueError(f"Unsupported Auto Trade direction: {direction}")
-
-    @staticmethod
-    def resolve_market_symbol(step_market: str, available_symbols: list[dict[str, Any]] | None = None) -> str:
-        configured = str(step_market).lower()
-        mapped = TradeExecutionService.STEP_MARKET_MAP.get(configured)
-        if mapped:
-            return mapped
-        if available_symbols:
-            for item in available_symbols:
-                symbol = str(item.get("symbol") or "").strip()
-                display_name = str(item.get("display_name") or "").lower()
-                if symbol.lower() == configured:
-                    return symbol
-                if configured.replace("step_", "volatility ") in display_name:
-                    return symbol
-        raise ValueError(f"Market {step_market} could not be resolved to a supported Deriv underlying symbol.")
-
-    @staticmethod
-    def get_ws_url(app_id: str | int | None = None) -> str:
-        app_id_value = str(app_id or settings.deriv_app_id or settings.deriv_client_id or "1089").strip()
-        if not app_id_value:
-            app_id_value = "1089"
-        return f"wss://ws.derivws.com/websockets/v3?app_id={app_id_value}"
-
-    @staticmethod
-    async def request_otp_url(access_token: str, account_id: str) -> str:
-        if not access_token:
-            raise ValueError("Missing Deriv access token.")
-        if not account_id:
-            raise ValueError("Missing Deriv account_id.")
-
-        async with httpx.AsyncClient(timeout=20.0) as client:
-            response = await client.post(
-                f"https://api.derivws.com/trading/v1/options/accounts/{account_id}/otp",
-                headers={
-                    "Authorization": f"Bearer {access_token}",
-                    "Content-Type": "application/json",
-                },
-            )
-
-        if response.status_code != 200:
-            details = (response.text or "")[:200].replace("\n", " ")
-            raise ValueError(f"OTP request rejected: HTTP {response.status_code}. {details}")
-
-        try:
-            payload = response.json()
-        except ValueError as exc:
-            raise ValueError("OTP response was not valid JSON.") from exc
-
-        data = payload.get("data") if isinstance(payload, dict) else None
-        if not isinstance(data, dict):
-            raise ValueError("OTP response was malformed: missing data object.")
-
-        ws_url = data.get("url")
-        if not isinstance(ws_url, str) or not ws_url.strip():
-            raise ValueError("OTP response missing a valid data.url.")
-
-        parsed = urlparse(ws_url)
-        if parsed.scheme != "wss":
-            raise ValueError("OTP returned a non-secure WebSocket URL.")
-        if not parsed.netloc:
-            raise ValueError("OTP returned an invalid WebSocket URL.")
-        if "/websockets/" not in parsed.path.lower():
-            raise ValueError("OTP URL is not a Deriv WebSocket endpoint.")
-
-        return ws_url.strip()
-
-    @staticmethod
-    async def _send_ws_request(access_token: str, payload: dict[str, Any], account_id: str, app_id: str | int | None = None) -> dict[str, Any]:
-        ws_url = TradeExecutionService.get_ws_url(app_id)
-        parsed = urlparse(ws_url)
-        safe_target = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
-        logger.info(
-            "Deriv websocket stage=handshake_start account_id=%s account_type=%s host=%s path=%s",
-            account_id,
-            "real" if str(account_id).lower().startswith("real") else "demo",
-            parsed.netloc,
-            parsed.path,
+    def __init__(self) -> None:
+        self.martingale_multiplier = float(
+            getattr(settings, "martingale_multiplier", 2.0)
         )
 
+    @classmethod
+    def next_req_id(cls) -> int:
+        return next(cls._req_counter)
+
+    @classmethod
+    def normalize_step_symbol(cls, symbol: str) -> str:
+        value = str(symbol or "").strip()
+
+        if not value:
+            raise ValueError("MISSING_MARKET_SYMBOL")
+
+        lowered = value.lower()
+
+        if lowered in cls.STEP_MARKET_MAP:
+            return cls.STEP_MARKET_MAP[lowered]
+
+        if lowered.startswith("step_"):
+            suffix = lowered.split("_", 1)[1]
+
+            if suffix.isdigit():
+                return f"R_{suffix}"
+
+        upper = value.upper()
+
+        if upper in cls.STEP_MARKET_MAP.values():
+            return upper
+
+        if upper.startswith("R_"):
+            return upper
+
+        raise ValueError(
+            f"UNSUPPORTED_STEP_MARKET:{symbol}"
+        )
+
+    @staticmethod
+    def resolve_contract_type(direction: str) -> str:
+        normalized = str(direction or "").strip().upper()
+
+        if normalized in {"BULLISH", "RISE", "CALL"}:
+            return "CALL"
+
+        if normalized in {"BEARISH", "FALL", "PUT"}:
+            return "PUT"
+
+        raise ValueError(
+            f"UNSUPPORTED_RISE_FALL_DIRECTION:{direction}"
+        )
+
+    @staticmethod
+    def validate_stake(stake: float) -> float:
         try:
-            async with websockets.connect(ws_url, open_timeout=15, ping_timeout=20, ping_interval=20) as websocket:
-                await asyncio.wait_for(websocket.send(json.dumps({"authorize": access_token})), timeout=15)
-                auth_response = json.loads(await asyncio.wait_for(websocket.recv(), timeout=20))
-                if isinstance(auth_response, dict) and auth_response.get("error"):
-                    raise ValueError(str(auth_response.get("error")))
+            value = float(stake)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("INVALID_STAKE") from exc
 
-                await asyncio.wait_for(websocket.send(json.dumps(payload)), timeout=15)
-                response_text = await asyncio.wait_for(websocket.recv(), timeout=20)
-        except Exception as exc:  # pragma: no cover - network failure guard
-            logger.warning(
-                "Deriv websocket stage=handshake_failed account_id=%s account_type=%s target=%s exception=%s: %s",
-                account_id,
-                "real" if str(account_id).lower().startswith("real") else "demo",
-                safe_target,
-                type(exc).__name__,
-                str(exc)[:300],
+        if value <= 0:
+            raise ValueError("STAKE_MUST_BE_GREATER_THAN_ZERO")
+
+        return round(value, 2)
+
+    @staticmethod
+    def validate_expiry(expiry_seconds: int) -> int:
+        value = int(expiry_seconds)
+
+        if value != 30:
+            raise ValueError(
+                "YIELDS_EXPIRY_MUST_BE_30_SECONDS"
             )
-            raise
 
-        response = json.loads(response_text) if isinstance(response_text, str) else response_text
-        if isinstance(response, dict) and response.get("error"):
-            raise ValueError(str(response.get("error")))
-        return response if isinstance(response, dict) else {"status": "unknown", "payload": response}
+        return 30
 
-    async def create_proposal(
-        self,
-        user_id: str | int,
-        access_token: str,
-        account_id: str,
-        market_symbol: str,
+    @classmethod
+    def build_proposal_payload(
+        cls,
+        symbol: str,
         direction: str,
         stake: float,
-        currency: str = "USD",
         expiry_seconds: int = 30,
+        currency: str = "USD",
     ) -> dict[str, Any]:
-        contract_type = self.resolve_contract_direction(direction)
-        resolved_symbol = self.resolve_market_symbol(market_symbol)
-        valid, reason = self.validate_stake(stake)
-        if not valid:
-            raise ValueError(reason or "invalid_stake")
+        resolved_symbol = cls.normalize_step_symbol(symbol)
+        contract_type = cls.resolve_contract_type(direction)
+        amount = cls.validate_stake(stake)
+        expiry = cls.validate_expiry(expiry_seconds)
 
-        payload = {
+        return {
             "proposal": 1,
-            "amount": float(stake),
+            "amount": amount,
             "basis": "stake",
             "contract_type": contract_type,
-            "currency": str(currency or "USD"),
-            "duration": int(expiry_seconds),
+            "currency": str(currency or "USD").upper(),
+            "duration": expiry,
             "duration_unit": "s",
-            "symbol": resolved_symbol,
-            "req_id": f"proposal-{user_id}-{int(stake)}-{expiry_seconds}",
-            "subscribe": 1,
-        }
-        response = await self._send_ws_request(
-            access_token,
-            payload,
-            account_id,
-            app_id=settings.deriv_app_id or settings.deriv_client_id,
-        )
-        proposal = response.get("proposal") if isinstance(response, dict) else None
-        if proposal is None and isinstance(response, dict) and response.get("proposal_id"):
-            proposal = response
-        if not isinstance(proposal, dict):
-            raise ValueError("Proposal request rejected by Deriv.")
-
-        proposal_id = proposal.get("proposal_id") or proposal.get("id")
-        ask_price = proposal.get("ask_price") or proposal.get("price")
-        if not proposal_id or float(ask_price or 0) <= 0:
-            raise ValueError("Proposal response missing proposal_id or usable price.")
-
-        return {
-            "status": "valid",
-            "proposal_id": str(proposal_id),
-            "contract_type": contract_type,
-            "market_symbol": resolved_symbol,
-            "symbol": resolved_symbol,
-            "amount": float(stake),
-            "currency": str(currency or "USD"),
-            "duration": int(expiry_seconds),
-            "duration_unit": "s",
-            "ask_price": float(ask_price),
-            "raw": proposal,
+            "underlying_symbol": resolved_symbol,
+            "req_id": cls.next_req_id(),
         }
 
-    async def buy_contract(
-        self,
-        user_id: str | int,
-        access_token: str,
-        account_id: str,
-        proposal_id: str,
-        ask_price: float,
-        market_symbol: str,
+    @staticmethod
+    def _error_message(response: dict[str, Any]) -> str:
+        error = response.get("error")
+
+        if isinstance(error, dict):
+            code = error.get("code")
+            message = error.get("message")
+
+            if code and message:
+                return f"{code}:{message}"
+
+            if message:
+                return str(message)
+
+        return "DERIV_REQUEST_FAILED"
+
+    @classmethod
+    async def _request(
+        cls,
+        websocket: Any,
+        payload: dict[str, Any],
+        expected_key: str,
+        timeout: float = 20.0,
+    ) -> dict[str, Any]:
+        req_id = payload.get("req_id")
+
+        try:
+            await asyncio.wait_for(
+                websocket.send(json.dumps(payload)),
+                timeout=15,
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                "DERIV_REQUEST_SEND_FAILED"
+            ) from exc
+
+        while True:
+            try:
+                raw = await asyncio.wait_for(
+                    websocket.recv(),
+                    timeout=timeout,
+                )
+            except asyncio.TimeoutError as exc:
+                raise RuntimeError(
+                    f"DERIV_{expected_key.upper()}_TIMEOUT"
+                ) from exc
+
+            if isinstance(raw, bytes):
+                raw = raw.decode("utf-8")
+
+            try:
+                response = json.loads(raw)
+            except (TypeError, ValueError):
+                continue
+
+            if not isinstance(response, dict):
+                continue
+
+            if "error" in response:
+                raise RuntimeError(
+                    cls._error_message(response)
+                )
+
+            echo_req = response.get("echo_req")
+
+            if (
+                req_id is not None
+                and isinstance(echo_req, dict)
+                and echo_req.get("req_id") not in {None, req_id}
+            ):
+                continue
+
+            if expected_key in response:
+                return response
+
+            if response.get("msg_type") == expected_key:
+                return response
+
+    @classmethod
+    async def _create_proposal_on_ws(
+        cls,
+        websocket: Any,
+        symbol: str,
         direction: str,
+        stake: float,
+        expiry_seconds: int,
+        currency: str,
     ) -> dict[str, Any]:
-        contract_type = self.resolve_contract_direction(direction)
-        payload = {
-            "buy": proposal_id,
-            "price": float(ask_price),
-            "req_id": f"buy-{user_id}-{proposal_id}",
-            "contract_type": contract_type,
-            "symbol": market_symbol,
-        }
-        response = await self._send_ws_request(
-            access_token,
-            payload,
-            account_id,
-            app_id=settings.deriv_app_id or settings.deriv_client_id,
+        payload = cls.build_proposal_payload(
+            symbol=symbol,
+            direction=direction,
+            stake=stake,
+            expiry_seconds=expiry_seconds,
+            currency=currency,
         )
-        if isinstance(response, dict) and response.get("error"):
-            raise ValueError(str(response.get("error")))
 
-        buy_payload = response.get("buy") if isinstance(response, dict) else None
-        if not isinstance(buy_payload, dict):
-            raise ValueError("Buy request was not acknowledged by Deriv.")
+        response = await cls._request(
+            websocket,
+            payload,
+            expected_key="proposal",
+        )
 
-        contract_id = buy_payload.get("contract_id") or buy_payload.get("id")
-        if not contract_id:
-            raise ValueError("Buy response missing contract_id.")
+        proposal = response.get("proposal")
+
+        if not isinstance(proposal, dict):
+            raise RuntimeError(
+                "DERIV_PROPOSAL_RESPONSE_MALFORMED"
+            )
+
+        proposal_id = proposal.get("id")
+        ask_price = proposal.get("ask_price")
+
+        if not proposal_id:
+            raise RuntimeError(
+                "DERIV_PROPOSAL_ID_MISSING"
+            )
+
+        try:
+            ask_price = float(ask_price)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                "DERIV_PROPOSAL_PRICE_MISSING"
+            ) from exc
+
+        if ask_price <= 0:
+            raise RuntimeError(
+                "DERIV_PROPOSAL_PRICE_INVALID"
+            )
 
         return {
-            "status": "accepted",
-            "contract_id": str(contract_id),
             "proposal_id": str(proposal_id),
-            "market_symbol": market_symbol,
-            "direction": direction,
-            "contract_type": contract_type,
-            "buy_price": float(ask_price),
-            "raw": buy_payload,
+            "ask_price": ask_price,
+            "response": response,
         }
 
-    async def monitor_contract(
-        self,
-        user_id: str | int,
-        access_token: str,
-        account_id: str,
-        contract_id: str,
+    @classmethod
+    async def _buy_on_ws(
+        cls,
+        websocket: Any,
+        proposal_id: str,
+        price: float,
     ) -> dict[str, Any]:
+        req_id = cls.next_req_id()
+
         payload = {
-            "proposal_open_contract": 1,
-            "contract_id": contract_id,
-            "subscribe": 1,
-            "req_id": f"monitor-{user_id}-{contract_id}",
+            "buy": str(proposal_id),
+            "price": float(price),
+            "req_id": req_id,
         }
-        response = await self._send_ws_request(
-            access_token,
-            payload,
-            account_id,
-            app_id=settings.deriv_app_id or settings.deriv_client_id,
-        )
-        contract = response.get("proposal_open_contract") if isinstance(response, dict) else None
-        if not isinstance(contract, dict):
-            contract = response if isinstance(response, dict) else {}
-        if not contract:
-            raise ValueError("Contract status fetch returned no data.")
-        return {
-            "status": contract.get("status") or "unknown",
-            "contract_id": contract_id,
-            "profit": contract.get("profit"),
-            "payout": contract.get("payout"),
-            "raw": contract,
-        }
+
+        try:
+            await asyncio.wait_for(
+                websocket.send(json.dumps(payload)),
+                timeout=15,
+            )
+        except Exception as exc:
+            raise UnknownBuyOutcome(
+                "BUY_OUTCOME_UNKNOWN_AFTER_SEND_FAILURE"
+            ) from exc
+
+        try:
+            while True:
+                raw = await asyncio.wait_for(
+                    websocket.recv(),
+                    timeout=20,
+                )
+
+                if isinstance(raw, bytes):
+                    raw = raw.decode("utf-8")
+
+                response = json.loads(raw)
+
+                if not isinstance(response, dict):
+                    continue
+
+                if "error" in response:
+                    raise RuntimeError(
+                        cls._error_message(response)
+                    )
+
+                echo_req = response.get("echo_req")
+
+                if (
+                    isinstance(echo_req, dict)
+                    and echo_req.get("req_id") not in {None, req_id}
+                ):
+                    continue
+
+                if "buy" not in response:
+                    continue
+
+                buy = response.get("buy")
+
+                if not isinstance(buy, dict):
+                    raise RuntimeError(
+                        "DERIV_BUY_RESPONSE_MALFORMED"
+                    )
+
+                contract_id = (
+                    buy.get("contract_id")
+                    or buy.get("id")
+                )
+
+                if not contract_id:
+                    raise RuntimeError(
+                        "DERIV_CONTRACT_ID_MISSING"
+                    )
+
+                return {
+                    "contract_id": str(contract_id),
+                    "buy_price": buy.get(
+                        "buy_price",
+                        price,
+                    ),
+                    "balance_after": buy.get(
+                        "balance_after"
+                    ),
+                    "shortcode": buy.get(
+                        "shortcode"
+                    ),
+                    "response": response,
+                }
+
+        except UnknownBuyOutcome:
+            raise
+        except asyncio.TimeoutError as exc:
+            raise UnknownBuyOutcome(
+                "BUY_OUTCOME_UNKNOWN_AFTER_TIMEOUT"
+            ) from exc
+        except websockets.exceptions.ConnectionClosed as exc:
+            raise UnknownBuyOutcome(
+                "BUY_OUTCOME_UNKNOWN_AFTER_CONNECTION_CLOSED"
+            ) from exc
 
     async def execute_trade(
         self,
@@ -302,61 +388,230 @@ class TradeExecutionService:
         market_symbol: str,
         direction: str,
         stake: float,
-        account_id: str | None = None,
+        account_id: str,
         access_token: str | None = None,
         currency: str = "USD",
+        ws_url: str | None = None,
     ) -> dict[str, Any]:
-        if not market_symbol:
-            raise ValueError("Missing trade market selection.")
-        if not access_token:
-            raise ValueError("Missing Deriv access token.")
+        """
+        Execute exactly one Rise/Fall contract.
+
+        `ws_url` must be the fresh OTP URL generated for `account_id`.
+
+        access_token is retained in the signature for compatibility but is
+        deliberately NOT sent over the WebSocket.
+        """
+        del user_id
+        del access_token
+
         if not account_id:
-            raise ValueError("No Deriv account is available for this user.")
+            return {
+                "status": "rejected",
+                "reason": "MISSING_OPTIONS_ACCOUNT_ID",
+            }
 
-        proposal = await self.create_proposal(
-            user_id=user_id,
-            access_token=access_token,
-            account_id=account_id,
-            market_symbol=market_symbol,
-            direction=direction,
-            stake=stake,
-            currency=currency,
-            expiry_seconds=30,
+        if not ws_url:
+            return {
+                "status": "rejected",
+                "reason": "MISSING_AUTHENTICATED_WS_URL",
+            }
+
+        resolved_symbol = self.normalize_step_symbol(
+            market_symbol
+        )
+        resolved_contract_type = self.resolve_contract_type(
+            direction
         )
 
-        buy = await self.buy_contract(
-            user_id=user_id,
-            access_token=access_token,
-            account_id=account_id,
-            proposal_id=proposal["proposal_id"],
-            ask_price=proposal["ask_price"],
-            market_symbol=proposal["market_symbol"],
-            direction=direction,
+        try:
+            amount = self.validate_stake(stake)
+            expiry = self.validate_expiry(30)
+        except ValueError as exc:
+            return {
+                "status": "rejected",
+                "reason": str(exc),
+            }
+
+        try:
+            async with websockets.connect(
+                ws_url,
+                open_timeout=15,
+                ping_timeout=20,
+                ping_interval=20,
+            ) as websocket:
+                proposal = await self._create_proposal_on_ws(
+                    websocket=websocket,
+                    symbol=resolved_symbol,
+                    direction=resolved_contract_type,
+                    stake=amount,
+                    expiry_seconds=expiry,
+                    currency=currency,
+                )
+
+                buy = await self._buy_on_ws(
+                    websocket=websocket,
+                    proposal_id=proposal["proposal_id"],
+                    price=proposal["ask_price"],
+                )
+
+                return {
+                    "status": "accepted",
+                    "account_id": account_id,
+                    "symbol": resolved_symbol,
+                    "underlying_symbol": resolved_symbol,
+                    "direction": direction,
+                    "contract_type": resolved_contract_type,
+                    "stake": amount,
+                    "expiry_seconds": expiry,
+                    "proposal_id": proposal["proposal_id"],
+                    "contract_id": buy["contract_id"],
+                    "buy_price": buy["buy_price"],
+                    "balance_after": buy["balance_after"],
+                    "shortcode": buy["shortcode"],
+                }
+
+        except UnknownBuyOutcome as exc:
+            return {
+                "status": "unknown_buy_outcome",
+                "reason": str(exc),
+                "account_id": account_id,
+                "symbol": resolved_symbol,
+                "contract_type": resolved_contract_type,
+            }
+
+        except Exception as exc:
+            return {
+                "status": "rejected",
+                "reason": str(exc),
+                "account_id": account_id,
+                "symbol": resolved_symbol,
+                "contract_type": resolved_contract_type,
+            }
+
+    async def monitor_contract(
+        self,
+        contract_id: str,
+        ws_url: str,
+        timeout_seconds: int = 75,
+    ) -> dict[str, Any]:
+        """
+        Monitor a purchased contract using a fresh authenticated OTP URL.
+
+        A fresh OTP is required because each OTP URL is one-use.
+        """
+        if not contract_id:
+            raise ValueError("MISSING_CONTRACT_ID")
+
+        if not ws_url:
+            raise ValueError("MISSING_AUTHENTICATED_WS_URL")
+
+        req_id = self.next_req_id()
+
+        payload = {
+            "proposal_open_contract": 1,
+            "contract_id": str(contract_id),
+            "subscribe": 1,
+            "req_id": req_id,
+        }
+
+        async with websockets.connect(
+            ws_url,
+            open_timeout=15,
+            ping_timeout=20,
+            ping_interval=20,
+        ) as websocket:
+            await websocket.send(
+                json.dumps(payload)
+            )
+
+            deadline = asyncio.get_running_loop().time() + timeout_seconds
+
+            while True:
+                remaining = deadline - asyncio.get_running_loop().time()
+
+                if remaining <= 0:
+                    raise TimeoutError(
+                        "CONTRACT_MONITOR_TIMEOUT"
+                    )
+
+                raw = await asyncio.wait_for(
+                    websocket.recv(),
+                    timeout=remaining,
+                )
+
+                if isinstance(raw, bytes):
+                    raw = raw.decode("utf-8")
+
+                response = json.loads(raw)
+
+                if not isinstance(response, dict):
+                    continue
+
+                if "error" in response:
+                    raise RuntimeError(
+                        self._error_message(response)
+                    )
+
+                contract = response.get(
+                    "proposal_open_contract"
+                )
+
+                if not isinstance(contract, dict):
+                    continue
+
+                if str(contract.get("contract_id")) != str(
+                    contract_id
+                ):
+                    continue
+
+                is_sold = bool(
+                    contract.get("is_sold")
+                )
+
+                if is_sold:
+                    return {
+                        "status": "settled",
+                        "contract_id": str(contract_id),
+                        "is_sold": True,
+                        "status_text": contract.get(
+                            "status"
+                        ),
+                        "profit": contract.get(
+                            "profit"
+                        ),
+                        "payout": contract.get(
+                            "payout"
+                        ),
+                        "buy_price": contract.get(
+                            "buy_price"
+                        ),
+                        "sell_price": contract.get(
+                            "sell_price"
+                        ),
+                        "entry_tick": contract.get(
+                            "entry_tick"
+                        ),
+                        "exit_tick": contract.get(
+                            "exit_tick"
+                        ),
+                        "contract": contract,
+                    }
+
+    @classmethod
+    def calculate_next_stake(
+        cls,
+        base_stake: float,
+        martingale_step: int,
+        multiplier: float = 2.0,
+    ) -> float:
+        base = cls.validate_stake(base_stake)
+
+        step = max(
+            1,
+            int(martingale_step),
         )
 
-        return {
-            "status": "accepted",
-            "proposal_id": buy["proposal_id"],
-            "contract_id": buy["contract_id"],
-            "buy_price": buy["buy_price"],
-            "direction": direction,
-            "market_symbol": proposal["market_symbol"],
-            "currency": currency,
-            "contract_type": self.resolve_contract_direction(direction),
-        }
-
-    @staticmethod
-    def build_proposal_payload(symbol: str, direction: str, stake: float, expiry_seconds: int = settings.default_expiry_seconds) -> dict[str, Any]:
-        contract_type = TradeExecutionService.resolve_contract_direction(direction)
-        resolved_symbol = TradeExecutionService.resolve_market_symbol(symbol)
-        return {
-            "proposal": 1,
-            "amount": float(stake),
-            "basis": "stake",
-            "contract_type": contract_type,
-            "currency": "USD",
-            "duration": int(expiry_seconds),
-            "duration_unit": "s",
-            "symbol": resolved_symbol,
-            "req_id": f"proposal-{symbol}-{expiry_seconds}",
-        }
+        return round(
+            base * (float(multiplier) ** (step - 1)),
+            2,
+        )

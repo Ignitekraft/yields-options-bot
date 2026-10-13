@@ -7,7 +7,11 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from app.bot.callbacks import dispatch_callback
-from app.bot.handlers import build_auto_trade_setup, handle_auto_trade_start, handle_start
+from app.bot.handlers import (
+    build_auto_trade_setup,
+    handle_auto_trade_start,
+    handle_start,
+)
 from app.config import settings
 from app.main import app
 from app.models.ai_analysis import AutoTradeAnalysis
@@ -29,7 +33,11 @@ class MarketDataTests(unittest.TestCase):
 
         normalized = service.normalize_tick(
             {
-                "tick": {"symbol": "R_100", "quote": 123.45, "epoch": 1710000000},
+                "tick": {
+                    "symbol": "R_100",
+                    "quote": 123.45,
+                    "epoch": 1710000000,
+                },
                 "echo_req": {"ticks": "R_100"},
             }
         )
@@ -61,7 +69,11 @@ class MarketDataTests(unittest.TestCase):
             return original_mkdir(path, *args[1:], **kwargs)
 
         try:
-            with patch.dict(os.environ, {"YIELDS_STATE_DIR": "/data/yields_state"}, clear=False):
+            with patch.dict(
+                os.environ,
+                {"YIELDS_STATE_DIR": "/data/yields_state"},
+                clear=False,
+            ):
                 with patch.object(Path, "mkdir", side_effect=fake_mkdir):
                     reloaded = importlib.reload(auth_service)
                     self.assertIn(".yields_state", reloaded.STATE_DIR)
@@ -71,6 +83,7 @@ class MarketDataTests(unittest.TestCase):
                 os.environ.pop("YIELDS_STATE_DIR", None)
             else:
                 os.environ["YIELDS_STATE_DIR"] = original_env
+
             auth_service.STATE_DIR = original_state_dir
             importlib.reload(auth_service)
 
@@ -86,11 +99,24 @@ class MarketDataTests(unittest.TestCase):
             },
         )
 
-        with patch("app.bot.handlers.account_service.get_live_balances", new=AsyncMock(return_value={
-            "real": {"available": True, "balance": 1250.5, "currency": "USD"},
-            "demo": {"available": True, "balance": 750.25, "currency": "USD"},
+        balances = {
+            "real": {
+                "available": True,
+                "balance": 1250.5,
+                "currency": "USD",
+            },
+            "demo": {
+                "available": True,
+                "balance": 750.25,
+                "currency": "USD",
+            },
             "tokens": 7,
-})):
+        }
+
+        with patch(
+            "app.bot.handlers.account_service.get_live_balances",
+            new=AsyncMock(return_value=balances),
+        ):
             text = handle_start("live-start-user")
 
         self.assertIn("$1,250.50 USD", text)
@@ -110,13 +136,16 @@ class MarketDataTests(unittest.TestCase):
             },
         )
 
-        with patch("app.bot.handlers.build_auto_trade_setup", return_value={
-            "symbol": "R_100",
-            "direction": "BULLISH",
-            "confidence": 0.83,
-            "setup_quality": 0.88,
-            "reasoning": "Strong upward trend and trend alignment.",
-        }):
+        with patch(
+            "app.bot.handlers.build_auto_trade_setup",
+            return_value={
+                "symbol": "R_100",
+                "direction": "BULLISH",
+                "confidence": 0.83,
+                "setup_quality": 0.88,
+                "reasoning": "Strong upward trend and trend alignment.",
+            },
+        ):
             text = handle_auto_trade_start("trade-user")
 
         self.assertIn("AI", text)
@@ -137,8 +166,10 @@ class MarketDataTests(unittest.TestCase):
         )
 
         original_markets = settings.auto_trade_markets
+
         with patch("app.bot.handlers.MarketDataService") as market_service_cls, \
              patch("app.bot.handlers.GeminiService") as gemini_cls:
+
             market_service = market_service_cls.return_value
             market_service.get_historical_ticks.return_value = [
                 {"quote": 100.0, "timestamp": "1"},
@@ -147,13 +178,34 @@ class MarketDataTests(unittest.TestCase):
                 {"quote": 104.6, "timestamp": "4"},
                 {"quote": 106.0, "timestamp": "5"},
             ]
+
             gemini_cls.return_value.analyze.return_value = type(
                 "Analysis",
                 (),
                 {
                     "market_analyses": [
-                        type("MarketAnalysis", (), {"symbol": "step_300", "direction": "BULLISH", "confidence": 0.85, "setup_quality": 0.9, "reasoning": "AI says bullish."})(),
-                        type("MarketAnalysis", (), {"symbol": "step_500", "direction": "BEARISH", "confidence": 0.2, "setup_quality": 0.3, "reasoning": "AI says bearish."})(),
+                        type(
+                            "MarketAnalysis",
+                            (),
+                            {
+                                "symbol": "step_300",
+                                "direction": "BULLISH",
+                                "confidence": 0.85,
+                                "setup_quality": 0.9,
+                                "reasoning": "AI says bullish.",
+                            },
+                        )(),
+                        type(
+                            "MarketAnalysis",
+                            (),
+                            {
+                                "symbol": "step_500",
+                                "direction": "BEARISH",
+                                "confidence": 0.2,
+                                "setup_quality": 0.3,
+                                "reasoning": "AI says bearish.",
+                            },
+                        )(),
                     ],
                     "winner_symbol": "step_300",
                     "winner_direction": "BULLISH",
@@ -162,11 +214,21 @@ class MarketDataTests(unittest.TestCase):
                     "overall_reasoning": "AI-led bullish setup.",
                 },
             )()
-            object.__setattr__(settings, "auto_trade_markets", ["step_300", "step_500"])
+
+            object.__setattr__(
+                settings,
+                "auto_trade_markets",
+                ["step_300", "step_500"],
+            )
+
             try:
                 setup = build_auto_trade_setup("blend-user")
             finally:
-                object.__setattr__(settings, "auto_trade_markets", original_markets)
+                object.__setattr__(
+                    settings,
+                    "auto_trade_markets",
+                    original_markets,
+                )
 
         self.assertEqual(setup["symbol"], "step_300")
         self.assertGreater(setup["confidence"], 0.0)
@@ -188,18 +250,34 @@ class MarketDataTests(unittest.TestCase):
         class FakeUpdate:
             def __init__(self):
                 self.callback_query = FakeQuery()
-                self.effective_user = type("User", (), {"id": "confirm-user"})()
+                self.effective_user = type(
+                    "User",
+                    (),
+                    {"id": "confirm-user"},
+                )()
 
         run_state = AutoTradeService()
-        run_state.start_run("confirm-user", "step_300", "BULLISH", 1.0)
+        run_state.start_run(
+            "confirm-user",
+            "step_300",
+            "BULLISH",
+            1.0,
+        )
 
-        with patch("app.bot.callbacks.auto_trade_service", run_state), \
-             patch("app.bot.callbacks.execute_trade", new=AsyncMock(return_value={
-                 "status": "accepted",
-                 "contract_id": "con-123",
-                 "proposal_id": "prop-123",
-                 "buy_price": 1.0,
-             })) as execute_trade_mock:
+        with patch(
+            "app.bot.callbacks.auto_trade_service",
+            run_state,
+        ), patch(
+            "app.bot.callbacks.execute_trade",
+            new=AsyncMock(
+                return_value={
+                    "status": "accepted",
+                    "contract_id": "con-123",
+                    "proposal_id": "prop-123",
+                    "buy_price": 1.0,
+                }
+            ),
+        ) as execute_trade_mock:
             asyncio.run(dispatch_callback(FakeUpdate(), None))
 
         execute_trade_mock.assert_called_once()
@@ -211,7 +289,12 @@ class MarketDataTests(unittest.TestCase):
         self.assertIn("state", session)
         self.assertIn("code_verifier", session)
         self.assertIn("code_challenge", session)
-        self.assertTrue(service.validate_state("telegram-user-42", session["state"]))
+        self.assertTrue(
+            service.validate_state(
+                "telegram-user-42",
+                session["state"],
+            )
+        )
 
         url = build_deriv_oauth_url(
             "my-client-id",
@@ -241,7 +324,10 @@ class MarketDataTests(unittest.TestCase):
                     "token_type": "Bearer",
                 }
 
-        with patch("app.services.auth_service.httpx.post", return_value=FakeResponse()) as post_mock:
+        with patch(
+            "app.services.auth_service.httpx.post",
+            return_value=FakeResponse(),
+        ) as post_mock:
             tokens = service.exchange_oauth_code(
                 "telegram-user-99",
                 "auth-code-123",
@@ -251,8 +337,14 @@ class MarketDataTests(unittest.TestCase):
 
         self.assertEqual(tokens["access_token"], "real-access-token")
         self.assertEqual(tokens["refresh_token"], "real-refresh-token")
-        self.assertEqual(post_mock.call_args.kwargs["data"]["code"], "auth-code-123")
-        self.assertEqual(post_mock.call_args.kwargs["data"]["code_verifier"], session["code_verifier"])
+        self.assertEqual(
+            post_mock.call_args.kwargs["data"]["code"],
+            "auth-code-123",
+        )
+        self.assertEqual(
+            post_mock.call_args.kwargs["data"]["code_verifier"],
+            session["code_verifier"],
+        )
 
     def test_oauth_completion_resolves_account_id_from_deriv_accounts(self):
         service = AuthService()
@@ -263,12 +355,25 @@ class MarketDataTests(unittest.TestCase):
             def json(self):
                 return {
                     "data": [
-                        {"account_id": "real-123", "account_type": "real", "currency": "USD", "balance": 250.0},
-                        {"account_id": "demo-456", "account_type": "demo", "currency": "USD", "balance": 500.0},
+                        {
+                            "account_id": "real-123",
+                            "account_type": "real",
+                            "currency": "USD",
+                            "balance": 250.0,
+                        },
+                        {
+                            "account_id": "demo-456",
+                            "account_type": "demo",
+                            "currency": "USD",
+                            "balance": 500.0,
+                        },
                     ]
                 }
 
-        with patch("app.services.auth_service.httpx.get", return_value=FakeAccountsResponse()):
+        with patch(
+            "app.services.auth_service.httpx.get",
+            return_value=FakeAccountsResponse(),
+        ):
             tokens = service.complete_oauth_session(
                 "telegram-user-real",
                 {
@@ -300,16 +405,23 @@ class MarketDataTests(unittest.TestCase):
 
         account_service = AccountService(auth)
         account = account_service.get_account_status("telegram-user-99")
+
         self.assertTrue(account["connected"])
         self.assertEqual(account["type"], "Demo")
         self.assertEqual(account["currency"], "USD")
 
         trading = TradingService()
         proposal = trading.create_proposal("R_100", amount=10.0)
+
         self.assertIn("proposal_id", proposal)
         self.assertEqual(proposal["currency"], "USD")
 
-        buy = trading.buy_contract(proposal["proposal_id"], float(proposal["ask_price"]), "R_100")
+        buy = trading.buy_contract(
+            proposal["proposal_id"],
+            float(proposal["ask_price"]),
+            "R_100",
+        )
+
         self.assertEqual(buy["status"], "accepted")
         self.assertIn("contract_id", buy)
 
@@ -321,11 +433,35 @@ class MarketDataTests(unittest.TestCase):
         class FakeWebSocket:
             def __init__(self):
                 self.sent = []
-                self.responses = iter([
-                    '{"echo_req": {"authorize": "mock-access-token"}}',
-                    '{"proposal": {"id": "proposal-123", "ask_price": 1.25}}',
-                    '{"buy": {"contract_id": "contract-123", "buy_price": 1.25, "balance_after": 1000.0, "shortcode": "CALL"}}',
-                ])
+                self.responses = iter(
+                    [
+                        json.dumps(
+                            {
+                                "echo_req": {
+                                    "authorize": "mock-access-token",
+                                }
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "proposal": {
+                                    "id": "proposal-123",
+                                    "ask_price": 1.25,
+                                }
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "buy": {
+                                    "contract_id": "contract-123",
+                                    "buy_price": 1.25,
+                                    "balance_after": 1000.0,
+                                    "shortcode": "CALL",
+                                }
+                            }
+                        ),
+                    ]
+                )
 
             async def __aenter__(self):
                 return self
@@ -341,10 +477,25 @@ class MarketDataTests(unittest.TestCase):
 
         trading = TradingService(MockAuthService())
 
-        with patch("app.services.trading_service.websockets.connect", return_value=FakeWebSocket()) as connect_mock:
-            result = asyncio.run(trading.execute_trade_cycles("telegram-user-200", "step_100", "CALL", 10.0, 30, 1))
+        with patch(
+            "app.services.trading_service.websockets.connect",
+            return_value=FakeWebSocket(),
+        ) as connect_mock:
+            result = asyncio.run(
+                trading.execute_trade_cycles(
+                    "telegram-user-200",
+                    "step_100",
+                    "CALL",
+                    10.0,
+                    30,
+                    1,
+                )
+            )
 
-        self.assertEqual(connect_mock.call_args.args[0], trading.get_deriv_ws_url())
+        self.assertEqual(
+            connect_mock.call_args.args[0],
+            trading.get_deriv_ws_url(),
+        )
         self.assertEqual(result[0]["contract_id"], "contract-123")
         self.assertEqual(result[0]["symbol"], "R_100")
         self.assertEqual(result[0]["contract_type"], "CALL")
@@ -373,8 +524,18 @@ class MarketDataTests(unittest.TestCase):
                 def json(self):
                     return {
                         "data": [
-                            {"account_id": "demo-001", "account_type": "demo", "currency": "USD", "balance": 10000.0},
-                            {"account_id": "real-001", "account_type": "real", "currency": "USD", "balance": 245.75},
+                            {
+                                "account_id": "demo-001",
+                                "account_type": "demo",
+                                "currency": "USD",
+                                "balance": 10000.0,
+                            },
+                            {
+                                "account_id": "real-001",
+                                "account_type": "real",
+                                "currency": "USD",
+                                "balance": 245.75,
+                            },
                         ]
                     }
 
@@ -404,16 +565,38 @@ class MarketDataTests(unittest.TestCase):
                 async def post(self, url, headers=None):
                     self.calls.append(("POST", url, headers))
                     if url.endswith("/demo-001/otp"):
-                        return FakeOtpResponse("wss://demo.example/ws?otp=demo")
+                        return FakeOtpResponse(
+                            "wss://demo.example/ws?otp=demo"
+                        )
                     if url.endswith("/real-001/otp"):
-                        return FakeOtpResponse("wss://real.example/ws?otp=real")
-                    return FakeOtpResponse("wss://demo.example/ws?otp=demo")
+                        return FakeOtpResponse(
+                            "wss://real.example/ws?otp=real"
+                        )
+                    return FakeOtpResponse(
+                        "wss://demo.example/ws?otp=demo"
+                    )
 
             class FakeSocket:
                 def __init__(self, url):
                     self.url = url
                     self.sent = []
-                    self._recv = [json.dumps({"msg_type": "balance", "balance": {"currency": "USD", "balance": 10000.0}})] if "demo" in url else [json.dumps({"msg_type": "balance", "balance": {"currency": "USD", "balance": 245.75}})]
+
+                    if "demo" in url:
+                        balance = 10000.0
+                    else:
+                        balance = 245.75
+
+                    self._recv = [
+                        json.dumps(
+                            {
+                                "msg_type": "balance",
+                                "balance": {
+                                    "currency": "USD",
+                                    "balance": balance,
+                                },
+                            }
+                        )
+                    ]
 
                 async def __aenter__(self):
                     return self
@@ -427,20 +610,47 @@ class MarketDataTests(unittest.TestCase):
                 async def recv(self):
                     return self._recv.pop(0)
 
-            fake_demo_socket = FakeSocket("wss://demo.example/ws?otp=demo")
-            fake_real_socket = FakeSocket("wss://real.example/ws?otp=real")
+            fake_demo_socket = FakeSocket(
+                "wss://demo.example/ws?otp=demo"
+            )
+            fake_real_socket = FakeSocket(
+                "wss://real.example/ws?otp=real"
+            )
 
-            with patch("app.services.account_service.httpx.AsyncClient", return_value=FakeAsyncClient()), \
-                 patch("app.services.account_service.websockets.connect", side_effect=[fake_demo_socket, fake_real_socket]):
-                balances = await AccountService(auth).get_live_balances("telegram-user-live-balance")
+            with patch(
+                "app.services.account_service.httpx.AsyncClient",
+                return_value=FakeAsyncClient(),
+            ), patch(
+                "app.services.account_service.websockets.connect",
+                side_effect=[
+                    fake_demo_socket,
+                    fake_real_socket,
+                ],
+            ):
+                balances = await AccountService(auth).get_live_balances(
+                    "telegram-user-live-balance"
+                )
 
-            self.assertEqual(fake_demo_socket.sent[0], {"balance": 1, "subscribe": 1, "req_id": 1})
-            self.assertEqual(fake_real_socket.sent[0], {"balance": 1, "subscribe": 1, "req_id": 1})
+            self.assertEqual(
+                fake_demo_socket.sent[0],
+                {
+                    "balance": 1,
+                    "subscribe": 1,
+                    "req_id": 1,
+                },
+            )
+            self.assertEqual(
+                fake_real_socket.sent[0],
+                {
+                    "balance": 1,
+                    "subscribe": 1,
+                    "req_id": 1,
+                },
+            )
             self.assertEqual(balances["demo"]["balance"], 10000.0)
             self.assertEqual(balances["real"]["balance"], 245.75)
             self.assertEqual(balances["tokens"], 50)
 
-        import asyncio
         asyncio.run(run_test())
 
     def test_fastapi_app_registers_startup_hook(self):
@@ -448,6 +658,7 @@ class MarketDataTests(unittest.TestCase):
 
     def test_unauthenticated_user_sees_onboarding_screen(self):
         message = handle_start("missing-user")
+
         self.assertIn("🤖 YIELDS", message)
         self.assertIn("Connect your Deriv account", message)
         self.assertIn("OAuth", message)
@@ -465,51 +676,124 @@ class MarketDataTests(unittest.TestCase):
         )
 
         message = handle_start("dashboard-user")
+
         self.assertIn("Welcome back", message)
         self.assertIn("AI scans 5 Step Indices", message)
         self.assertIn("Expiry: 30 seconds", message)
 
     def test_exactly_five_step_markets_are_normalized(self):
         scanner = YieldsScanner()
-        snapshots = scanner.collect_step_market_snapshots(MarketDataService())
+        snapshots = scanner.collect_step_market_snapshots(
+            MarketDataService()
+        )
+
         self.assertEqual(len(snapshots), 5)
-        self.assertEqual([snapshot.symbol for snapshot in snapshots], list(settings.auto_trade_markets))
+        self.assertEqual(
+            [snapshot.symbol for snapshot in snapshots],
+            list(settings.auto_trade_markets),
+        )
 
     def test_gemini_service_returns_valid_structured_analysis(self):
         scanner = YieldsScanner()
-        snapshots = scanner.collect_step_market_snapshots(MarketDataService())
-        analysis = GeminiService(api_key="fake-key", model="gemini-2.0-flash").analyze(snapshots)
+        snapshots = scanner.collect_step_market_snapshots(
+            MarketDataService()
+        )
+        analysis = GeminiService(
+            api_key="fake-key",
+            model="gemini-2.0-flash",
+        ).analyze(snapshots)
+
         self.assertIsInstance(analysis, AutoTradeAnalysis)
-        self.assertIn(analysis.winner_symbol, settings.auto_trade_markets)
+        self.assertIn(
+            analysis.winner_symbol,
+            settings.auto_trade_markets,
+        )
 
     def test_fixed_expiry_is_always_thirty_seconds(self):
-        payload = TradeExecutionService.build_proposal_payload("step_300", "BULLISH", 10.0, expiry_seconds=30)
+        payload = TradeExecutionService.build_proposal_payload(
+            "step_300",
+            "BULLISH",
+            10.0,
+            expiry_seconds=30,
+        )
+
         self.assertEqual(payload["duration"], 30)
         self.assertEqual(payload["duration_unit"], "s")
 
-    def test_proposal_payload_uses_symbol_field_not_underlying_symbol(self):
-        payload = TradeExecutionService.build_proposal_payload("step_300", "BULLISH", 10.0, expiry_seconds=30)
-        self.assertEqual(payload["symbol"], "R_300")
-        self.assertNotIn("underlying_symbol", payload)
+    def test_proposal_payload_uses_underlying_symbol(self):
+        payload = TradeExecutionService.build_proposal_payload(
+            "step_300",
+            "BULLISH",
+            10.0,
+            expiry_seconds=30,
+        )
+
+        self.assertEqual(payload["underlying_symbol"], "R_300")
+        self.assertNotIn("symbol", payload)
         self.assertEqual(payload["contract_type"], "CALL")
+        self.assertEqual(payload["duration"], 30)
+        self.assertEqual(payload["duration_unit"], "s")
+
+    def test_bearish_direction_maps_to_put(self):
+        payload = TradeExecutionService.build_proposal_payload(
+            "step_300",
+            "BEARISH",
+            10.0,
+            expiry_seconds=30,
+        )
+
+        self.assertEqual(payload["underlying_symbol"], "R_300")
+        self.assertEqual(payload["contract_type"], "PUT")
 
     def test_martingale_state_machine(self):
         service = AutoTradeService()
-        run = service.start_run("martingale-user", "step_300", "BULLISH", 10.0)
+        run = service.start_run(
+            "martingale-user",
+            "step_300",
+            "BULLISH",
+            10.0,
+        )
+
         self.assertEqual(run.current_stake, 10.0)
+
         service.advance_after_result("martingale-user", False)
-        self.assertEqual(service.get_run("martingale-user").current_stake, 20.0)
+        self.assertEqual(
+            service.get_run("martingale-user").current_stake,
+            20.0,
+        )
+
         service.advance_after_result("martingale-user", False)
-        self.assertEqual(service.get_run("martingale-user").current_stake, 40.0)
+        self.assertEqual(
+            service.get_run("martingale-user").current_stake,
+            40.0,
+        )
+
         service.advance_after_result("martingale-user", True)
-        self.assertEqual(service.get_run("martingale-user").cycle, 2)
-        self.assertEqual(service.get_run("martingale-user").current_stake, 10.0)
+        self.assertEqual(
+            service.get_run("martingale-user").cycle,
+            2,
+        )
+        self.assertEqual(
+            service.get_run("martingale-user").current_stake,
+            10.0,
+        )
 
     def test_duplicate_auto_trade_start_is_rejected(self):
         service = AutoTradeService()
-        service.start_run("dup-user", "step_200", "BEARISH", 5.0)
+        service.start_run(
+            "dup-user",
+            "step_200",
+            "BEARISH",
+            5.0,
+        )
+
         with self.assertRaises(RuntimeError):
-            service.start_run("dup-user", "step_200", "BEARISH", 5.0)
+            service.start_run(
+                "dup-user",
+                "step_200",
+                "BEARISH",
+                5.0,
+            )
 
 
 if __name__ == "__main__":
