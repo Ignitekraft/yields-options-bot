@@ -6,15 +6,18 @@ import secrets
 from typing import Any, Dict, Optional
 import httpx
 
-# Global shared storage across all FastAPI workers
 _GLOBAL_OAUTH_STATES: Dict[str, Dict[str, str]] = {}
 _GLOBAL_TOKEN_STORE: Dict[str, Dict[str, Any]] = {}
 _GLOBAL_USER_TOKENS: Dict[str, int] = {}
 
 
 class AuthService:
-    def __init__(self) -> None:
-        pass
+    _instance: Optional[AuthService] = None
+
+    def __new__(cls) -> AuthService:
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
 
     def begin_oauth_session(self, telegram_user_id: str) -> Dict[str, str]:
         state = secrets.token_urlsafe(32)
@@ -48,7 +51,7 @@ class AuthService:
             "token_type": token_payload.get("token_type", "Bearer"),
         }
         if telegram_user_id not in _GLOBAL_USER_TOKENS:
-            _GLOBAL_USER_TOKENS[telegram_user_id] = 50  # Starting promotional tokens
+            _GLOBAL_USER_TOKENS[telegram_user_id] = 50
 
         _GLOBAL_OAUTH_STATES.pop(telegram_user_id, None)
         return _GLOBAL_TOKEN_STORE[telegram_user_id]
