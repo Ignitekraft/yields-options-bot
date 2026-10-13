@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import asyncio
+import threading
 
 from fastapi import FastAPI, Query
 
@@ -27,16 +27,20 @@ async def startup_event() -> None:
     if application is None:
         return
 
-    await application.initialize()
-    loop = asyncio.get_running_loop()
-    loop.run_in_executor(None, application.run_polling, poll_interval=5, timeout=30)
+    application.initialize()
+    thread = threading.Thread(
+        target=application.run_polling,
+        kwargs={"poll_interval": 5, "timeout": 30},
+        daemon=True,
+    )
+    thread.start()
 
 
 @app.on_event("shutdown")
 async def shutdown_event() -> None:
     application = get_bot_application()
     if application is not None:
-        await application.shutdown()
+        application.shutdown()
 
 
 @app.get("/health")
