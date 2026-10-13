@@ -12,12 +12,17 @@ import httpx
 def _resolve_state_dir() -> str:
     candidates = []
 
-    env_value = os.getenv("YIELDS_STATE_DIR")
-    if env_value:
-        candidates.append(env_value)
+    for env_name in ("YIELDS_STATE_DIR", "APP_STATE_DIR", "STATE_DIR"):
+        env_value = os.getenv(env_name)
+        if env_value:
+            candidates.append(env_value)
 
     candidates.extend(
         [
+            "/data/yields_state",
+            "/data",
+            "/var/lib/render/project/.yields_state",
+            "/mnt/data/yields_state",
             str(Path.cwd() / ".yields_state"),
             str(Path(__file__).resolve().parents[2] / ".yields_state"),
             str(Path("/tmp") / "yields_state"),
