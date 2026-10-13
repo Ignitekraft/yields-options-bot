@@ -1,28 +1,28 @@
-def exchange_oauth_code(
-        self,
-        telegram_user_id: str,
-        code: str,
-        redirect_uri: str,
-        client_id: str,
-        client_secret: str = "",
-    ) -> Dict[str, Any]:
-        """Exchange a Deriv authorization code for access tokens using the official auth endpoint."""
-        session = self._oauth_state_store.get(telegram_user_id, {})
-        code_verifier = session.get("code_verifier")
-        if not code_verifier:
-            raise ValueError("missing_code_verifier")
+from __future__ import annotations
 
-        payload = {
-            "grant_type": "authorization_code",
-            "client_id": client_id,
-            "redirect_uri": redirect_uri,
-            "code": code,
-            "code_verifier": code_verifier,
+from typing import Any, Dict
+from app.services.auth_service import AuthService
+
+
+class AccountService:
+    """Service that manages authenticated user account details using stored OAuth tokens."""
+
+    def __init__(self, auth_service: AuthService) -> None:
+        self.auth_service = auth_service
+
+    def get_account_status(self, telegram_user_id: str) -> Dict[str, Any]:
+        """Retrieve connection status and account details for a Telegram user."""
+        account = self.auth_service.get_connected_account(telegram_user_id)
+        if not account or not account.get("access_token"):
+            return {
+                "connected": False,
+            }
+
+        # Return structured account status details for /status command
+        return {
+            "connected": True,
+            "account_id": account.get("account_id", "Demo Account"),
+            "type": account.get("type", "Demo"),
+            "currency": account.get("currency", "USD"),
+            "balance": account.get("balance", "0.00"),
         }
-        if client_secret:
-            payload["client_secret"] = client_secret
-
-        response = httpx.post("https://auth.deriv.com/oauth2/token", data=payload, timeout=20.0)
-        response.raise_for_status()
-        data = response.json()
-        return self.complete_oauth_session(telegram_user_id, data)
