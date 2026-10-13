@@ -122,6 +122,65 @@ class AuthService:
                 return telegram_user_id
         return None
 
+    def _hydrate_account_metadata(self, access_token: str, existing: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+        if not access_token:
+            return existing
+
+        try:
+            response = httpx.get(
+                "https://api.derivws.com/trading/v1/options/accounts",
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Content-Type": "application/json",
+                },
+                timeout=20.0,
+            )
+            if response.status_code != 200:
+                return existing
+
+            payload = response.json()
+            accounts: list[dict[str, Any]] = []
+            if isinstance(payload, list):
+                accounts = [item for item in payload if isinstance(item, dict)]
+            elif isinstance(payload, dict):
+                for key in ("data", "accounts", "account_list"):
+                    value = payload.get(key)
+                    if isinstance(value, list):
+                        accounts = [item for item in value if isinstance(item, dict)]
+                        break
+                    if isinstance(value, dict):
+                        accounts = [value]
+                        break
+
+            preferred_account = None
+            for account in accounts:
+                account_id = account.get("account_id") or account.get("loginid") or account.get("id")
+                if not account_id:
+                    continue
+                account_type = str(account.get("account_type") or account.get("type") or "").lower()
+                if account_type in {"real", "live", "standard"}:
+                    preferred_account = account
+                    break
+                if preferred_account is None:
+                    preferred_account = account
+
+            if preferred_account is None:
+                return existing
+
+            resolved = {
+                "account_id": preferred_account.get("account_id") or preferred_account.get("loginid") or preferred_account.get("id"),
+                "account_type": preferred_account.get("account_type") or preferred_account.get("type") or "real",
+                "currency": preferred_account.get("currency", "USD"),
+            }
+            if "balance" in preferred_account:
+                resolved["balance"] = preferred_account.get("balance")
+            if existing:
+                existing.update({k: v for k, v in resolved.items() if v is not None})
+                return existing
+            return resolved
+        except Exception:
+            return existing
+
     def complete_oauth_session(self, telegram_user_id: str | int, token_payload: Dict[str, Any]) -> Dict[str, Any]:
         user_key = str(telegram_user_id)
         tokens = self._load_json(TOKEN_FILE)
@@ -134,6 +193,11 @@ class AuthService:
         for key, value in token_payload.items():
             if key not in {"access_token", "refresh_token", "expires_in", "token_type"}:
                 token_data[key] = value
+
+        account_metadata = self._hydrate_account_metadata(token_data.get("access_token"), token_data)
+        if account_metadata:
+            token_data.update({k: v for k, v in account_metadata.items() if v is not None})
+
         tokens[user_key] = token_data
         self._save_json(TOKEN_FILE, tokens)
 
@@ -192,7 +256,21 @@ class AuthService:
     def get_connected_account(self, telegram_user_id: str | int) -> Optional[Dict[str, Any]]:
         user_key = str(telegram_user_id)
         tokens = self._load_json(TOKEN_FILE)
-        return tokens.get(user_key)
+        record = tokens.get(user_key)
+        if not record:
+            return None
+
+        if record.get("account_id"):
+            return record
+
+        access_token = record.get("access_token")
+        if access_token:
+            refreshed = self._hydrate_account_metadata(access_token, record)
+            if refreshed:
+                tokens[user_key] = refreshed
+                self._save_json(TOKEN_FILE, tokens)
+                return refreshed
+        return record
 
     def disconnect_user(self, telegram_user_id: str | int) -> bool:
         user_key = str(telegram_user_id)

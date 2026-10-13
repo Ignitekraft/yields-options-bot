@@ -254,6 +254,35 @@ class MarketDataTests(unittest.TestCase):
         self.assertEqual(post_mock.call_args.kwargs["data"]["code"], "auth-code-123")
         self.assertEqual(post_mock.call_args.kwargs["data"]["code_verifier"], session["code_verifier"])
 
+    def test_oauth_completion_resolves_account_id_from_deriv_accounts(self):
+        service = AuthService()
+
+        class FakeAccountsResponse:
+            status_code = 200
+
+            def json(self):
+                return {
+                    "data": [
+                        {"account_id": "real-123", "account_type": "real", "currency": "USD", "balance": 250.0},
+                        {"account_id": "demo-456", "account_type": "demo", "currency": "USD", "balance": 500.0},
+                    ]
+                }
+
+        with patch("app.services.auth_service.httpx.get", return_value=FakeAccountsResponse()):
+            tokens = service.complete_oauth_session(
+                "telegram-user-real",
+                {
+                    "access_token": "oauth-token",
+                    "refresh_token": "oauth-refresh",
+                    "expires_in": 3600,
+                    "token_type": "Bearer",
+                },
+            )
+
+        self.assertEqual(tokens["account_id"], "real-123")
+        self.assertEqual(tokens["account_type"], "real")
+        self.assertEqual(tokens["currency"], "USD")
+
     def test_account_status_and_demo_trading_flow(self):
         auth = AuthService()
         auth.connect_user(
