@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable
 
 import httpx
 import websockets
@@ -9,8 +9,8 @@ import websockets
 from app.config import settings
 from app.services.auth_service import AuthService
 
-DERIV_WS_URL = "wss://ws.derivws.com/websockets/v3?app_id=1089"
 DERIV_ACCOUNT_API_URL = "https://api.derivws.com/trading/v1/options/accounts"
+DERIV_WS_ROOT = "https://api.derivws.com/trading/v1/options/ws"
 
 
 class AccountService:
@@ -70,48 +70,53 @@ class AccountService:
             if app_id:
                 headers["Deriv-App-ID"] = app_id
 
-            response = httpx.get(DERIV_ACCOUNT_API_URL, headers=headers, timeout=20.0)
-            response.raise_for_status()
-            payload = response.json()
-
-            account_list = payload.get("data", payload).get("account_list", payload.get("account_list", []))
+            account_response = httpx.get(DERIV_ACCOUNT_API_URL, headers=headers, timeout=20.0)
+            account_response.raise_for_status()
+            payload = account_response.json()
+            account_data = payload.get("data", payload)
+            account_list = account_data.get("account_list", account_data.get("accounts", []))
             if account_list:
                 _apply_account_list(account_list)
-                return {
-                    "connected": True,
-                    "real": real_balance,
-                    "demo": demo_balance,
-                    "tokens": tokens_count,
-                }
-        except Exception:
-            pass
 
-        try:
-            async with websockets.connect(DERIV_WS_URL) as websocket:
-                await websocket.send(json.dumps({"authorize": token}))
-                auth_resp = json.loads(await websocket.recv())
+            selected_account = None
+            if isinstance(account_list, list) and account_list:
+                selected_account = account_list[0]
+                if isinstance(selected_account, dict):
+                    selected_account = selected_account.get("account_id") or selected_account.get("id")
 
-                if "error" not in auth_resp:
-                    account_list = auth_resp.get("authorize", {}).get("account_list", [])
-                    if account_list:
-                        _apply_account_list(account_list)
+            if not selected_account:
+                selected_account = self.auth_service.get_connected_account(user_key).get("account_id") if self.auth_service.get_connected_account(user_key) else ""
 
-                await websocket.send(json.dumps({"balance": 1, "subscribe": 1}))
-                balance_resp = json.loads(await websocket.recv())
-
-                if isinstance(balance_resp, dict):
-                    balance_entry = balance_resp.get("balance")
-                    if isinstance(balance_entry, dict):
-                        currency = balance_entry.get("currency", "USD")
-                        if balance_entry.get("demo") is not None:
-                            demo_balance = _format_balance(balance_entry.get("demo"), currency)
-                        elif balance_entry.get("amount") is not None:
-                            real_balance = _format_balance(balance_entry.get("amount"), currency)
-
-                    if isinstance(balance_resp.get("authorize"), dict):
-                        account_list = balance_resp.get("authorize", {}).get("account_list", [])
-                        if account_list:
-                            _apply_account_list(account_list)
+            if selected_account:
+                otp_response = httpx.post(
+                    f"{DERIV_ACCOUNT_API_URL}/{selected_account}/otp",
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        **({"Deriv-App-ID": app_id} if app_id else {}),
+                    },
+                    timeout=20.0,
+                )
+                otp_response.raise_for_status()
+                ws_url = otp_response.json().get("data", {}).get("url")
+                if ws_url:
+                    async with websockets.connect(ws_url) as websocket:
+                        await websocket.send(json.dumps({"balance": 1, "subscribe": 1, "req_id": 1}))
+                        balance_message = json.loads(await websocket.recv())
+                        balance_data = balance_message.get("balance") if isinstance(balance_message, dict) else None
+                        if isinstance(balance_data, dict):
+                            currency = balance_data.get("currency", "USD")
+                            if balance_data.get("balance") is not None:
+                                real_balance = _format_balance(balance_data.get("balance"), currency)
+                            if balance_data.get("demo") is not None:
+                                demo_balance = _format_balance(balance_data.get("demo"), currency)
+                        if isinstance(balance_message, dict) and balance_message.get("msg_type") == "balance":
+                            balance_data = balance_message.get("balance")
+                            if isinstance(balance_data, dict):
+                                currency = balance_data.get("currency", "USD")
+                                if balance_data.get("balance") is not None:
+                                    real_balance = _format_balance(balance_data.get("balance"), currency)
+                                if balance_data.get("demo") is not None:
+                                    demo_balance = _format_balance(balance_data.get("demo"), currency)
         except Exception:
             pass
 

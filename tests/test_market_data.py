@@ -115,7 +115,7 @@ class MarketDataTests(unittest.TestCase):
         self.assertEqual(buy["status"], "accepted")
         self.assertIn("contract_id", buy)
 
-    def test_live_balance_fetch_uses_deriv_rest_account_response(self):
+    def test_live_balance_fetch_uses_deriv_otp_websocket_flow(self):
         async def run_test():
             auth = AuthService()
             auth.connect_user(
@@ -132,26 +132,40 @@ class MarketDataTests(unittest.TestCase):
                 },
             )
 
-            class FakeResponse:
+            class FakeOtpResponse:
                 def raise_for_status(self):
                     return None
 
                 def json(self):
-                    return {
-                        "data": {
-                            "account_list": [
-                                {"account_id": "real-001", "is_virtual": False, "currency": "USD", "balance": 245.75},
-                                {"account_id": "demo-001", "is_virtual": True, "currency": "USD", "balance": 1250.0},
-                            ]
-                        }
-                    }
+                    return {"data": {"url": "wss://api.derivws.com/trading/v1/options/ws/demo?otp=secret"}}
 
-            with patch("app.services.account_service.httpx.get", return_value=FakeResponse()) as get_mock:
+            class FakeSocket:
+                def __init__(self):
+                    self.sent = []
+                    self._recv = [json.dumps({"msg_type": "balance", "balance": {"currency": "USD", "balance": 245.75}})]
+
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, exc_type, exc, tb):
+                    return None
+
+                async def send(self, payload):
+                    self.sent.append(json.loads(payload))
+
+                async def recv(self):
+                    return self._recv.pop(0)
+
+            socket = FakeSocket()
+
+            with patch("app.services.account_service.httpx.get", return_value=FakeOtpResponse()), \
+                 patch("app.services.account_service.httpx.post", return_value=FakeOtpResponse()), \
+                 patch("app.services.account_service.websockets.connect", return_value=socket):
                 balances = await AccountService(auth).get_live_balances("telegram-user-live-balance")
 
-            self.assertEqual(get_mock.call_args.kwargs["headers"]["Authorization"], "Bearer abc")
+            self.assertEqual(socket.sent[0], {"balance": 1, "subscribe": 1, "req_id": 1})
             self.assertEqual(balances["real"], "245.75 USD")
-            self.assertEqual(balances["demo"], "1250.0 USD")
+            self.assertEqual(balances["demo"], "0.00 USD")
             self.assertEqual(balances["tokens"], 50)
 
         import asyncio
