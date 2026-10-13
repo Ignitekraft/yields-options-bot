@@ -36,8 +36,9 @@ def handle_status(telegram_user_id: str) -> str:
 def handle_connect(telegram_user_id: str) -> str:
     """Start a secure Deriv OAuth session for a Telegram user."""
     session = auth_service.begin_oauth_session(str(telegram_user_id))
+    client_id = settings.deriv_app_id or settings.deriv_client_id
     url = build_deriv_oauth_url(
-        settings.deriv_client_id,
+        client_id,
         settings.deriv_redirect_uri,
         "trade account_manage",
         session["state"],
