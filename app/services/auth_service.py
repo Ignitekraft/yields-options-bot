@@ -9,15 +9,49 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 import httpx
 
-STATE_DIR = os.getenv(
-    "YIELDS_STATE_DIR",
-    os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".yields_state"),
-)
+def _resolve_state_dir() -> str:
+    candidates = []
+
+    env_value = os.getenv("YIELDS_STATE_DIR")
+    if env_value:
+        candidates.append(env_value)
+
+    candidates.extend(
+        [
+            str(Path.cwd() / ".yields_state"),
+            str(Path(__file__).resolve().parents[2] / ".yields_state"),
+            str(Path("/tmp") / "yields_state"),
+        ]
+    )
+
+    for candidate in candidates:
+        try:
+            path = Path(candidate).expanduser()
+            path.mkdir(parents=True, exist_ok=True)
+            probe = path / ".yields_state_write_test"
+            with open(probe, "w", encoding="utf-8") as handle:
+                handle.write("ok")
+            probe.unlink(missing_ok=True)
+            return str(path)
+        except Exception:
+            continue
+
+    fallback = Path.cwd() / ".yields_state"
+    fallback.mkdir(parents=True, exist_ok=True)
+    return str(fallback)
+
+
+STATE_DIR = _resolve_state_dir()
 
 
 def _ensure_state_dir() -> Path:
     path = Path(STATE_DIR)
-    path.mkdir(parents=True, exist_ok=True)
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except PermissionError:
+        fallback = Path.cwd() / ".yields_state"
+        fallback.mkdir(parents=True, exist_ok=True)
+        return fallback
     return path
 
 

@@ -1,5 +1,8 @@
+import importlib
 import json
+import os
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from app.bot.handlers import handle_start
@@ -41,6 +44,33 @@ class MarketDataTests(unittest.TestCase):
         self.assertIsInstance(signal, SignalResult)
         self.assertEqual(signal.symbol, "R_100")
         self.assertGreater(signal.confidence, 0)
+
+    def test_state_dir_falls_back_when_render_path_is_not_writable(self):
+        import app.services.auth_service as auth_service
+
+        original_env = os.environ.get("YIELDS_STATE_DIR")
+        original_state_dir = auth_service.STATE_DIR
+        original_mkdir = Path.mkdir
+
+        def fake_mkdir(*args, **kwargs):
+            path = args[0] if args else Path.cwd()
+            if str(path).startswith("/data"):
+                raise PermissionError("denied")
+            return original_mkdir(path, *args[1:], **kwargs)
+
+        try:
+            with patch.dict(os.environ, {"YIELDS_STATE_DIR": "/data/yields_state"}, clear=False):
+                with patch.object(Path, "mkdir", side_effect=fake_mkdir):
+                    reloaded = importlib.reload(auth_service)
+                    self.assertIn(".yields_state", reloaded.STATE_DIR)
+                    self.assertTrue(Path(reloaded.STATE_DIR).exists())
+        finally:
+            if original_env is None:
+                os.environ.pop("YIELDS_STATE_DIR", None)
+            else:
+                os.environ["YIELDS_STATE_DIR"] = original_env
+            auth_service.STATE_DIR = original_state_dir
+            importlib.reload(auth_service)
 
     def test_oauth_state_and_pkce_flow(self):
         service = AuthService()
