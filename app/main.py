@@ -11,6 +11,7 @@ from app.services.auth_service import AuthService
 app = FastAPI(title="Yields", version="0.1.0")
 auth_service = AuthService()
 bot_application = None
+bot_thread: threading.Thread | None = None
 
 
 def get_bot_application():
@@ -22,25 +23,38 @@ def get_bot_application():
 
 @app.on_event("startup")
 async def startup_event() -> None:
-    """Ensure the Telegram bot is booted when the FastAPI app starts in production."""
+    """Start the Telegram bot in a managed background thread so it stays alive while the FastAPI service runs."""
+    global bot_thread
+
     application = get_bot_application()
     if application is None:
         return
 
     await application.initialize()
-    thread = threading.Thread(
+
+    if bot_thread and bot_thread.is_alive():
+        return
+
+    bot_thread = threading.Thread(
         target=application.run_polling,
         kwargs={"poll_interval": 5, "timeout": 30},
-        daemon=True,
     )
-    thread.start()
+    bot_thread.daemon = False
+    bot_thread.start()
 
 
 @app.on_event("shutdown")
 async def shutdown_event() -> None:
+    global bot_thread
+
     application = get_bot_application()
     if application is not None:
+        application.stop()
         await application.shutdown()
+
+    if bot_thread and bot_thread.is_alive():
+        bot_thread.join(timeout=5)
+        bot_thread = None
 
 
 @app.get("/health")
