@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, HTTPException
+from fastapi.responses import HTMLResponse
 
 from app.bot.telegram_bot import create_application
 from app.config import settings
@@ -25,9 +26,6 @@ def get_bot_application():
 async def startup_event() -> None:
     """
     Start FastAPI and the Telegram bot in the same asyncio event loop.
-
-    We intentionally do NOT use Application.run_polling() here because
-    FastAPI already owns the asyncio event loop.
     """
     global bot_application
 
@@ -75,25 +73,19 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.get("/auth/deriv/callback")
-def deriv_oauth_callback(
+@app.get("/auth/deriv/callback", response_class=HTMLResponse)
+async def deriv_oauth_callback(
     code: str | None = Query(default=None),
     state: str | None = Query(default=None),
     error: str | None = Query(default=None),
-) -> dict[str, str]:
+):
     """Callback from Deriv after OAuth login. Exchange the code for real tokens and complete the Telegram session."""
 
     if error:
-        return {
-            "status": "error",
-            "error": error,
-        }
+        return f"<h3>OAuth Error: {error}</h3>"
 
     if not code or not state:
-        return {
-            "status": "error",
-            "error": "missing_code_or_state",
-        }
+        return "<h3>Error: Missing code or state parameters.</h3>"
 
     telegram_user_id = auth_service.get_pending_user_for_state(state)
 
@@ -104,10 +96,7 @@ def deriv_oauth_callback(
             state,
         )
     ):
-        return {
-            "status": "error",
-            "error": "state_mismatch",
-        }
+        return "<h3>Error: Invalid or expired OAuth state. Please run /connect again in Telegram.</h3>"
 
     client_id = settings.deriv_app_id or settings.deriv_client_id
 
@@ -119,28 +108,30 @@ def deriv_oauth_callback(
             client_id,
             settings.deriv_client_secret,
         )
-    except Exception as exc:  # pragma: no cover - real OAuth exchange is exercised in live app flow
-        return {
-            "status": "error",
-            "error": f"oauth_exchange_failed:{exc}",
-        }
+    except Exception as exc:
+        return f"<h3>OAuth exchange failed: {exc}</h3>"
 
+    # Notify the user on Telegram asynchronously
     application = get_bot_application()
     if application is not None:
         try:
-            application.bot.send_message(
+            await application.bot.send_message(
                 chat_id=int(telegram_user_id),
-                text="✅ Deriv account connected. You can now use /status, /scan, and the account tools.",
+                text="✅ **Deriv account connected successfully!**\n\nYou can now use `/status`, `/scan`, and account tools.",
+                parse_mode="Markdown"
             )
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Failed to send Telegram notification: {e}")
 
-    return {
-        "status": "success",
-        "message": "Deriv connected",
-        "telegram_user_id": telegram_user_id,
-        "access_token": payload.get("access_token"),
-    }
+    # Return a clean browser response so the page doesn't just hang or show JSON
+    return """
+    <html>
+        <body style="font-family: Arial, sans-serif; text-align: center; padding-top: 50px;">
+            <h2 style="color: #2e7d32;">Deriv Account Connected Successfully!</h2>
+            <p>You can close this window and return to Telegram.</p>
+        </body>
+    </html>
+    """
 
 
 @app.get("/")
