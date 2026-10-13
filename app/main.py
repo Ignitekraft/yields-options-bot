@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import FastAPI, Query, HTTPException
+from fastapi import FastAPI, Query
 from fastapi.responses import HTMLResponse
 
 from app.bot.telegram_bot import create_application
@@ -24,9 +24,7 @@ def get_bot_application():
 
 @app.on_event("startup")
 async def startup_event() -> None:
-    """
-    Start FastAPI and the Telegram bot in the same asyncio event loop.
-    """
+    """Start FastAPI and the Telegram bot in the same asyncio event loop."""
     global bot_application
 
     application = get_bot_application()
@@ -49,9 +47,7 @@ async def startup_event() -> None:
 
 @app.on_event("shutdown")
 async def shutdown_event() -> None:
-    """
-    Gracefully stop Telegram before FastAPI shuts down.
-    """
+    """Gracefully stop Telegram before FastAPI shuts down."""
     global bot_application
 
     application = bot_application
@@ -111,7 +107,6 @@ async def deriv_oauth_callback(
     except Exception as exc:
         return f"<h3>OAuth exchange failed: {exc}</h3>"
 
-    # Notify the user on Telegram asynchronously
     application = get_bot_application()
     if application is not None:
         try:
@@ -123,7 +118,6 @@ async def deriv_oauth_callback(
         except Exception as e:
             print(f"Failed to send Telegram notification: {e}")
 
-    # Return a clean browser response so the page doesn't just hang or show JSON
     return """
     <html>
         <body style="font-family: Arial, sans-serif; text-align: center; padding-top: 50px;">
