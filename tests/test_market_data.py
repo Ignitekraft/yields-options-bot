@@ -3,9 +3,9 @@ import json
 import os
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
-from app.bot.handlers import handle_start
+from app.bot.handlers import build_auto_trade_setup, handle_auto_trade_start, handle_start
 from app.config import settings
 from app.main import app
 from app.models.ai_analysis import AutoTradeAnalysis
@@ -71,6 +71,105 @@ class MarketDataTests(unittest.TestCase):
                 os.environ["YIELDS_STATE_DIR"] = original_env
             auth_service.STATE_DIR = original_state_dir
             importlib.reload(auth_service)
+
+    def test_start_screen_uses_live_balance_values(self):
+        auth = AuthService()
+        auth.connect_user(
+            "live-start-user",
+            {
+                "access_token": "live-token",
+                "refresh_token": "live-refresh",
+                "expires_in": 3600,
+                "token_type": "Bearer",
+            },
+        )
+
+        with patch("app.bot.handlers.account_service.get_live_balances", new=AsyncMock(return_value={
+            "real": {"available": True, "balance": 1250.5, "currency": "USD"},
+            "demo": {"available": True, "balance": 750.25, "currency": "USD"},
+            "tokens": 7,
+})):
+            text = handle_start("live-start-user")
+
+        self.assertIn("$1,250.50 USD", text)
+        self.assertIn("$750.25 USD", text)
+        self.assertIn("AI", text)
+        self.assertNotIn("Gemini", text)
+
+    def test_auto_trade_start_prompts_for_stake_and_uses_ai_language(self):
+        auth = AuthService()
+        auth.connect_user(
+            "trade-user",
+            {
+                "access_token": "trade-token",
+                "refresh_token": "trade-refresh",
+                "expires_in": 3600,
+                "token_type": "Bearer",
+            },
+        )
+
+        with patch("app.bot.handlers.build_auto_trade_setup", return_value={
+            "symbol": "R_100",
+            "direction": "BULLISH",
+            "confidence": 0.83,
+            "setup_quality": 0.88,
+            "reasoning": "Strong upward trend and trend alignment.",
+        }):
+            text = handle_auto_trade_start("trade-user")
+
+        self.assertIn("AI", text)
+        self.assertNotIn("Gemini", text)
+        self.assertIn("Select your stake", text)
+        self.assertIn("All 5 trades", text)
+
+    def test_auto_trade_setup_blends_ai_and_technical_signals(self):
+        auth = AuthService()
+        auth.connect_user(
+            "blend-user",
+            {
+                "access_token": "blend-token",
+                "refresh_token": "blend-refresh",
+                "expires_in": 3600,
+                "token_type": "Bearer",
+            },
+        )
+
+        original_markets = settings.auto_trade_markets
+        with patch("app.bot.handlers.MarketDataService") as market_service_cls, \
+             patch("app.bot.handlers.GeminiService") as gemini_cls:
+            market_service = market_service_cls.return_value
+            market_service.get_historical_ticks.return_value = [
+                {"quote": 100.0, "timestamp": "1"},
+                {"quote": 101.0, "timestamp": "2"},
+                {"quote": 103.5, "timestamp": "3"},
+                {"quote": 104.6, "timestamp": "4"},
+                {"quote": 106.0, "timestamp": "5"},
+            ]
+            gemini_cls.return_value.analyze.return_value = type(
+                "Analysis",
+                (),
+                {
+                    "market_analyses": [
+                        type("MarketAnalysis", (), {"symbol": "step_300", "direction": "BULLISH", "confidence": 0.85, "setup_quality": 0.9, "reasoning": "AI says bullish."})(),
+                        type("MarketAnalysis", (), {"symbol": "step_500", "direction": "BEARISH", "confidence": 0.2, "setup_quality": 0.3, "reasoning": "AI says bearish."})(),
+                    ],
+                    "winner_symbol": "step_300",
+                    "winner_direction": "BULLISH",
+                    "winner_confidence": 0.85,
+                    "winner_setup_quality": 0.9,
+                    "overall_reasoning": "AI-led bullish setup.",
+                },
+            )()
+            object.__setattr__(settings, "auto_trade_markets", ["step_300", "step_500"])
+            try:
+                setup = build_auto_trade_setup("blend-user")
+            finally:
+                object.__setattr__(settings, "auto_trade_markets", original_markets)
+
+        self.assertEqual(setup["symbol"], "step_300")
+        self.assertGreater(setup["confidence"], 0.0)
+        self.assertIn("AI", setup["reasoning"])
+        self.assertIn("Technical", setup["reasoning"])
 
     def test_oauth_state_and_pkce_flow(self):
         service = AuthService()
@@ -268,7 +367,7 @@ class MarketDataTests(unittest.TestCase):
 
         message = handle_start("dashboard-user")
         self.assertIn("Welcome back", message)
-        self.assertIn("Gemini scans 5 Step Indices", message)
+        self.assertIn("AI scans 5 Step Indices", message)
         self.assertIn("Expiry: 30 seconds", message)
 
     def test_exactly_five_step_markets_are_normalized(self):

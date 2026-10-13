@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from app.bot.callbacks import dispatch_callback
-from app.bot.handlers import auth_service, handle_balance, handle_connect, handle_logout, handle_scan, handle_start, handle_status
+from app.bot.handlers import auth_service, build_start_message, handle_balance, handle_connect, handle_logout, handle_scan, handle_start, handle_status
 from app.bot.keyboards import TelegramKeyboard
 from app.config import settings
 
@@ -29,7 +29,8 @@ def create_application():
         user_id = update.effective_user.id
         connected = bool(auth_service.get_valid_access_token(str(user_id)))
         keypad = TelegramKeyboard.dashboard_keyboard() if connected else TelegramKeyboard.start_keyboard()
-        await update.message.reply_text(handle_start(user_id), reply_markup=keypad)
+        text = await build_start_message(user_id) if connected else handle_start(user_id)
+        await update.message.reply_text(text, reply_markup=keypad)
 
     async def connect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = update.effective_user.id

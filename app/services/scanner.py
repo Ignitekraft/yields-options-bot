@@ -7,6 +7,47 @@ from app.config import settings
 from app.models.market import MarketSnapshot
 
 
+def _moving_average(values: List[float], window: int) -> float:
+    if not values:
+        return 0.0
+    recent = values[-window:] if len(values) >= window else values
+    return sum(recent) / max(len(recent), 1)
+
+
+def _calculate_rsi(values: List[float], period: int = 14) -> float:
+    if len(values) < 2:
+        return 50.0
+    gains: List[float] = []
+    losses: List[float] = []
+    for previous, current in zip(values, values[1:]):
+        delta = current - previous
+        gains.append(max(delta, 0.0))
+        losses.append(max(-delta, 0.0))
+    if len(gains) < period:
+        avg_gain = sum(gains) / max(len(gains), 1)
+        avg_loss = sum(losses) / max(len(losses), 1)
+    else:
+        avg_gain = sum(gains[-period:]) / period
+        avg_loss = sum(losses[-period:]) / period
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return 100.0 - (100.0 / (1.0 + rs))
+
+
+def _calculate_macd(values: List[float], fast: int = 12, slow: int = 26, signal_period: int = 9) -> tuple[float, float]:
+    if len(values) < slow:
+        return 0.0, 0.0
+    fast_ema = _moving_average(values[-fast:], fast)
+    slow_ema = _moving_average(values[-slow:], slow)
+    macd = fast_ema - slow_ema
+    if len(values) < slow + signal_period:
+        signal = macd
+    else:
+        signal = _moving_average([macd] * max(1, signal_period), signal_period)
+    return macd, signal
+
+
 @dataclass
 class SignalResult:
     symbol: str
@@ -90,6 +131,10 @@ class YieldsScanner:
         momentum = round(current_price - previous_price, 4)
         volatility = round((recent_high - recent_low) / max(len(prices), 1), 4)
         trend = "bullish" if momentum >= 0 else "bearish"
+        ma50 = _moving_average(prices, 50)
+        ma200 = _moving_average(prices, 200)
+        rsi = _calculate_rsi(prices)
+        macd, macd_signal = _calculate_macd(prices)
 
         return MarketSnapshot(
             symbol=symbol,
@@ -106,6 +151,11 @@ class YieldsScanner:
                 "price_change": momentum,
                 "range": round(recent_high - recent_low, 4),
                 "trend_strength": round(abs(momentum) / max(volatility, 0.01), 4),
+                "rsi": round(rsi, 2),
+                "macd": round(macd, 4),
+                "macd_signal": round(macd_signal, 4),
+                "ma50": round(ma50, 4),
+                "ma200": round(ma200, 4),
             },
             data_quality="good",
         )

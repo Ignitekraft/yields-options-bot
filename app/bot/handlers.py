@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import asyncio
+
 from app.config import settings
 from app.services.account_service import AccountService
 from app.services.auth_service import AuthService
+from app.services.auto_trade_service import AutoTradeService
 from app.services.deriv.auth import build_deriv_oauth_url
 from app.services.deriv.market_data import MarketDataService
+from app.services.gemini_service import GeminiService
 from app.services.scanner import YieldsScanner
 
 from .messages import (
@@ -18,6 +22,7 @@ from .messages import (
 
 auth_service = AuthService()
 account_service = AccountService(auth_service)
+auto_trade_service = AutoTradeService()
 
 
 def _format_currency(value: float | int | str | None, currency: str = "USD") -> str:
@@ -49,10 +54,26 @@ def handle_start(telegram_user_id: str | int | None = None) -> str:
 
     account = account_service.get_account_status(user_key)
     tokens = auth_service.get_user_tokens(user_key)
-    real_balance = None
+    real_balance = account.get("balance") if account.get("balance") else None
     demo_balance = None
-    if account.get("balance"):
-        real_balance = account.get("balance")
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop is None:
+        try:
+            live_balances = asyncio.run(account_service.get_live_balances(user_key))
+            real_entry = live_balances.get("real", {})
+            demo_entry = live_balances.get("demo", {})
+            if real_entry.get("available"):
+                real_balance = real_entry.get("balance")
+            if demo_entry.get("available"):
+                demo_balance = demo_entry.get("balance")
+            tokens = live_balances.get("tokens", tokens)
+        except Exception:
+            pass
 
     return (
         "🤖 YIELDS\n\n"
@@ -65,10 +86,107 @@ def handle_start(telegram_user_id: str | int | None = None) -> str:
         f"💎 Yields Tokens: {tokens}\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
         "🤖 AUTO TRADE\n\n"
-        "Gemini scans 5 Step Indices and selects the strongest current setup.\n\n"
+        "AI scans 5 Step Indices and selects the strongest current setup.\n\n"
         "Expiry: 30 seconds\n"
         "Cycles: 5\n"
     )
+
+
+async def build_start_message(telegram_user_id: str | int) -> str:
+    user_key = str(telegram_user_id)
+    if not auth_service.get_valid_access_token(user_key):
+        return handle_start(user_key)
+
+    balances = await account_service.get_live_balances(user_key)
+    real_entry = balances.get("real", {})
+    demo_entry = balances.get("demo", {})
+    real_balance = real_entry.get("balance") if real_entry.get("available") else None
+    demo_balance = demo_entry.get("balance") if demo_entry.get("available") else None
+    tokens = balances.get("tokens", auth_service.get_user_tokens(user_key))
+
+    return (
+        "🤖 YIELDS\n\n"
+        "Welcome back.\n\n"
+        "Your Deriv account is connected.\n\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "💰 ACCOUNT\n\n"
+        f"Real: {_format_currency(real_balance)}\n"
+        f"Demo: {_format_currency(demo_balance)}\n\n"
+        f"💎 Yields Tokens: {tokens}\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        "🤖 AUTO TRADE\n\n"
+        "AI scans 5 Step Indices and selects the strongest current setup.\n\n"
+        "Expiry: 30 seconds\n"
+        "Cycles: 5\n"
+    )
+
+
+def build_auto_trade_setup(telegram_user_id: str | int) -> dict:
+    user_key = str(telegram_user_id)
+    if not auth_service.get_valid_access_token(user_key):
+        return {"symbol": "NO_SETUP", "direction": "NO_TRADE", "confidence": 0.0, "setup_quality": 0.0, "reasoning": "Account not connected."}
+
+    service = MarketDataService()
+    scanner = YieldsScanner()
+    snapshots = scanner.collect_step_market_snapshots(service)
+    analysis = GeminiService().analyze(snapshots)
+    ai_by_symbol = {market.symbol: market for market in analysis.market_analyses}
+
+    scored = []
+    for snapshot in snapshots:
+        indicators = snapshot.indicators or {}
+        rsi = float(indicators.get("rsi", 50.0))
+        macd = float(indicators.get("macd", 0.0))
+        macd_signal = float(indicators.get("macd_signal", 0.0))
+        ma50 = float(indicators.get("ma50", snapshot.current_price))
+        ma200 = float(indicators.get("ma200", snapshot.current_price))
+
+        ma_alignment = 1.0 if snapshot.current_price >= ma50 >= ma200 else 0.0 if snapshot.current_price == ma50 == ma200 else 0.2
+        if snapshot.current_price <= ma50 <= ma200:
+            ma_alignment = 0.0
+        macd_strength = 1.0 if macd >= macd_signal else 0.0
+        rsi_score = max(0.0, min(1.0, (rsi - 30.0) / 70.0))
+        trend_score = max(0.0, min(1.0, (abs(snapshot.momentum) / max(abs(snapshot.current_price) * 0.02, 0.01))))
+        technical_score = min(1.0, (0.3 * ma_alignment) + (0.3 * macd_strength) + (0.2 * rsi_score) + (0.2 * trend_score))
+
+        ai_market = ai_by_symbol.get(snapshot.symbol)
+        ai_score = 0.0
+        if ai_market is not None:
+            ai_score = float(ai_market.confidence) * 0.7 + float(ai_market.setup_quality) * 0.3
+            if ai_market.direction == "NO_TRADE":
+                ai_score *= 0.2
+
+        combined_score = (0.6 * technical_score) + (0.4 * ai_score)
+        direction = "BULLISH" if (snapshot.momentum >= 0 or (ai_market and ai_market.direction == "BULLISH")) else "BEARISH"
+        if ai_market and ai_market.direction == "NO_TRADE" and snapshot.momentum == 0:
+            direction = "NO_TRADE"
+
+        scored.append({
+            "symbol": snapshot.symbol,
+            "display_name": snapshot.display_name,
+            "direction": direction,
+            "confidence": max(0.0, min(1.0, combined_score)),
+            "setup_quality": max(0.0, min(1.0, (technical_score * 0.5) + (ai_score * 0.5))),
+            "reasoning": (ai_market.reasoning if ai_market else "AI and technical structure are aligned.") + f" | Technical: RSI {rsi:.1f}, MACD {macd:.4f}, MA50 {ma50:.4f}, MA200 {ma200:.4f}.",
+        })
+
+    winner = max(scored, key=lambda item: (item["confidence"], item["setup_quality"])) if scored else {
+        "symbol": "NO_SETUP",
+        "direction": "NO_TRADE",
+        "confidence": 0.0,
+        "setup_quality": 0.0,
+        "reasoning": "No strong setup matched the combined AI and technical conditions.",
+        "display_name": "No Setup",
+    }
+
+    return {
+        "symbol": winner["symbol"],
+        "display_name": winner["display_name"],
+        "direction": winner["direction"],
+        "confidence": float(winner["confidence"]),
+        "setup_quality": float(winner["setup_quality"]),
+        "reasoning": winner["reasoning"],
+    }
 
 
 def handle_status(telegram_user_id: str | int) -> str:
@@ -159,17 +277,25 @@ def handle_scan() -> str:
 def handle_auto_trade_start(telegram_user_id: str | int) -> str:
     if not auth_service.get_valid_access_token(str(telegram_user_id)):
         return AUTO_TRADE_UNAVAILABLE_MESSAGE
+
+    setup = build_auto_trade_setup(telegram_user_id)
+    direction = setup.get("direction", "NO_TRADE")
+    direction_text = "🟢 BULLISH" if direction == "BULLISH" else "🔴 BEARISH" if direction == "BEARISH" else "⚪ NO_TRADE"
+    confidence = int(float(setup.get("confidence", 0.0)) * 100)
+    setup_quality = int(float(setup.get("setup_quality", 0.0)) * 100)
+
     return (
         "🤖 YIELDS AUTO TRADE\n\n"
         "🏆 BEST SETUP\n\n"
-        "Market: Step 300 Index\n"
-        "Direction: 🟢 BULLISH\n\n"
-        "Confidence: 83%\n"
-        "Setup Quality: 88%\n\n"
+        f"Market: {setup.get('display_name', 'Current winner')}\n"
+        f"Direction: {direction_text}\n\n"
+        f"Confidence: {confidence}%\n"
+        f"Setup Quality: {setup_quality}%\n\n"
         "Why:\n"
-        "• Strong short-term upward momentum\n"
-        "• Consistent recent price structure\n"
-        "• Higher highs maintained\n\n"
+        f"• {setup.get('reasoning', 'AI trend and momentum are aligned.')}\n"
+        "• AI trend, momentum, RSI, MACD, MA50, and MA200 all support the winner.\n"
+        "• Select your stake to begin the five-trade cycle.\n\n"
+        "All 5 trades in this session will follow the analyzed direction.\n\n"
         "Expiry: 30 seconds\n"
     )
 
