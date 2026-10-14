@@ -87,11 +87,9 @@ class TelegramKeyboard:
     def stake_keyboard() -> object:
         return TelegramKeyboard._keyboard(
             [
-                [("$1", "AUTO_TRADE_STAKE_1")],
-                [("$2", "AUTO_TRADE_STAKE_2")],
-                [("$5", "AUTO_TRADE_STAKE_5")],
-                [("$10", "AUTO_TRADE_STAKE_10")],
-                [("✕ Cancel", "AUTO_TRADE_CANCEL")],
+                [("$1", "AUTO_TRADE_STAKE_1"), ("$2", "AUTO_TRADE_STAKE_2"), ("$3", "AUTO_TRADE_STAKE_3"), ("$5", "AUTO_TRADE_STAKE_5")],
+                [("$10", "AUTO_TRADE_STAKE_10"), ("$20", "AUTO_TRADE_STAKE_20"), ("$30", "AUTO_TRADE_STAKE_30"), ("$5", "AUTO_TRADE_STAKE_5")],
+                [("$100", "AUTO_TRADE_STAKE_100"), ("$200", "AUTO_TRADE_STAKE_200"), ("$300", "AUTO_TRADE_STAKE_300"), ("$500", "AUTO_TRADE_STAKE_500")],
             ]
         )
 

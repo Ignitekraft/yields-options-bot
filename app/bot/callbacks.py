@@ -446,7 +446,7 @@ async def dispatch_callback(update, context) -> None:
             )
             return
 
-        if stake_value not in {1.0, 2.0, 5.0, 10.0}:
+        if stake_value not in {1.0, 2.0, 3.0, 5.0, 10.0, 20.0, 30.0, 100.0, 200.0, 300.0, 500.0}:
             await query.edit_message_text(
                 "⚠️ Unsupported stake selection."
             )
