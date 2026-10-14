@@ -27,7 +27,6 @@ class Settings:
     auto_trade_cycles: int = int(os.getenv("AUTO_TRADE_CYCLES", "5"))
     auto_trade_multiplier: float = float(os.getenv("AUTO_TRADE_MULTIPLIER", "2.0"))
     martingale_multiplier: float = float(os.getenv("MARTINGALE_MULTIPLIER", "2.0"))
-    max_martingale_steps: int = int(os.getenv("MAX_MARTINGALE_STEPS", "3"))
     min_ai_confidence: float = float(os.getenv("MIN_AI_CONFIDENCE", "0.70"))
     min_setup_quality: float = float(os.getenv("MIN_SETUP_QUALITY", "0.70"))
 

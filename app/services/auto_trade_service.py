@@ -226,13 +226,6 @@ class AutoTradeService:
             state.losses += 1
             state.martingale_step += 1
 
-            max_steps = int(getattr(settings, "max_martingale_steps", 5))
-            if state.martingale_step > max_steps:
-                state.status = "safety_limit_reached"
-                state.completed_at = _now()
-                self._executing.discard(key)
-                return state
-
             multiplier = float(getattr(settings, "martingale_multiplier", 2.0))
             state.current_stake = round(
                 state.base_stake * (multiplier ** (state.martingale_step - 1)),

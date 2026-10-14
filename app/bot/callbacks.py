@@ -176,17 +176,6 @@ async def _run_auto_trade(update, state) -> None:
             )
             return
 
-        if current.status == "safety_limit_reached":
-            await query.edit_message_text(
-                "🛑 MARTINGALE SAFETY LIMIT REACHED\n\n"
-                f"Winning cycles: {current.wins}/{current.max_cycles}\n"
-                f"Settled contracts: {current.trade_count}\n"
-                f"Total staked: ${current.total_staked:.2f}\n"
-                f"Net profit/loss: ${current.total_profit_loss:.2f}\n\n"
-                "Auto Trade has stopped. No further purchase will be attempted."
-            )
-            return
-
         if current.status not in {"running", "monitoring"}:
             await query.edit_message_text(
                 "⚠️ Auto Trade stopped.\n\n"
@@ -505,7 +494,7 @@ async def dispatch_callback(update, context) -> None:
             "Expiry: 30 seconds\n"
             "Target: 5 winning cycles\n\n"
             "A loss stays in the current cycle and increases the next stake "
-            "according to your configured martingale and safety limit. "
+            "according to your configured martingale. "
             "A settled win advances the cycle and resets the stake.\n\n"
             "Confirm to begin.",
             reply_markup=TelegramKeyboard.confirmation_keyboard(),
