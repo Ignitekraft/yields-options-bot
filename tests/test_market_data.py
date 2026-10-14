@@ -117,6 +117,69 @@ class MarketDataTests(unittest.TestCase):
         self.assertIsInstance(result["contract_id"], str)
         self.assertEqual(result["contract_id"], "123456789")
 
+    def test_execute_trade_retries_invalid_asset_candidates(self):
+        class FakeWebSocket:
+            def __init__(self):
+                self.responses = iter(
+                    [
+                        json.dumps({
+                            "error": {
+                                "code": "InvalidInputAsset",
+                                "message": "Trading is not offered for this asset",
+                            }
+                        }),
+                        json.dumps({
+                            "proposal": {
+                                "id": "proposal-456",
+                                "ask_price": 1.25,
+                            }
+                        }),
+                        json.dumps({
+                            "buy": {
+                                "contract_id": 987654321,
+                                "buy_price": 1.25,
+                                "balance_after": 1000.0,
+                                "shortcode": "CALL",
+                            }
+                        }),
+                    ]
+                )
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return None
+
+            async def send(self, payload):
+                return None
+
+            async def recv(self):
+                return next(self.responses)
+
+        service = TradeExecutionService()
+        with patch(
+            "app.services.trade_execution_service.websockets.connect",
+            return_value=FakeWebSocket(),
+        ):
+            result = asyncio.run(
+                service.execute_trade(
+                    user_id="retry-user",
+                    market_symbol="step_100",
+                    direction="BULLISH",
+                    stake=10.0,
+                    account_id="demo-123",
+                    access_token="token",
+                    currency="USD",
+                    ws_url="wss://api.derivws.com/trading/v1/options/ws/public",
+                    account_type="demo",
+                )
+            )
+
+        self.assertEqual(result["status"], "accepted")
+        self.assertEqual(result["symbol"], "R_100")
+        self.assertIn("contract_id", result)
+
     def test_state_dir_falls_back_when_render_path_is_not_writable(self):
         import app.services.auth_service as auth_service
 

@@ -105,6 +105,40 @@ class TradeExecutionService:
         except (TypeError, ValueError):
             return str(contract_id)
 
+    @classmethod
+    def asset_candidates(cls, symbol: str) -> list[str]:
+        candidates: list[str] = []
+        seen: set[str] = set()
+
+        def add(value: str | None) -> None:
+            if not value:
+                return
+            normalized = str(value).strip()
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                candidates.append(normalized)
+
+        try:
+            add(cls.normalize_step_symbol(symbol))
+        except ValueError:
+            add(str(symbol or "").strip())
+
+        for value in (
+            "R_10",
+            "R_25",
+            "R_50",
+            "R_75",
+            "R_100",
+            "R_200",
+            "R_300",
+            "R_400",
+            "R_500",
+            "R_1000",
+        ):
+            add(value)
+
+        return candidates
+
     @staticmethod
     def validate_account_mode(account_mode: str | None) -> str:
         normalized = str(account_mode or "").strip().lower()
@@ -486,6 +520,7 @@ class TradeExecutionService:
                 "account_id": account_id or None,
             }
 
+        last_error: Exception | None = None
         try:
             async with websockets.connect(
                 ws_url,
@@ -493,88 +528,86 @@ class TradeExecutionService:
                 ping_timeout=20,
                 ping_interval=20,
             ) as websocket:
+                candidates = self.asset_candidates(symbol)
+                for candidate_symbol in candidates:
+                    try:
+                        proposal = (
+                            await self._create_proposal_on_ws(
+                                websocket=websocket,
+                                symbol=candidate_symbol,
+                                direction=contract_type,
+                                stake=amount,
+                                expiry_seconds=expiry,
+                                currency=currency,
+                            )
+                        )
 
-                # --------------------------------------------------
-                # FIRST PROPOSAL
-                # --------------------------------------------------
-                proposal = (
-                    await self._create_proposal_on_ws(
-                        websocket=websocket,
-                        symbol=symbol,
-                        direction=contract_type,
-                        stake=amount,
-                        expiry_seconds=expiry,
-                        currency=currency,
-                    )
-                )
+                        proposal_id = proposal["proposal_id"]
 
-                proposal_id = proposal["proposal_id"]
+                        try:
+                            buy = await self._buy_on_ws(
+                                websocket=websocket,
+                                proposal_id=proposal_id,
+                                price=proposal["ask_price"],
+                            )
+                        except DerivRequestError as exc:
+                            if not self._is_unknown_contract_proposal_error(exc):
+                                if self._is_invalid_asset_error(exc) and candidate_symbol != candidates[-1]:
+                                    last_error = exc
+                                    continue
+                                raise
 
-                try:
-                    buy = await self._buy_on_ws(
-                        websocket=websocket,
-                        proposal_id=proposal_id,
-                        price=proposal["ask_price"],
-                    )
+                            proposal = (
+                                await self._create_proposal_on_ws(
+                                    websocket=websocket,
+                                    symbol=candidate_symbol,
+                                    direction=contract_type,
+                                    stake=amount,
+                                    expiry_seconds=expiry,
+                                    currency=currency,
+                                )
+                            )
 
-                except DerivRequestError as exc:
-                    # Deriv explicitly rejected the proposal.
-                    #
-                    # In particular, Deriv can return:
-                    # InvalidContractProposal:
-                    # Unknown contract proposal
-                    #
-                    # Because this is a definite rejection, no
-                    # contract was purchased. We can safely obtain
-                    # ONE fresh proposal and try the buy again.
-                    if not self._is_unknown_contract_proposal_error(
-                        exc
-                    ):
+                            proposal_id = proposal["proposal_id"]
+                            buy = await self._buy_on_ws(
+                                websocket=websocket,
+                                proposal_id=proposal_id,
+                                price=proposal["ask_price"],
+                            )
+
+                        return {
+                            "status": "accepted",
+                            "account_type": account_mode,
+                            "account_id": account_id,
+                            "symbol": candidate_symbol,
+                            "underlying_symbol": candidate_symbol,
+                            "direction": direction,
+                            "contract_type": contract_type,
+                            "stake": amount,
+                            "expiry_seconds": expiry,
+                            "proposal_id": proposal_id,
+                            "contract_id": buy[
+                                "contract_id"
+                            ],
+                            "buy_price": buy[
+                                "buy_price"
+                            ],
+                            "balance_after": buy[
+                                "balance_after"
+                            ],
+                            "shortcode": buy[
+                                "shortcode"
+                            ],
+                        }
+                    except DerivRequestError as exc:
+                        if self._is_invalid_asset_error(exc) and candidate_symbol != candidates[-1]:
+                            last_error = exc
+                            continue
                         raise
 
-                    proposal = (
-                        await self._create_proposal_on_ws(
-                            websocket=websocket,
-                            symbol=symbol,
-                            direction=contract_type,
-                            stake=amount,
-                            expiry_seconds=expiry,
-                            currency=currency,
-                        )
-                    )
-
-                    proposal_id = proposal["proposal_id"]
-
-                    buy = await self._buy_on_ws(
-                        websocket=websocket,
-                        proposal_id=proposal_id,
-                        price=proposal["ask_price"],
-                    )
-
-                return {
-                    "status": "accepted",
-                    "account_type": account_mode,
-                    "account_id": account_id,
-                    "symbol": symbol,
-                    "underlying_symbol": symbol,
-                    "direction": direction,
-                    "contract_type": contract_type,
-                    "stake": amount,
-                    "expiry_seconds": expiry,
-                    "proposal_id": proposal_id,
-                    "contract_id": buy[
-                        "contract_id"
-                    ],
-                    "buy_price": buy[
-                        "buy_price"
-                    ],
-                    "balance_after": buy[
-                        "balance_after"
-                    ],
-                    "shortcode": buy[
-                        "shortcode"
-                    ],
-                }
+                if last_error is not None:
+                    raise last_error
+                raise RuntimeError("DERIV_NO_VALID_ASSET_CANDIDATES")
 
         except UnknownBuyOutcome as exc:
             return {
