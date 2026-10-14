@@ -124,16 +124,11 @@ class TradeExecutionService:
             add(str(symbol or "").strip())
 
         for value in (
-            "R_10",
-            "R_25",
-            "R_50",
-            "R_75",
             "R_100",
             "R_200",
             "R_300",
             "R_400",
             "R_500",
-            "R_1000",
         ):
             add(value)
 
@@ -448,6 +443,7 @@ class TradeExecutionService:
         }
 
     @classmethod
+    @classmethod
     def _is_unknown_contract_proposal_error(
         cls,
         error: Exception,
@@ -457,6 +453,20 @@ class TradeExecutionService:
         return (
             "invalidcontractproposal" in message
             and "unknown contract proposal" in message
+        )
+
+    @classmethod
+    def _is_invalid_asset_error(
+        cls,
+        error: Exception,
+    ) -> bool:
+        message = str(error).strip().lower()
+
+        return (
+            "trading is not offered for this asset" in message
+            or "not offered for this asset" in message
+            or "invalidinputasset" in message
+            or "invalid asset" in message
         )
 
     async def execute_trade(

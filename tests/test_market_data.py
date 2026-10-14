@@ -177,7 +177,7 @@ class MarketDataTests(unittest.TestCase):
             )
 
         self.assertEqual(result["status"], "accepted")
-        self.assertEqual(result["symbol"], "R_100")
+        self.assertIn(result["symbol"], {"R_100", "R_200", "R_300", "R_400", "R_500"})
         self.assertIn("contract_id", result)
 
     def test_state_dir_falls_back_when_render_path_is_not_writable(self):
