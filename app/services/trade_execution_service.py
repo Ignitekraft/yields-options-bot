@@ -12,28 +12,15 @@ from app.config import settings
 
 
 class UnknownBuyOutcome(RuntimeError):
-    """The buy request was sent, but its final outcome could not be confirmed."""
+    """The purchase may have succeeded; never automatically retry it."""
 
 
 class DerivRequestError(RuntimeError):
-    """Deriv explicitly rejected an API request."""
+    """A definite rejection returned by Deriv."""
 
-    def __init__(
-        self,
-        message: str,
-        *,
-        code: str | None = None,
-        response: dict[str, Any] | None = None,
-    ) -> None:
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        super().__init__(message)
         self.code = code
-        self.response = response or {}
-
-        if code and message:
-            text = f"{code}:{message}"
-        else:
-            text = message or "DERIV_REQUEST_FAILED"
-
-        super().__init__(text)
 
 
 class TradeExecutionService:
@@ -146,36 +133,25 @@ class TradeExecutionService:
             "duration": cls.validate_expiry(expiry_seconds),
             "duration_unit": "s",
             "underlying_symbol": cls.normalize_step_symbol(symbol),
+            "subscribe": 1,
             "req_id": cls.next_req_id(),
         }
 
     @staticmethod
-    def _error_details(
-        response: dict[str, Any],
-    ) -> tuple[str | None, str]:
+    def _error_message(response: dict[str, Any]) -> str:
         error = response.get("error")
 
         if isinstance(error, dict):
             code = error.get("code")
             message = error.get("message")
 
-            return (
-                str(code) if code else None,
-                str(message)
-                if message
-                else "DERIV_REQUEST_FAILED",
-            )
+            if code and message:
+                return f"{code}:{message}"
 
-        return None, "DERIV_REQUEST_FAILED"
+            if message:
+                return str(message)
 
-    @classmethod
-    def _error_message(cls, response: dict[str, Any]) -> str:
-        code, message = cls._error_details(response)
-
-        if code:
-            return f"{code}:{message}"
-
-        return message
+        return "DERIV_REQUEST_FAILED"
 
     @classmethod
     async def _receive_response(
@@ -191,8 +167,7 @@ class TradeExecutionService:
 
         while True:
             remaining = (
-                deadline
-                - asyncio.get_running_loop().time()
+                deadline - asyncio.get_running_loop().time()
             )
 
             if remaining <= 0:
@@ -227,17 +202,20 @@ class TradeExecutionService:
                 ):
                     continue
 
-            # IMPORTANT:
-            # If Deriv explicitly returns an error, that means
-            # the request was rejected. This is NOT an unknown
-            # buy outcome.
             if "error" in response:
-                code, message = cls._error_details(response)
+                error = response.get("error")
+
+                if isinstance(error, dict):
+                    code = error.get("code")
+                    message = error.get("message")
+
+                    raise DerivRequestError(
+                        cls._error_message(response),
+                        code=str(code) if code else None,
+                    )
 
                 raise DerivRequestError(
-                    message,
-                    code=code,
-                    response=response,
+                    cls._error_message(response)
                 )
 
             if expected_key in response:
@@ -257,9 +235,7 @@ class TradeExecutionService:
         req_id = payload.get("req_id")
 
         if not isinstance(req_id, int):
-            raise ValueError(
-                "DERIV_REQUEST_ID_MISSING"
-            )
+            raise ValueError("DERIV_REQUEST_ID_MISSING")
 
         await asyncio.wait_for(
             websocket.send(json.dumps(payload)),
@@ -348,9 +324,8 @@ class TradeExecutionService:
             "req_id": req_id,
         }
 
-        # Once this send begins, NEVER automatically retry it.
-        # A retry could create a duplicate purchase if Deriv
-        # accepted the original request but the response was lost.
+        # Once the buy request has been sent, never automatically
+        # retry it unless Deriv has explicitly rejected it.
         try:
             await asyncio.wait_for(
                 websocket.send(json.dumps(payload)),
@@ -368,29 +343,12 @@ class TradeExecutionService:
                 req_id,
                 timeout=20,
             )
-
         except DerivRequestError:
-            # Deriv explicitly rejected the purchase.
-            # This is a definite rejection, NOT an unknown outcome.
+            # This is a definite rejection. No contract was bought.
             raise
-
-        except (
-            asyncio.TimeoutError,
-            TimeoutError,
-            websockets.exceptions.ConnectionClosed,
-            websockets.exceptions.ConnectionClosedError,
-            websockets.exceptions.ConnectionClosedOK,
-            OSError,
-        ) as exc:
-            # We sent the buy request but cannot establish whether
-            # Deriv accepted it. Do NOT retry automatically.
-            raise UnknownBuyOutcome(
-                f"BUY_OUTCOME_UNKNOWN:{type(exc).__name__}"
-            ) from exc
-
         except Exception as exc:
-            # Any unexpected transport/processing failure after
-            # sending the buy is still treated conservatively.
+            # Timeout / connection problem after sending the buy:
+            # purchase status is uncertain, so DO NOT retry.
             raise UnknownBuyOutcome(
                 f"BUY_OUTCOME_UNKNOWN:{type(exc).__name__}"
             ) from exc
@@ -426,6 +384,18 @@ class TradeExecutionService:
             ),
         }
 
+    @classmethod
+    def _is_unknown_contract_proposal_error(
+        cls,
+        error: Exception,
+    ) -> bool:
+        message = str(error).strip().lower()
+
+        return (
+            "invalidcontractproposal" in message
+            and "unknown contract proposal" in message
+        )
+
     async def execute_trade(
         self,
         user_id: str | int,
@@ -438,26 +408,22 @@ class TradeExecutionService:
         ws_url: str | None = None,
         account_type: str | None = None,
     ) -> dict[str, Any]:
-        """Place one contract on the verified, explicitly selected account."""
+        """Place one Rise/Fall contract on the selected account."""
 
         del user_id
         del access_token
 
         proposal_id: str | None = None
-        account_mode = str(
-            account_type or ""
-        ).strip().lower()
 
-        symbol: str | None = None
-        contract_type: str | None = None
-        amount: float | None = None
-        expiry: int | None = None
+        account_mode = (
+            str(account_type or "")
+            .strip()
+            .lower()
+        )
 
         try:
-            account_mode = (
-                self.validate_account_mode(
-                    account_mode
-                )
+            account_mode = self.validate_account_mode(
+                account_mode
             )
 
             if not account_id:
@@ -474,16 +440,11 @@ class TradeExecutionService:
                 market_symbol
             )
 
-            contract_type = (
-                self.resolve_contract_type(
-                    direction
-                )
+            contract_type = self.resolve_contract_type(
+                direction
             )
 
-            amount = self.validate_stake(
-                stake
-            )
-
+            amount = self.validate_stake(stake)
             expiry = self.validate_expiry(30)
 
         except ValueError as exc:
@@ -493,9 +454,7 @@ class TradeExecutionService:
                 "account_type": (
                     account_mode or None
                 ),
-                "account_id": (
-                    account_id or None
-                ),
+                "account_id": account_id or None,
             }
 
         try:
@@ -506,26 +465,62 @@ class TradeExecutionService:
                 ping_interval=20,
             ) as websocket:
 
+                # --------------------------------------------------
+                # FIRST PROPOSAL
+                # --------------------------------------------------
                 proposal = (
                     await self._create_proposal_on_ws(
-                        websocket,
-                        symbol,
-                        contract_type,
-                        amount,
-                        expiry,
-                        currency,
+                        websocket=websocket,
+                        symbol=symbol,
+                        direction=contract_type,
+                        stake=amount,
+                        expiry_seconds=expiry,
+                        currency=currency,
                     )
                 )
 
-                proposal_id = proposal[
-                    "proposal_id"
-                ]
+                proposal_id = proposal["proposal_id"]
 
-                buy = await self._buy_on_ws(
-                    websocket,
-                    proposal_id,
-                    proposal["ask_price"],
-                )
+                try:
+                    buy = await self._buy_on_ws(
+                        websocket=websocket,
+                        proposal_id=proposal_id,
+                        price=proposal["ask_price"],
+                    )
+
+                except DerivRequestError as exc:
+                    # Deriv explicitly rejected the proposal.
+                    #
+                    # In particular, Deriv can return:
+                    # InvalidContractProposal:
+                    # Unknown contract proposal
+                    #
+                    # Because this is a definite rejection, no
+                    # contract was purchased. We can safely obtain
+                    # ONE fresh proposal and try the buy again.
+                    if not self._is_unknown_contract_proposal_error(
+                        exc
+                    ):
+                        raise
+
+                    proposal = (
+                        await self._create_proposal_on_ws(
+                            websocket=websocket,
+                            symbol=symbol,
+                            direction=contract_type,
+                            stake=amount,
+                            expiry_seconds=expiry,
+                            currency=currency,
+                        )
+                    )
+
+                    proposal_id = proposal["proposal_id"]
+
+                    buy = await self._buy_on_ws(
+                        websocket=websocket,
+                        proposal_id=proposal_id,
+                        price=proposal["ask_price"],
+                    )
 
                 return {
                     "status": "accepted",
@@ -552,33 +547,34 @@ class TradeExecutionService:
                     ],
                 }
 
-        except DerivRequestError as exc:
-            # DEFINITE rejection from Deriv.
-            # The contract was NOT purchased.
-            return {
-                "status": "rejected",
-                "reason": str(exc),
-                "account_type": account_mode,
-                "account_id": account_id,
-                "symbol": symbol,
-                "contract_type": contract_type,
-                "proposal_id": proposal_id,
-                "deriv_error_code": exc.code,
-                "deriv_error": exc.response.get(
-                    "error"
-                ),
-            }
-
         except UnknownBuyOutcome as exc:
-            # Buy request was sent, but the response could not
-            # establish whether Deriv accepted it.
             return {
                 "status": "unknown_buy_outcome",
                 "reason": str(exc),
                 "account_type": account_mode,
                 "account_id": account_id,
-                "symbol": symbol,
-                "contract_type": contract_type,
+                "symbol": (
+                    locals().get("symbol")
+                ),
+                "contract_type": (
+                    locals().get("contract_type")
+                ),
+                "proposal_id": proposal_id,
+            }
+
+        except DerivRequestError as exc:
+            return {
+                "status": "rejected",
+                "reason": str(exc),
+                "deriv_error_code": exc.code,
+                "account_type": account_mode,
+                "account_id": account_id,
+                "symbol": (
+                    locals().get("symbol")
+                ),
+                "contract_type": (
+                    locals().get("contract_type")
+                ),
                 "proposal_id": proposal_id,
             }
 
@@ -588,8 +584,12 @@ class TradeExecutionService:
                 "reason": str(exc),
                 "account_type": account_mode,
                 "account_id": account_id,
-                "symbol": symbol,
-                "contract_type": contract_type,
+                "symbol": (
+                    locals().get("symbol")
+                ),
+                "contract_type": (
+                    locals().get("contract_type")
+                ),
                 "proposal_id": proposal_id,
             }
 
@@ -663,48 +663,47 @@ class TradeExecutionService:
                 if not isinstance(response, dict):
                     continue
 
+                echo_req = response.get(
+                    "echo_req"
+                )
+
+                if isinstance(echo_req, dict):
+                    response_req_id = (
+                        echo_req.get("req_id")
+                    )
+
+                    if (
+                        response_req_id is not None
+                        and response_req_id != req_id
+                    ):
+                        continue
+
                 if "error" in response:
                     raise DerivRequestError(
                         self._error_message(
                             response
-                        ),
-                        code=(
-                            response.get(
-                                "error",
-                                {},
-                            ).get("code")
-                            if isinstance(
-                                response.get(
-                                    "error"
-                                ),
-                                dict,
-                            )
-                            else None
-                        ),
-                        response=response,
+                        )
                     )
 
                 contract = response.get(
                     "proposal_open_contract"
                 )
 
-                if not isinstance(
-                    contract,
-                    dict,
+                if not isinstance(contract, dict):
+                    continue
+
+                if (
+                    str(
+                        contract.get(
+                            "contract_id"
+                        )
+                    )
+                    != str(contract_id)
                 ):
                     continue
 
-                if str(
-                    contract.get(
-                        "contract_id"
-                    )
-                ) != str(contract_id):
-                    continue
-
                 if bool(
-                    contract.get(
-                        "is_sold"
-                    )
+                    contract.get("is_sold")
                 ):
                     try:
                         profit = float(
