@@ -7,6 +7,8 @@ from typing import Any
 
 from app.config import settings
 
+AUTO_TRADE_STALE_SECONDS = int(getattr(settings, "auto_trade_stale_seconds", 1800))
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -57,8 +59,30 @@ class AutoTradeService:
         self._runs: dict[str, TradeRunState] = {}
         self._executing: set[str] = set()
 
+    @staticmethod
+    def _parse_started_at(value: str | None) -> datetime | None:
+        if not value:
+            return None
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
+    def _prune_stale_runs_locked(self) -> None:
+        stale_cutoff = datetime.now(timezone.utc).timestamp() - AUTO_TRADE_STALE_SECONDS
+        for key, state in list(self._runs.items()):
+            if state.status not in self.ACTIVE_STATUSES:
+                continue
+            started_at = self._parse_started_at(state.started_at)
+            if started_at is None:
+                continue
+            if started_at.timestamp() < stale_cutoff:
+                self._runs.pop(key, None)
+                self._executing.discard(key)
+
     def is_running(self, user_id: str | int) -> bool:
         with self._lock:
+            self._prune_stale_runs_locked()
             state = self._runs.get(str(user_id))
             return bool(state and state.status in self.ACTIVE_STATUSES)
 
@@ -92,6 +116,7 @@ class AutoTradeService:
             raise ValueError("INVALID_CYCLE_TARGET")
 
         with self._lock:
+            self._prune_stale_runs_locked()
             existing = self._runs.get(key)
             if existing and existing.status in self.ACTIVE_STATUSES:
                 raise RuntimeError("AUTO_TRADE_ALREADY_RUNNING")

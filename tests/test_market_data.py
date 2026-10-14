@@ -212,6 +212,30 @@ class MarketDataTests(unittest.TestCase):
             auth_service.STATE_DIR = original_state_dir
             importlib.reload(auth_service)
 
+    def test_stale_running_auto_trade_is_treated_as_inactive(self):
+        service = AutoTradeService()
+        state = service.start_run(
+            "stale-user",
+            "step_100",
+            "BULLISH",
+            2.0,
+            account_mode="demo",
+        )
+        state.status = "running"
+        state.started_at = "2020-01-01T00:00:00+00:00"
+
+        self.assertFalse(service.is_running("stale-user"))
+
+        replacement = service.start_run(
+            "stale-user",
+            "step_300",
+            "BEARISH",
+            5.0,
+            account_mode="demo",
+        )
+        self.assertEqual(replacement.symbol, "step_300")
+        self.assertEqual(replacement.status, "running")
+
     def test_start_screen_uses_live_balance_values(self):
         auth = AuthService()
         auth.connect_user(
