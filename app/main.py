@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 from fastapi import FastAPI, Query
 from fastapi.responses import HTMLResponse
 
@@ -134,3 +136,10 @@ def root() -> dict[str, str]:
         "app": "Yields",
         "mode": "telegram-first",
     }
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    port = int(os.getenv("PORT", "8000"))
+    uvicorn.run("app.main:app", host="0.0.0.0", port=port)
