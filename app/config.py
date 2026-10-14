@@ -25,8 +25,8 @@ class Settings:
     )
     default_expiry_seconds: int = int(os.getenv("AUTO_TRADE_EXPIRY_SECONDS", "30"))
     auto_trade_cycles: int = int(os.getenv("AUTO_TRADE_CYCLES", "5"))
-    auto_trade_multiplier: float = float(os.getenv("AUTO_TRADE_MULTIPLIER", "2.0"))
-    martingale_multiplier: float = float(os.getenv("MARTINGALE_MULTIPLIER", "2.0"))
+    auto_trade_multiplier: float = float(os.getenv("AUTO_TRADE_MULTIPLIER", "2.25"))
+    martingale_multiplier: float = float(os.getenv("MARTINGALE_MULTIPLIER", "2.25"))
     min_ai_confidence: float = float(os.getenv("MIN_AI_CONFIDENCE", "0.70"))
     min_setup_quality: float = float(os.getenv("MIN_SETUP_QUALITY", "0.70"))
 

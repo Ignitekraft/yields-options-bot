@@ -26,10 +26,11 @@ class MarketDataService:
         the market list without hard-coding a single symbol blindly.
         """
         fallback_symbols = [
-            {"symbol": "R_100", "display_name": "Volatility 100 Index"},
-            {"symbol": "R_75", "display_name": "Volatility 75 Index"},
-            {"symbol": "R_50", "display_name": "Volatility 50 Index"},
-            {"symbol": "1HZ10V", "display_name": "1H Volatility 10 Index"},
+            {"symbol": "STPRNG", "display_name": "Step Index 100"},
+            {"symbol": "STPRNG2", "display_name": "Step Index 200"},
+            {"symbol": "STPRNG3", "display_name": "Step Index 300"},
+            {"symbol": "STPRNG4", "display_name": "Step Index 400"},
+            {"symbol": "STPRNG5", "display_name": "Step Index 500"},
         ]
         return fallback_symbols
 

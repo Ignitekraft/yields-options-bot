@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from app.bot.callbacks import dispatch_callback
+from app.bot.callbacks import _run_auto_trade, dispatch_callback
 from app.bot.handlers import (
     build_auto_trade_setup,
     handle_auto_trade_start,
@@ -34,26 +34,39 @@ class MarketDataTests(unittest.TestCase):
         normalized = service.normalize_tick(
             {
                 "tick": {
-                    "symbol": "R_100",
+                    "symbol": "STPRNG",
                     "quote": 123.45,
                     "epoch": 1710000000,
                 },
-                "echo_req": {"ticks": "R_100"},
+                "echo_req": {"ticks": "STPRNG"},
             }
         )
 
-        self.assertEqual(normalized["symbol"], "R_100")
+        self.assertEqual(normalized["symbol"], "STPRNG")
         self.assertEqual(normalized["quote"], 123.45)
         self.assertEqual(normalized["epoch"], 1710000000)
         self.assertIn("timestamp", normalized)
 
     def test_scanner_builds_signal_result(self):
         scanner = YieldsScanner()
-        signal = scanner.build_signal(1.0, 1.2, 0.85, "R_100")
+        signal = scanner.build_signal(1.0, 1.2, 0.85, "STPRNG")
 
         self.assertIsInstance(signal, SignalResult)
-        self.assertEqual(signal.symbol, "R_100")
+        self.assertEqual(signal.symbol, "STPRNG")
         self.assertGreater(signal.confidence, 0)
+
+    def test_step_index_symbols_use_deriv_step_market_mapping(self):
+        expected = {
+            "step_100": "STPRNG",
+            "step_200": "STPRNG2",
+            "step_300": "STPRNG3",
+            "step_400": "STPRNG4",
+            "step_500": "STPRNG5",
+        }
+
+        for key, value in expected.items():
+            self.assertEqual(TradeExecutionService.normalize_step_symbol(key), value)
+            self.assertEqual(TradeExecutionService.normalize_step_symbol(value), value)
 
     def test_market_history_varies_by_symbol_to_avoid_duplicate_winners(self):
         service = MarketDataService()
@@ -177,7 +190,7 @@ class MarketDataTests(unittest.TestCase):
             )
 
         self.assertEqual(result["status"], "accepted")
-        self.assertIn(result["symbol"], {"R_100", "R_200", "R_300", "R_400", "R_500"})
+        self.assertIn(result["symbol"], {"STPRNG", "STPRNG2", "STPRNG3", "STPRNG4", "STPRNG5"})
         self.assertIn("contract_id", result)
 
     def test_state_dir_falls_back_when_render_path_is_not_writable(self):
@@ -246,12 +259,58 @@ class MarketDataTests(unittest.TestCase):
             account_mode="demo",
         )
 
-        for _ in range(10):
+        state = service.advance_after_result("martingale-user", won=False, profit=-2.0)
+        self.assertEqual(state.status, "running")
+        self.assertEqual(state.current_stake, 4.5)
+        self.assertEqual(state.martingale_step, 2)
+
+        for _ in range(9):
             state = service.advance_after_result("martingale-user", won=False, profit=-2.0)
 
         self.assertEqual(state.status, "running")
         self.assertGreater(state.current_stake, 2.0)
         self.assertEqual(state.martingale_step, 11)
+
+    def test_auto_trade_starts_next_cycle_without_delay_after_settlement(self):
+        service = AutoTradeService()
+        service.start_run(
+            "immediate-user",
+            "step_300",
+            "BULLISH",
+            2.0,
+            account_mode="demo",
+        )
+
+        class FakeQuery:
+            def __init__(self):
+                self.edited = None
+
+            async def answer(self):
+                return None
+
+            async def edit_message_text(self, text, **kwargs):
+                self.edited = text
+
+        class FakeUpdate:
+            def __init__(self):
+                self.callback_query = FakeQuery()
+                self.effective_user = type("User", (), {"id": "immediate-user"})()
+
+        update = FakeUpdate()
+
+        with patch(
+            "app.bot.callbacks._monitor_settlement",
+            new=AsyncMock(return_value={"profit": 1.0, "status": "settled"}),
+        ), patch(
+            "app.bot.callbacks.execute_trade",
+            new=AsyncMock(return_value={"status": "rejected", "reason": "stop"}),
+        ), patch(
+            "app.bot.callbacks.asyncio.sleep",
+            side_effect=AssertionError("post-settlement sleep should not delay the next trade"),
+        ):
+            asyncio.run(_run_auto_trade(update, service.get_run("immediate-user")))
+
+        self.assertTrue(True)
 
     def test_start_screen_uses_live_balance_values(self):
         auth = AuthService()
@@ -305,7 +364,7 @@ class MarketDataTests(unittest.TestCase):
         with patch(
             "app.bot.handlers.build_auto_trade_setup",
             return_value={
-                "symbol": "R_100",
+                "symbol": "STPRNG",
                 "direction": "BULLISH",
                 "confidence": 0.83,
                 "setup_quality": 0.88,
@@ -577,7 +636,7 @@ class MarketDataTests(unittest.TestCase):
         self.assertEqual(account["currency"], "USD")
 
         trading = TradingService()
-        proposal = trading.create_proposal("R_100", amount=10.0)
+        proposal = trading.create_proposal("STPRNG", amount=10.0)
 
         self.assertIn("proposal_id", proposal)
         self.assertEqual(proposal["currency"], "USD")
@@ -585,7 +644,7 @@ class MarketDataTests(unittest.TestCase):
         buy = trading.buy_contract(
             proposal["proposal_id"],
             float(proposal["ask_price"]),
-            "R_100",
+            "STPRNG",
         )
 
         self.assertEqual(buy["status"], "accepted")
@@ -663,7 +722,7 @@ class MarketDataTests(unittest.TestCase):
             trading.get_deriv_ws_url(),
         )
         self.assertEqual(result[0]["contract_id"], "contract-123")
-        self.assertEqual(result[0]["symbol"], "R_100")
+        self.assertEqual(result[0]["symbol"], "STPRNG")
         self.assertEqual(result[0]["contract_type"], "CALL")
         self.assertEqual(trading.resolve_contract_type("CALL"), "CALL")
 
@@ -894,7 +953,7 @@ class MarketDataTests(unittest.TestCase):
             expiry_seconds=30,
         )
 
-        self.assertEqual(payload["underlying_symbol"], "R_300")
+        self.assertEqual(payload["underlying_symbol"], "STPRNG3")
         self.assertNotIn("symbol", payload)
         self.assertEqual(payload["contract_type"], "CALL")
         self.assertEqual(payload["duration"], 30)
@@ -908,7 +967,7 @@ class MarketDataTests(unittest.TestCase):
             expiry_seconds=30,
         )
 
-        self.assertEqual(payload["underlying_symbol"], "R_300")
+        self.assertEqual(payload["underlying_symbol"], "STPRNG3")
         self.assertEqual(payload["contract_type"], "PUT")
 
     def test_martingale_state_machine(self):

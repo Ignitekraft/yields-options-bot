@@ -393,7 +393,7 @@ def handle_scan() -> str:
     scanner = YieldsScanner()
 
     symbol_list = market_service.get_active_symbols()
-    symbol = symbol_list[0]["symbol"] if symbol_list else "R_100"
+    symbol = symbol_list[0]["symbol"] if symbol_list else "STPRNG"
     history = market_service.get_historical_ticks(symbol, count=25)
     live_tick = market_service.subscribe_ticks(symbol)
 

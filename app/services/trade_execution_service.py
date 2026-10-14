@@ -27,18 +27,18 @@ class TradeExecutionService:
     """Execute Deriv Rise/Fall contracts on a verified Options account."""
 
     STEP_MARKET_MAP = {
-        "step_100": "R_100",
-        "step_200": "R_200",
-        "step_300": "R_300",
-        "step_400": "R_400",
-        "step_500": "R_500",
+        "step_100": "STPRNG",
+        "step_200": "STPRNG2",
+        "step_300": "STPRNG3",
+        "step_400": "STPRNG4",
+        "step_500": "STPRNG5",
     }
 
     _req_counter = itertools.count(1)
 
     def __init__(self) -> None:
         self.martingale_multiplier = float(
-            getattr(settings, "martingale_multiplier", 2.0)
+            getattr(settings, "martingale_multiplier", 2.25)
         )
 
     @classmethod
@@ -124,11 +124,11 @@ class TradeExecutionService:
             add(str(symbol or "").strip())
 
         for value in (
-            "R_100",
-            "R_200",
-            "R_300",
-            "R_400",
-            "R_500",
+            "STPRNG",
+            "STPRNG2",
+            "STPRNG3",
+            "STPRNG4",
+            "STPRNG5",
         ):
             add(value)
 
@@ -835,7 +835,7 @@ class TradeExecutionService:
         cls,
         base_stake: float,
         martingale_step: int,
-        multiplier: float = 2.0,
+        multiplier: float = 2.25,
     ) -> float:
         base = cls.validate_stake(
             base_stake

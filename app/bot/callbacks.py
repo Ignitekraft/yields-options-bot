@@ -234,7 +234,6 @@ async def _run_auto_trade(update, state) -> None:
             if current.status != "running":
                 continue
 
-            await asyncio.sleep(1)
             continue
 
         # Check the selected mode again before every purchase.
