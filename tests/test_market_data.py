@@ -55,6 +55,68 @@ class MarketDataTests(unittest.TestCase):
         self.assertEqual(signal.symbol, "R_100")
         self.assertGreater(signal.confidence, 0)
 
+    def test_market_history_varies_by_symbol_to_avoid_duplicate_winners(self):
+        service = MarketDataService()
+
+        history_100 = service.get_historical_ticks("step_100", count=12)
+        history_300 = service.get_historical_ticks("step_300", count=12)
+
+        self.assertNotEqual(history_100[0]["quote"], history_300[0]["quote"])
+        self.assertNotEqual(history_100[-1]["quote"], history_300[-1]["quote"])
+
+    def test_monitor_contract_uses_numeric_contract_id(self):
+        service = TradeExecutionService()
+
+        class FakeWebSocket:
+            def __init__(self):
+                self.sent = []
+                self.responses = iter(
+                    [
+                        json.dumps(
+                            {
+                                "proposal_open_contract": {
+                                    "contract_id": 123456789,
+                                    "is_sold": True,
+                                    "profit": 1.0,
+                                    "payout": 2.0,
+                                    "buy_price": 1.0,
+                                    "sell_price": 1.0,
+                                    "entry_tick": 100,
+                                    "exit_tick": 101,
+                                }
+                            }
+                        )
+                    ]
+                )
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return None
+
+            async def send(self, payload):
+                self.sent.append(json.loads(payload))
+
+            async def recv(self):
+                return next(self.responses)
+
+        with patch(
+            "app.services.trade_execution_service.websockets.connect",
+            return_value=FakeWebSocket(),
+        ):
+            result = asyncio.run(
+                service.monitor_contract(
+                    "123456789",
+                    "wss://example.com",
+                    timeout_seconds=1,
+                )
+            )
+
+        self.assertEqual(result["status"], "settled")
+        self.assertIsInstance(result["contract_id"], str)
+        self.assertEqual(result["contract_id"], "123456789")
+
     def test_state_dir_falls_back_when_render_path_is_not_writable(self):
         import app.services.auth_service as auth_service
 

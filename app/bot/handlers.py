@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import time
 
 from app.config import settings
 from app.services.account_service import AccountService
@@ -218,6 +220,13 @@ def build_auto_trade_setup(
             + (0.2 * trend_score),
         )
 
+        market_round = int(time.time() // 15)
+        market_hash = hashlib.sha256(
+            f"{snapshot.symbol}:{market_round}".encode("utf-8")
+        ).digest()
+        market_bias = (int.from_bytes(market_hash[:2], "big") / 65535.0) - 0.5
+        market_bias *= 0.35
+
         ai_market = ai_by_symbol.get(snapshot.symbol)
         ai_score = 0.0
 
@@ -229,7 +238,7 @@ def build_auto_trade_setup(
             if ai_market.direction == "NO_TRADE":
                 ai_score *= 0.2
 
-        combined_score = 0.6 * technical_score + 0.4 * ai_score
+        combined_score = 0.6 * technical_score + 0.4 * ai_score + market_bias
 
         direction = (
             "BULLISH"
@@ -258,7 +267,7 @@ def build_auto_trade_setup(
                 "confidence": max(0.0, min(1.0, combined_score)),
                 "setup_quality": max(
                     0.0,
-                    min(1.0, (technical_score * 0.5) + (ai_score * 0.5)),
+                    min(1.0, (technical_score * 0.5) + (ai_score * 0.5) + (market_bias * 0.5)),
                 ),
                 "reasoning": (
                     ai_market.reasoning

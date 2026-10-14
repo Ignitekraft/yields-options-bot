@@ -79,6 +79,33 @@ class TradeExecutionService:
         )
 
     @staticmethod
+    def normalize_contract_id(contract_id: Any) -> int | str:
+        if contract_id is None:
+            raise ValueError("MISSING_CONTRACT_ID")
+
+        if isinstance(contract_id, int):
+            return contract_id
+
+        if isinstance(contract_id, float):
+            if math.isfinite(contract_id):
+                return int(contract_id)
+            raise ValueError("INVALID_CONTRACT_ID")
+
+        if isinstance(contract_id, str):
+            stripped = contract_id.strip()
+            if not stripped:
+                raise ValueError("MISSING_CONTRACT_ID")
+            try:
+                return int(stripped)
+            except ValueError:
+                return stripped
+
+        try:
+            return int(contract_id)
+        except (TypeError, ValueError):
+            return str(contract_id)
+
+    @staticmethod
     def validate_account_mode(account_mode: str | None) -> str:
         normalized = str(account_mode or "").strip().lower()
 
@@ -365,13 +392,15 @@ class TradeExecutionService:
             or buy.get("id")
         )
 
-        if not contract_id:
+        if contract_id is None:
             raise RuntimeError(
                 "DERIV_CONTRACT_ID_MISSING"
             )
 
+        normalized_contract_id = cls.normalize_contract_id(contract_id)
+
         return {
-            "contract_id": str(contract_id),
+            "contract_id": normalized_contract_id,
             "buy_price": buy.get(
                 "buy_price",
                 price,
@@ -612,10 +641,11 @@ class TradeExecutionService:
             )
 
         req_id = self.next_req_id()
+        normalized_contract_id = self.normalize_contract_id(contract_id)
 
         payload = {
             "proposal_open_contract": 1,
-            "contract_id": str(contract_id),
+            "contract_id": normalized_contract_id,
             "subscribe": 1,
             "req_id": req_id,
         }
@@ -698,7 +728,7 @@ class TradeExecutionService:
                             "contract_id"
                         )
                     )
-                    != str(contract_id)
+                    != str(normalized_contract_id)
                 ):
                     continue
 
