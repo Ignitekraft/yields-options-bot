@@ -26,6 +26,27 @@ from app.services.trade_execution_service import (
 trade_execution_service = TradeExecutionService()
 
 
+def friendly_market_name(symbol: str | None) -> str:
+    value = str(symbol or "").strip()
+    if not value:
+        return "Current market"
+
+    mapping = {
+        "STPRNG": "Step Index 100",
+        "STPRNG2": "Step Index 200",
+        "STPRNG3": "Step Index 300",
+        "STPRNG4": "Step Index 400",
+        "STPRNG5": "Step Index 500",
+        "step_100": "Step Index 100",
+        "step_200": "Step Index 200",
+        "step_300": "Step Index 300",
+        "step_400": "Step Index 400",
+        "step_500": "Step Index 500",
+    }
+
+    return mapping.get(value, mapping.get(value.upper(), value))
+
+
 async def execute_trade(user_id: str | int, state=None) -> dict:
     state = state or auto_trade_service.get_run(user_id)
 
@@ -214,7 +235,7 @@ async def _run_auto_trade(update, state) -> None:
                 profit=profit,
             )
 
-            market_label = current.market_symbol or current.symbol
+            market_label = friendly_market_name(current.market_symbol or current.symbol)
             await query.edit_message_text(
                 "🤖 AUTO TRADE RUNNING\n\n"
                 f"Account mode: {current.account_mode.upper()}\n"
@@ -268,7 +289,7 @@ async def _run_auto_trade(update, state) -> None:
             await query.edit_message_text(message + f"Reason: {reason}")
             return
 
-        market_label = current.market_symbol or current.symbol
+        market_label = friendly_market_name(current.market_symbol or current.symbol)
         await query.edit_message_text(
             "⏳ CONTRACT PURCHASED\n\n"
             f"Account mode: {current.account_mode.upper()}\n"
