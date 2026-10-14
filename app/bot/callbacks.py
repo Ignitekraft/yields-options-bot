@@ -214,10 +214,11 @@ async def _run_auto_trade(update, state) -> None:
                 profit=profit,
             )
 
+            market_label = current.market_symbol or current.symbol
             await query.edit_message_text(
                 "🤖 AUTO TRADE RUNNING\n\n"
                 f"Account mode: {current.account_mode.upper()}\n"
-                f"Market: {current.symbol}\n"
+                f"Market: {market_label}\n"
                 f"Direction: {current.direction}\n"
                 f"Last result: {'WIN' if won else 'LOSS'}\n"
                 f"Last contract P/L: ${profit:.2f}\n\n"
@@ -268,10 +269,11 @@ async def _run_auto_trade(update, state) -> None:
             await query.edit_message_text(message + f"Reason: {reason}")
             return
 
+        market_label = current.market_symbol or current.symbol
         await query.edit_message_text(
             "⏳ CONTRACT PURCHASED\n\n"
             f"Account mode: {current.account_mode.upper()}\n"
-            f"Market: {current.symbol}\n"
+            f"Market: {market_label}\n"
             f"Direction: {current.direction}\n"
             f"Stake: ${current.current_stake:.2f}\n"
             f"Contract ID: {current.contract_id}\n\n"
@@ -494,7 +496,7 @@ async def dispatch_callback(update, context) -> None:
             "Expiry: 30 seconds\n"
             "Target: 5 winning cycles\n\n"
             "A loss stays in the current cycle and increases the next stake "
-            "according to your configured martingale. "
+            "according to the configured martingale progression. "
             "A settled win advances the cycle and resets the stake.\n\n"
             "Confirm to begin.",
             reply_markup=TelegramKeyboard.confirmation_keyboard(),

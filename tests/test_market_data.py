@@ -238,22 +238,20 @@ class MarketDataTests(unittest.TestCase):
 
     def test_auto_trade_keeps_martingale_without_safety_limit(self):
         service = AutoTradeService()
-        service.start_run(
+        state = service.start_run(
             "martingale-user",
-            "step_400",
+            "step_100",
             "BULLISH",
             2.0,
             account_mode="demo",
         )
 
         for _ in range(10):
-            service.advance_after_result("martingale-user", won=False, profit=-2.0)
+            state = service.advance_after_result("martingale-user", won=False, profit=-2.0)
 
-        state = service.get_run("martingale-user")
-        self.assertIsNotNone(state)
         self.assertEqual(state.status, "running")
         self.assertGreater(state.current_stake, 2.0)
-        self.assertNotEqual(state.status, "safety_limit_reached")
+        self.assertEqual(state.martingale_step, 11)
 
     def test_start_screen_uses_live_balance_values(self):
         auth = AuthService()
