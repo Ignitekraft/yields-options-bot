@@ -1,6 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
+
+try:
+    from telegram import InputMediaPhoto
+except ImportError:  # pragma: no cover
+    InputMediaPhoto = None
 
 from app.bot.handlers import (
     account_mode_service,
@@ -26,6 +32,22 @@ from app.services.trade_execution_service import (
 )
 
 trade_execution_service = TradeExecutionService()
+
+
+def _setup_photo_path(direction: str | None) -> str | None:
+    direction_value = str(direction or "").strip().upper()
+    asset_dir = Path(__file__).resolve().parent.parent / "assets" / "trade_signals"
+
+    if direction_value == "BULLISH":
+        path = asset_dir / "bullish_setup.png"
+    elif direction_value == "BEARISH":
+        path = asset_dir / "bearish_setup.png"
+    else:
+        path = None
+
+    if path is not None and path.exists():
+        return str(path)
+    return None
 
 
 def friendly_market_name(symbol: str | None) -> str:
@@ -435,18 +457,42 @@ async def dispatch_callback(update, context) -> None:
 
     if data == "START_AUTO_TRADE":
         display_name = getattr(update.effective_user, "first_name", None) or getattr(update.effective_user, "username", None) or "friend"
-        await query.edit_message_text(
-            handle_auto_trade_start(user_id, display_name=display_name),
-            reply_markup=TelegramKeyboard.stake_keyboard(),
-        )
+        text = handle_auto_trade_start(user_id, display_name=display_name)
+        setup = build_auto_trade_setup(user_id)
+        photo_path = _setup_photo_path(setup.get("direction"))
+
+        if InputMediaPhoto is not None and photo_path:
+            try:
+                with open(photo_path, "rb") as photo_file:
+                    await query.edit_message_media(
+                        media=InputMediaPhoto(media=photo_file, caption=text),
+                        reply_markup=TelegramKeyboard.stake_keyboard(),
+                    )
+                return
+            except Exception:
+                pass
+
+        await query.edit_message_text(text, reply_markup=TelegramKeyboard.stake_keyboard())
         return
 
     if data == "AUTO_TRADE_START_SCAN":
         display_name = getattr(update.effective_user, "first_name", None) or getattr(update.effective_user, "username", None) or "friend"
-        await query.edit_message_text(
-            handle_auto_trade_start(user_id, display_name=display_name),
-            reply_markup=TelegramKeyboard.stake_keyboard(),
-        )
+        text = handle_auto_trade_start(user_id, display_name=display_name)
+        setup = build_auto_trade_setup(user_id)
+        photo_path = _setup_photo_path(setup.get("direction"))
+
+        if InputMediaPhoto is not None and photo_path:
+            try:
+                with open(photo_path, "rb") as photo_file:
+                    await query.edit_message_media(
+                        media=InputMediaPhoto(media=photo_file, caption=text),
+                        reply_markup=TelegramKeyboard.stake_keyboard(),
+                    )
+                return
+            except Exception:
+                pass
+
+        await query.edit_message_text(text, reply_markup=TelegramKeyboard.stake_keyboard())
         return
 
     if data == "AUTO_TRADE_CANCEL":

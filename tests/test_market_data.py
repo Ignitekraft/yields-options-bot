@@ -382,6 +382,69 @@ class MarketDataTests(unittest.TestCase):
         self.assertNotIn("Gemini", text)
         self.assertIn("Select your stake", text)
 
+    def test_auto_trade_start_message_is_clear_and_meaningful(self):
+        auth = AuthService()
+        auth.connect_user(
+            "readable-user",
+            {
+                "access_token": "readable-token",
+                "refresh_token": "readable-refresh",
+                "expires_in": 3600,
+                "token_type": "Bearer",
+            },
+        )
+
+        with patch(
+            "app.bot.handlers.build_auto_trade_setup",
+            return_value={
+                "symbol": "STPRNG",
+                "display_name": "Step 400",
+                "direction": "BULLISH",
+                "confidence": 0.76,
+                "setup_quality": 0.76,
+                "reasoning": "The Step 400 shows bullish pressure with MA50/MA200 alignment and RSI confirmation.",
+            },
+        ):
+            text = handle_auto_trade_start("readable-user", display_name="Samuel")
+
+        self.assertIn("Hi Samuel", text)
+        self.assertIn("AI Auto Trade", text)
+        self.assertIn("Best setup", text)
+        self.assertIn("Market:", text)
+        self.assertIn("Direction:", text)
+        self.assertIn("Confidence:", text)
+        self.assertIn("Setup quality:", text)
+        self.assertIn("Why this setup works", text)
+        self.assertIn("Select your stake to continue", text)
+
+    def test_premium_trade_summary_has_help_footer(self):
+        auth = AuthService()
+        auth.connect_user(
+            "premium-user",
+            {
+                "access_token": "premium-token",
+                "refresh_token": "premium-refresh",
+                "expires_in": 3600,
+                "token_type": "Bearer",
+            },
+        )
+
+        with patch(
+            "app.bot.handlers.build_auto_trade_setup",
+            return_value={
+                "symbol": "STPRNG",
+                "display_name": "Step 400",
+                "direction": "BULLISH",
+                "confidence": 0.76,
+                "setup_quality": 0.76,
+                "reasoning": "The Step 400 shows bullish pressure with MA50/MA200 alignment and RSI confirmation.",
+            },
+        ):
+            text = handle_auto_trade_start("premium-user", display_name="Samuel")
+
+        self.assertIn("Need help with something? Ask Sammie @samueludoh_ng", text)
+        self.assertIn("⚡", text)
+
     def test_auto_trade_setup_blends_ai_and_technical_signals(self):
         auth = AuthService()
         auth.connect_user(

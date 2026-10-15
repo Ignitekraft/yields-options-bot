@@ -27,6 +27,7 @@ auth_service = AuthService()
 account_service = AccountService(auth_service)
 account_mode_service = AccountModeService()
 auto_trade_service = AutoTradeService()
+HELP_FOOTER = "\n\n💬 Need help with something? Ask Sammie @samueludoh_ng"
 
 
 def _format_currency(
@@ -340,6 +341,7 @@ def handle_status(telegram_user_id: str | int) -> str:
         "Status: active and ready\n"
         f"Preferred account mode: {_mode_label(mode)}\n\n"
         "Your balance, market scan, and trading tools are ready to use."
+        f"{HELP_FOOTER}"
     )
 
 
@@ -356,6 +358,7 @@ def handle_faq() -> str:
         "  Yes. Use the Account Mode panel and confirm before switching.\n\n"
         "• How do I reconnect?\n"
         "  Tap the secure Connect action from the dashboard or use the connection flow again."
+        f"{HELP_FOOTER}"
     )
 
 
@@ -383,6 +386,7 @@ def handle_stats(telegram_user_id: str | int) -> str:
         "Markets tracked: 5 Step Indices\n"
         "AI scan: active\n"
         "Auto Trade: ready"
+        f"{HELP_FOOTER}"
     )
 
 
@@ -444,6 +448,7 @@ def handle_connect(telegram_user_id: str | int) -> str:
         "🔐 Secure Deriv connection\n\n"
         "Use the link below to continue safely and return to your dashboard.\n\n"
         f"{url}"
+        f"{HELP_FOOTER}"
     )
 
 
@@ -452,6 +457,7 @@ def handle_logout(telegram_user_id: str | int) -> str:
     return (
         "🔒 Deriv account disconnected\n\n"
         "You can reconnect at any time from the dashboard or the Connect flow."
+        f"{HELP_FOOTER}"
     )
 
 
@@ -502,20 +508,21 @@ def handle_auto_trade_start(
 
     return (
         f"Hi {name},\n\n"
-        "🤖 YIELDS AUTO TRADE\n\n"
-        "🏆 BEST SETUP\n\n"
+        "⚡ AI Auto Trade\n\n"
+        "🏆 Best setup\n\n"
         f"Market: {setup.get('display_name', 'Current winner')}\n"
-        f"Direction: {direction_text}\n\n"
+        f"Direction: {direction_text}\n"
         f"Confidence: {confidence}%\n"
-        f"Setup Quality: {setup_quality}%\n"
-        f"Account Mode: {_mode_label(mode)}\n\n"
-        "Why:\n"
+        f"Setup quality: {setup_quality}%\n"
+        f"Account mode: {_mode_label(mode)}\n\n"
+        "Why this setup works:\n"
         f"• {setup.get('reasoning', 'AI trend and momentum are aligned.')}\n"
         "• AI trend, momentum, RSI, MACD, MA50, and MA200 inform the ranking.\n"
         "• Select your stake to continue.\n\n"
         "The selected market and direction will remain fixed for this run.\n\n"
         "Expiry: 30 seconds\n"
         "Target: 5 winning cycles"
+        f"{HELP_FOOTER}"
     )
 
 
