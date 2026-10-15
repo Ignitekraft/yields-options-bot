@@ -2,9 +2,12 @@ import asyncio
 import importlib
 import json
 import os
+from types import SimpleNamespace
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
+
+import httpx
 
 from app.bot.callbacks import _run_auto_trade, dispatch_callback
 from app.bot.handlers import (
@@ -23,6 +26,7 @@ from app.services.auto_trade_service import AutoTradeService
 from app.services.deriv.auth import build_deriv_oauth_url
 from app.services.deriv.market_data import MarketDataService
 from app.services.scanner import SignalResult, YieldsScanner
+from app.services.trade_history_service import TradeHistoryService
 from app.services.trade_execution_service import TradeExecutionService
 from app.services.trading_service import TradingService
 
@@ -714,6 +718,162 @@ class MarketDataTests(unittest.TestCase):
         self.assertIsNotNone(query.caption_text)
         self.assertIn("CONTRACT PURCHASED", query.caption_text)
 
+    def test_settled_contract_is_persisted_with_direction_accuracy(self):
+        class FakeQuery:
+            async def edit_message_text(self, text, **kwargs):
+                self.text = text
+
+        class FakeUpdate:
+            def __init__(self):
+                self.callback_query = FakeQuery()
+                self.effective_user = type("User", (), {"id": "history-user"})()
+
+        class FakeTradeHistory:
+            def __init__(self):
+                self.trades = []
+
+            def record_settled_trade(self, trade):
+                self.trades.append(trade)
+
+        run_service = AutoTradeService()
+        state = run_service.start_run(
+            "history-user",
+            "step_500",
+            "BULLISH",
+            5.0,
+            max_cycles=1,
+            account_mode="demo",
+        )
+        update = FakeUpdate()
+        trade_history = FakeTradeHistory()
+
+        async def fake_execute_trade(_user_id, trade_state):
+            trade_state.contract_id = "contract-history-1"
+            trade_state.market_symbol = "STPRNG5"
+            trade_state.status = "monitoring"
+            return {"status": "accepted"}
+
+        with patch("app.bot.callbacks.auto_trade_service", run_service), patch(
+            "app.bot.callbacks.account_mode_service.get_mode",
+            return_value="demo",
+        ), patch(
+            "app.bot.callbacks.execute_trade",
+            new=AsyncMock(side_effect=fake_execute_trade),
+        ), patch(
+            "app.bot.callbacks._monitor_settlement",
+            new=AsyncMock(
+                return_value={
+                    "status": "settled",
+                    "contract_id": "contract-history-1",
+                    "profit": 2.5,
+                    "entry_tick": 100.0,
+                    "exit_tick": 101.0,
+                }
+            ),
+        ), patch(
+            "app.bot.callbacks.trade_history_service",
+            trade_history,
+        ):
+            asyncio.run(_run_auto_trade(update, state))
+
+        self.assertEqual(len(trade_history.trades), 1)
+        self.assertEqual(trade_history.trades[0]["telegram_user_id"], "history-user")
+        self.assertEqual(trade_history.trades[0]["account_mode"], "demo")
+        self.assertEqual(trade_history.trades[0]["market_symbol"], "STPRNG5")
+        self.assertEqual(trade_history.trades[0]["stake"], 5.0)
+        self.assertTrue(trade_history.trades[0]["direction_accurate"])
+
+    def test_trade_history_service_posts_idempotent_record_and_user_scoped_stats(self):
+        requests = []
+
+        def respond(request):
+            requests.append(request)
+            if request.url.path.endswith("get_user_trade_stats"):
+                return httpx.Response(
+                    200,
+                    json={"recent": [], "real": {}, "demo": {}},
+                    request=request,
+                )
+            return httpx.Response(201, request=request)
+
+        service = TradeHistoryService(
+            supabase_url="https://project.supabase.co",
+            service_role_key="test-service-role-key",
+            transport=httpx.MockTransport(respond),
+        )
+        service.record_settled_trade(
+            {
+                "telegram_user_id": "12345",
+                "contract_id": "contract-abc",
+                "account_mode": "DEMO",
+                "market_symbol": "STPRNG5",
+                "direction": "BULLISH",
+                "stake": 5,
+                "profit": 2.5,
+                "direction_accurate": True,
+            }
+        )
+        result = service.get_user_stats("12345")
+
+        self.assertEqual(requests[0].url.path, "/rest/v1/trade_history")
+        self.assertEqual(
+            requests[0].url.params.get("on_conflict"),
+            "telegram_user_id,contract_id",
+        )
+        self.assertIn("resolution=ignore-duplicates", requests[0].headers["Prefer"])
+        inserted = json.loads(requests[0].content)
+        self.assertEqual(inserted["outcome"], "win")
+        self.assertEqual(inserted["account_mode"], "demo")
+        self.assertEqual(result["recent"], [])
+        self.assertEqual(
+            json.loads(requests[1].content),
+            {"p_telegram_user_id": "12345"},
+        )
+
+    def test_stats_message_renders_recent_trades_and_account_summaries(self):
+        from app.bot.handlers import handle_stats
+
+        stats = {
+            "recent": [
+                {
+                    "account_mode": "demo",
+                    "market_symbol": "STPRNG5",
+                    "direction": "BULLISH",
+                    "profit": 5.19,
+                    "outcome": "win",
+                    "direction_accurate": True,
+                },
+            ],
+            "real": {
+                "win_rate": 0,
+                "accuracy": 0,
+                "net_pnl": 0,
+                "tokens_spent": 0,
+            },
+            "demo": {
+                "win_rate": 100,
+                "accuracy": 52,
+                "net_pnl": 166.22,
+                "tokens_spent": 0,
+            },
+        }
+
+        with patch(
+            "app.bot.handlers.trade_history_service",
+            SimpleNamespace(
+                is_configured=True,
+                get_user_stats=lambda _user_id: stats,
+            ),
+        ):
+            text = asyncio.run(handle_stats("stats-user"))
+
+        self.assertIn("LAST 10 TRADES", text)
+        self.assertIn("Step Index 500", text)
+        self.assertIn("+$5.19", text)
+        self.assertIn("Win rate: 100.0%", text)
+        self.assertIn("Direction accuracy: 52.0%", text)
+        self.assertIn("Net PnL: +$166.22", text)
+
     def test_deriv_oauth_success_message_includes_main_menu_button(self):
         class FakeBot:
             def __init__(self):
@@ -753,7 +913,7 @@ class MarketDataTests(unittest.TestCase):
         connected_text = handle_status("status-user")
         disconnected_text = handle_logout("logout-user")
         faq_text = handle_faq()
-        stats_text = handle_stats("status-user")
+        stats_text = asyncio.run(handle_stats("status-user"))
 
         self.assertNotIn("/connect", connected_text)
         self.assertNotIn("/status", connected_text)

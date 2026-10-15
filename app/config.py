@@ -3,6 +3,10 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -14,6 +18,8 @@ class Settings:
     deriv_app_id: str = os.getenv("DERIV_APP_ID", os.getenv("DERIV_CLIENT_ID", ""))
     deriv_public_ws_url: str = os.getenv("DERIV_PUBLIC_WS_URL", "wss://ws.derivws.com/websockets/v3")
     environment: str = os.getenv("APP_ENV", "development")
+    supabase_url: str = os.getenv("SUPABASE_URL", "")
+    supabase_service_role_key: str = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
     auto_trade_markets: tuple[str, ...] = (
         "step_100",
         "step_200",

@@ -10,6 +10,7 @@ from app.services.auto_trade_service import AutoTradeService
 from app.services.deriv.auth import build_deriv_oauth_url
 from app.services.deriv.market_data import MarketDataService
 from app.services.scanner import YieldsScanner
+from app.services.trade_history_service import TradeHistoryService
 
 from .messages import (
     AUTO_TRADE_RUNNING_MESSAGE,
@@ -24,6 +25,7 @@ auth_service = AuthService()
 account_service = AccountService(auth_service)
 account_mode_service = AccountModeService()
 auto_trade_service = AutoTradeService()
+trade_history_service = TradeHistoryService()
 HELP_FOOTER = "\n\n💬 Need help with something? Ask Sammie @samueludoh_ng"
 
 
@@ -304,30 +306,91 @@ def handle_faq() -> str:
     )
 
 
-def handle_stats(telegram_user_id: str | int) -> str:
-    user_key = str(telegram_user_id)
-    status = account_service.get_account_status(user_key)
+def _format_pnl(value: float | int | str | None) -> str:
+    try:
+        amount = float(value or 0.0)
+    except (TypeError, ValueError):
+        amount = 0.0
+    sign = "+" if amount >= 0 else "-"
+    return f"{sign}${abs(amount):,.2f}"
 
-    if not status["connected"]:
+
+def _trade_market_name(symbol: str) -> str:
+    names = {
+        "STPRNG": "Step Index 100",
+        "STPRNG2": "Step Index 200",
+        "STPRNG3": "Step Index 300",
+        "STPRNG4": "Step Index 400",
+        "STPRNG5": "Step Index 500",
+        "step_100": "Step Index 100",
+        "step_200": "Step Index 200",
+        "step_300": "Step Index 300",
+        "step_400": "Step Index 400",
+        "step_500": "Step Index 500",
+    }
+    return names.get(symbol, symbol)
+
+
+def _stats_mode_text(label: str, icon: str, stats: dict) -> str:
+    return (
+        f"{icon} {label}\n"
+        f"🏁 Win rate: {float(stats.get('win_rate') or 0):.1f}%\n"
+        f"🎯 Direction accuracy: {float(stats.get('accuracy') or 0):.1f}%\n"
+        f"💵 Net PnL: {_format_pnl(stats.get('net_pnl'))}\n"
+        f"💎 Tokens spent: {int(stats.get('tokens_spent') or 0)}"
+    )
+
+
+async def handle_stats(telegram_user_id: str | int) -> str:
+    user_key = str(telegram_user_id)
+    if not trade_history_service.is_configured:
         return (
-            "📈 YIELDS STATS\n\n"
-            "Account status: not connected\n"
-            "Markets tracked: 5 Step Indices\n"
-            "AI scan: available after connection\n\n"
-            "Connect your Deriv account to unlock the full live dashboard."
+            "📊 YIELDS TRADE STATS | LAST 10\n\n"
+            "Trade history storage is not configured yet."
+            f"{HELP_FOOTER}"
         )
 
-    mode = account_mode_service.get_mode(user_key)
-    tokens = auth_service.get_user_tokens(user_key)
+    try:
+        stats = await asyncio.to_thread(
+            trade_history_service.get_user_stats,
+            user_key,
+        )
+    except Exception:
+        return (
+            "📊 YIELDS TRADE STATS | LAST 10\n\n"
+            "Trade history is temporarily unavailable. Please try again shortly."
+            f"{HELP_FOOTER}"
+        )
+
+    recent_trades = stats.get("recent") or []
+    if recent_trades:
+        recent_text = []
+        for trade in recent_trades[:10]:
+            is_win = trade.get("outcome") == "win"
+            result_icon = "✅" if is_win else "❌"
+            mode_label = str(trade.get("account_mode") or "").title()
+            direction_icon = "🟢" if trade.get("direction") == "BULLISH" else "🔴"
+            direction_accuracy = trade.get("direction_accurate")
+            accuracy_icon = (
+                "✓" if direction_accuracy is True
+                else "✗" if direction_accuracy is False
+                else "·"
+            )
+            recent_text.append(
+                f"🎮 {result_icon} {_trade_market_name(str(trade.get('market_symbol') or 'Market'))} "
+                f"| {_format_pnl(trade.get('profit'))} | "
+                f"{direction_icon} {mode_label} {accuracy_icon}"
+            )
+        recent_section = "\n".join(recent_text)
+    else:
+        recent_section = "No settled trades yet."
 
     return (
-        "📈 YIELDS STATS\n\n"
-        "Account status: connected\n"
-        f"Mode: {_mode_label(mode)}\n"
-        f"Yields tokens: {tokens}\n"
-        "Markets tracked: 5 Step Indices\n"
-        "AI scan: active\n"
-        "Auto Trade: ready"
+        "📊 YIELDS STATS | LAST 10 TRADES\n\n"
+        f"{recent_section}\n\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"{_stats_mode_text('Real', '💰', stats.get('real') or {})}\n\n"
+        f"{_stats_mode_text('Demo', '🎮', stats.get('demo') or {})}"
         f"{HELP_FOOTER}"
     )
 

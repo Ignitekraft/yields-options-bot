@@ -61,7 +61,7 @@ def create_application():
 
     async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = update.effective_user.id
-        await update.message.reply_text(handle_stats(user_id), reply_markup=TelegramKeyboard.dashboard_keyboard())
+        await update.message.reply_text(await handle_stats(user_id), reply_markup=TelegramKeyboard.dashboard_keyboard())
 
     async def logout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = update.effective_user.id

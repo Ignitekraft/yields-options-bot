@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
 
 try:
@@ -30,8 +31,11 @@ from app.services.trade_execution_service import (
     TradeExecutionService,
     UnknownBuyOutcome,
 )
+from app.services.trade_history_service import TradeHistoryService
 
 trade_execution_service = TradeExecutionService()
+trade_history_service = TradeHistoryService()
+logger = logging.getLogger(__name__)
 
 
 async def _safe_edit_message(query, text: str, **kwargs) -> None:
@@ -276,6 +280,39 @@ async def _run_auto_trade(update, state) -> None:
                 return
 
             won = profit > 0
+            entry_tick = settlement.get("entry_tick")
+            exit_tick = settlement.get("exit_tick")
+            direction_accurate = None
+            try:
+                entry_value = float(entry_tick)
+                exit_value = float(exit_tick)
+                if current.direction == "BULLISH":
+                    direction_accurate = exit_value > entry_value
+                elif current.direction == "BEARISH":
+                    direction_accurate = exit_value < entry_value
+            except (TypeError, ValueError):
+                pass
+
+            history_saved = False
+            try:
+                await asyncio.to_thread(
+                    trade_history_service.record_settled_trade,
+                    {
+                        "telegram_user_id": user_id,
+                        "contract_id": settlement.get("contract_id") or current.contract_id,
+                        "account_mode": current.account_mode,
+                        "market_symbol": current.market_symbol or current.symbol,
+                        "direction": current.direction,
+                        "stake": current.current_stake,
+                        "profit": profit,
+                        "direction_accurate": direction_accurate,
+                        "tokens_spent": 0,
+                    },
+                )
+                history_saved = True
+            except Exception:
+                logger.exception("Could not save settled trade to Supabase trade history")
+
             settled_contracts.append(settlement)
             current = auto_trade_service.advance_after_result(
                 user_id,
@@ -284,6 +321,11 @@ async def _run_auto_trade(update, state) -> None:
             )
 
             market_label = friendly_market_name(current.market_symbol or current.symbol)
+            history_warning = (
+                "⚠️ This settled trade could not be saved to Stats.\n\n"
+                if not history_saved
+                else ""
+            )
             await query.edit_message_text(
                 "🤖 AUTO TRADE RUNNING\n\n"
                 f"Account mode: {current.account_mode.upper()}\n"
@@ -297,6 +339,7 @@ async def _run_auto_trade(update, state) -> None:
                 f"Settled contracts: {current.trade_count}\n"
                 f"Total staked: ${current.total_staked:.2f}\n"
                 f"Net profit/loss: ${current.total_profit_loss:.2f}\n\n"
+                f"{history_warning}"
                 "The selected market and direction remain fixed."
             )
 
@@ -414,7 +457,7 @@ async def dispatch_callback(update, context) -> None:
 
     if data == "START_STATS":
         await query.edit_message_text(
-            handle_stats(user_id),
+            await handle_stats(user_id),
             reply_markup=TelegramKeyboard.dashboard_keyboard(),
         )
         return
