@@ -584,6 +584,57 @@ class MarketDataTests(unittest.TestCase):
 
         execute_trade_mock.assert_called_once()
 
+    def test_stake_callback_falls_back_to_caption_edit_when_message_is_media(self):
+        class FakeQuery:
+            def __init__(self):
+                self.data = "AUTO_TRADE_STAKE_5"
+                self.caption_text = None
+                self.text_text = None
+                self.answer_calls = 0
+
+            async def answer(self):
+                self.answer_calls += 1
+
+            async def edit_message_text(self, text, **kwargs):
+                self.text_text = text
+                raise RuntimeError("message is a media caption")
+
+            async def edit_message_caption(self, caption, **kwargs):
+                self.caption_text = caption
+
+        class FakeUpdate:
+            def __init__(self):
+                self.callback_query = FakeQuery()
+                self.effective_user = type("User", (), {"id": "stake-media-user"})()
+
+        update = FakeUpdate()
+
+        with patch(
+            "app.bot.callbacks.build_auto_trade_setup",
+            return_value={
+                "symbol": "step_500",
+                "display_name": "Step Index 500",
+                "direction": "BULLISH",
+                "confidence": 0.92,
+                "setup_quality": 0.83,
+            },
+        ), patch(
+            "app.bot.callbacks.account_mode_service.get_mode",
+            return_value="demo",
+        ), patch(
+            "app.bot.callbacks.auto_trade_service.is_running",
+            return_value=False,
+        ), patch(
+            "app.bot.callbacks.auto_trade_service.start_run",
+            return_value=object(),
+        ):
+            asyncio.run(dispatch_callback(update, None))
+
+        query = update.callback_query
+        self.assertIsNotNone(query.text_text)
+        self.assertIsNotNone(query.caption_text)
+        self.assertIn("TRADE CONFIRMATION", query.caption_text)
+
     def test_deriv_oauth_success_message_includes_main_menu_button(self):
         class FakeBot:
             def __init__(self):

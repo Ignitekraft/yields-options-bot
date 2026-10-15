@@ -34,6 +34,26 @@ from app.services.trade_execution_service import (
 trade_execution_service = TradeExecutionService()
 
 
+async def _safe_edit_message(query, text: str, **kwargs) -> None:
+    try:
+        await query.edit_message_text(text, **kwargs)
+        return
+    except Exception:
+        pass
+
+    if hasattr(query, "edit_message_caption"):
+        try:
+            await query.edit_message_caption(caption=text, **kwargs)
+            return
+        except Exception:
+            pass
+
+    try:
+        await query.answer("The message updated, but Telegram could not refresh this view.")
+    except Exception:
+        pass
+
+
 def _setup_photo_path(direction: str | None) -> str | None:
     direction_value = str(direction or "").strip().upper()
     asset_dir = Path(__file__).resolve().parent.parent / "assets" / "trade_signals"
@@ -581,7 +601,8 @@ async def dispatch_callback(update, context) -> None:
             )
             return
 
-        await query.edit_message_text(
+        await _safe_edit_message(
+            query,
             "⚡ TRADE CONFIRMATION\n\n"
             f"Market: {setup.get('display_name', setup['symbol'])}\n"
             f"Direction: {setup['direction']}\n"
