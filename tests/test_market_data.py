@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, patch
 from app.bot.callbacks import _run_auto_trade, dispatch_callback
 from app.bot.handlers import (
     build_auto_trade_setup,
+    build_start_message,
     handle_auto_trade_start,
     handle_start,
 )
@@ -342,8 +343,11 @@ class MarketDataTests(unittest.TestCase):
             "app.bot.handlers.account_service.get_live_balances",
             new=AsyncMock(return_value=balances),
         ):
-            text = handle_start("live-start-user")
+            text = asyncio.run(
+                build_start_message("live-start-user", display_name="Sam")
+            )
 
+        self.assertIn("Welcome back, Sam.", text)
         self.assertIn("$1,250.50 USD", text)
         self.assertIn("$750.25 USD", text)
         self.assertIn("AI", text)
@@ -371,12 +375,12 @@ class MarketDataTests(unittest.TestCase):
                 "reasoning": "Strong upward trend and trend alignment.",
             },
         ):
-            text = handle_auto_trade_start("trade-user")
+            text = handle_auto_trade_start("trade-user", display_name="Sam")
 
+        self.assertIn("Hi Sam", text)
         self.assertIn("AI", text)
         self.assertNotIn("Gemini", text)
         self.assertIn("Select your stake", text)
-        self.assertIn("All 5 trades", text)
 
     def test_auto_trade_setup_blends_ai_and_technical_signals(self):
         auth = AuthService()

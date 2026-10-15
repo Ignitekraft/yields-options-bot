@@ -331,8 +331,9 @@ async def dispatch_callback(update, context) -> None:
         return
 
     if data == "START_DASHBOARD":
+        display_name = getattr(update.effective_user, "first_name", None) or getattr(update.effective_user, "username", None) or "friend"
         await query.edit_message_text(
-            await build_start_message(user_id),
+            await build_start_message(user_id, display_name=display_name),
             reply_markup=TelegramKeyboard.dashboard_keyboard(),
         )
         return
@@ -408,15 +409,17 @@ async def dispatch_callback(update, context) -> None:
         return
 
     if data == "START_AUTO_TRADE":
+        display_name = getattr(update.effective_user, "first_name", None) or getattr(update.effective_user, "username", None) or "friend"
         await query.edit_message_text(
-            handle_auto_trade_start(user_id),
+            handle_auto_trade_start(user_id, display_name=display_name),
             reply_markup=TelegramKeyboard.stake_keyboard(),
         )
         return
 
     if data == "AUTO_TRADE_START_SCAN":
+        display_name = getattr(update.effective_user, "first_name", None) or getattr(update.effective_user, "username", None) or "friend"
         await query.edit_message_text(
-            handle_auto_trade_start(user_id),
+            handle_auto_trade_start(user_id, display_name=display_name),
             reply_markup=TelegramKeyboard.stake_keyboard(),
         )
         return

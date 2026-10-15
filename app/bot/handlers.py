@@ -46,15 +46,24 @@ def _mode_label(mode: str) -> str:
     return "REAL 🟢" if mode == "real" else "DEMO 🟡"
 
 
+def _display_name(display_name: str | None = None) -> str:
+    value = str(display_name or "").strip()
+    if value:
+        return value
+    return "friend"
+
+
 def _dashboard_text(
     mode: str,
     real_balance: Any,
     demo_balance: Any,
     tokens: int,
+    display_name: str | None = None,
 ) -> str:
+    name = _display_name(display_name)
     return (
         "🤖 YIELDS\n\n"
-        "Welcome back.\n\n"
+        f"Welcome back, {name}.\n\n"
         "Your Deriv account is connected.\n\n"
         f"Account Mode: {_mode_label(mode)}\n\n"
         "━━━━━━━━━━━━━━━━━━\n"
@@ -70,14 +79,19 @@ def _dashboard_text(
     )
 
 
-def handle_start(telegram_user_id: str | int | None = None) -> str:
+def handle_start(
+    telegram_user_id: str | int | None = None,
+    display_name: str | None = None,
+) -> str:
     if telegram_user_id is None:
         return START_MESSAGE
 
     user_key = str(telegram_user_id)
+    name = _display_name(display_name)
     if not auth_service.get_valid_access_token(user_key):
         return (
             "🤖 YIELDS\n\n"
+            f"Hi {name},\n\n"
             "AI-powered trading intelligence for Deriv.\n\n"
             "Connect your Deriv account to unlock:\n"
             "• AI market scanning\n"
@@ -98,16 +112,18 @@ def handle_start(telegram_user_id: str | int | None = None) -> str:
         balance,
         None,
         tokens,
+        display_name=name,
     )
 
 
 async def build_start_message(
     telegram_user_id: str | int,
+    display_name: str | None = None,
 ) -> str:
     user_key = str(telegram_user_id)
 
     if not auth_service.get_valid_access_token(user_key):
-        return handle_start(user_key)
+        return handle_start(user_key, display_name=display_name)
 
     mode = account_mode_service.get_mode(user_key)
     balances = await account_service.get_live_balances(user_key)
@@ -135,6 +151,7 @@ async def build_start_message(
         real_balance,
         demo_balance,
         tokens,
+        display_name=display_name,
     )
 
 
@@ -410,12 +427,16 @@ def handle_scan() -> str:
     )
 
 
-def handle_auto_trade_start(telegram_user_id: str | int) -> str:
+def handle_auto_trade_start(
+    telegram_user_id: str | int,
+    display_name: str | None = None,
+) -> str:
     if not auth_service.get_valid_access_token(str(telegram_user_id)):
         return AUTO_TRADE_UNAVAILABLE_MESSAGE
 
     setup = build_auto_trade_setup(telegram_user_id)
     direction = setup.get("direction", "NO_TRADE")
+    name = _display_name(display_name)
 
     direction_text = (
         "🟢 BULLISH"
@@ -430,6 +451,7 @@ def handle_auto_trade_start(telegram_user_id: str | int) -> str:
     mode = account_mode_service.get_mode(telegram_user_id)
 
     return (
+        f"Hi {name},\n\n"
         "🤖 YIELDS AUTO TRADE\n\n"
         "🏆 BEST SETUP\n\n"
         f"Market: {setup.get('display_name', 'Current winner')}\n"

@@ -27,9 +27,10 @@ def create_application():
 
     async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = update.effective_user.id
+        display_name = getattr(update.effective_user, "first_name", None) or getattr(update.effective_user, "username", None) or "friend"
         connected = bool(auth_service.get_valid_access_token(str(user_id)))
         keypad = TelegramKeyboard.dashboard_keyboard() if connected else TelegramKeyboard.start_keyboard()
-        text = await build_start_message(user_id) if connected else handle_start(user_id)
+        text = await build_start_message(user_id, display_name=display_name) if connected else handle_start(user_id, display_name=display_name)
         await update.message.reply_text(text, reply_markup=keypad)
 
     async def connect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
