@@ -62,7 +62,7 @@ def _dashboard_text(
     tokens: int,
     display_name: str | None = None,
 ) -> str:
-    name = _display_name(display_name)
+    name = _display_name(display_name or username)
     return (
         "🤖 YIELDS\n\n"
         f"Welcome back, {name}.\n\n"
@@ -165,6 +165,75 @@ async def build_start_message(
         demo_balance,
         tokens,
         display_name=display_name,
+    )
+
+
+async def build_menu_message(
+    telegram_user_id: str | int,
+    display_name: str | None = None,
+    last_name: str | None = None,
+    username: str | None = None,
+) -> str:
+    user_key = str(telegram_user_id)
+    mode = account_mode_service.get_mode(user_key)
+    connected = bool(auth_service.get_valid_access_token(user_key))
+    real_text = "Connect Deriv to view"
+    demo_text = "Connect Deriv to view"
+    tokens_text = "Unavailable"
+
+    try:
+        profile = await asyncio.to_thread(
+            trade_history_service.ensure_user,
+            user_key,
+            first_name=display_name,
+            last_name=last_name,
+            username=username,
+            account_mode=mode,
+        )
+        tokens_text = str(int(profile.get("token_balance", 50)))
+    except Exception:
+        logger.exception("Could not load menu profile from Supabase")
+
+    if connected:
+        try:
+            balances = await account_service.get_live_balances(user_key)
+            for account_mode, label in (("real", "real_text"), ("demo", "demo_text")):
+                account = balances.get(account_mode) or {}
+                value = (
+                    _format_currency(account.get("balance"), account.get("currency", "USD"))
+                    if account.get("available") and account.get("balance") is not None
+                    else "Unavailable"
+                )
+                if label == "real_text":
+                    real_text = value
+                else:
+                    demo_text = value
+            await asyncio.to_thread(
+                trade_history_service.update_balance_snapshots,
+                user_key,
+                balances,
+            )
+        except Exception:
+            logger.exception("Could not fetch live balances for menu")
+            real_text = "Unavailable"
+            demo_text = "Unavailable"
+
+    name = _display_name(display_name)
+    mode_label = "REAL 🟢" if mode == "real" else "DEMO 🟠"
+    demo_invite = (
+        "👀 Try Auto Trade on your Deriv Demo account.\n"
+        "Choose 🚀 Auto Trade to view the current setup."
+        if connected
+        else "🔐 Connect your Deriv account to unlock Auto Trade."
+    )
+    return (
+        f"Hi {name},\n\n"
+        f"🟠 Trading mode: {mode_label}\n\n"
+        f"💰 Real Balance: {real_text}\n"
+        f"🎮 Demo Balance: {demo_text}\n"
+        f"💎 Available Tokens: {tokens_text}\n\n"
+        "💬 Need help? Ask Sammie @samueludoh_ng\n\n"
+        f"{demo_invite}"
     )
 
 

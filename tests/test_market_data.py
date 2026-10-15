@@ -9,8 +9,15 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 
-from app.bot.callbacks import _run_auto_trade, dispatch_callback, execute_trade
+from app.bot.callbacks import (
+    _run_auto_trade,
+    _setup_photo_url,
+    _session_end_message,
+    dispatch_callback,
+    execute_trade,
+)
 from app.bot.handlers import (
+    build_menu_message,
     build_auto_trade_setup,
     build_start_message,
     handle_auto_trade_start,
@@ -378,6 +385,62 @@ class MarketDataTests(unittest.TestCase):
         self.assertIn("$750.25 USD", text)
         self.assertIn("AI", text)
         self.assertNotIn("Gemini", text)
+
+    def test_menu_message_shows_user_name_mode_balances_and_tokens(self):
+        with patch(
+            "app.bot.handlers.auth_service.get_valid_access_token",
+            return_value=None,
+        ), patch(
+            "app.bot.handlers.account_mode_service.get_mode",
+            return_value="demo",
+        ), patch(
+            "app.bot.handlers.trade_history_service",
+            SimpleNamespace(
+                ensure_user=lambda *_args, **_kwargs: {"token_balance": 26},
+            ),
+        ):
+            text = asyncio.run(
+                build_menu_message(
+                    "menu-user",
+                    display_name="Sam",
+                    last_name="User",
+                    username="sam_user",
+                )
+            )
+
+        self.assertIn("Hi Sam", text)
+        self.assertIn("Trading mode: DEMO", text)
+        self.assertIn("Real Balance: Connect Deriv to view", text)
+        self.assertIn("Demo Balance: Connect Deriv to view", text)
+        self.assertIn("Available Tokens: 26", text)
+        self.assertIn("Need help? Ask Sammie", text)
+
+    def test_menu_keyboard_has_requested_rows_and_community_url(self):
+        keyboard = TelegramKeyboard.menu_keyboard(
+            "https://t.me/+N58js2a8NF1mMzY0"
+        )
+        rows = keyboard.inline_keyboard
+
+        self.assertEqual(
+            [[button.text for button in row] for row in rows],
+            [
+                ["🚀 Auto Trade"],
+                ["💎 Get Tokens", "🌍 Community"],
+                ["❓ Faq"],
+                ["🎁 Invite"],
+            ],
+        )
+        self.assertEqual(rows[1][1].url, "https://t.me/+N58js2a8NF1mMzY0")
+
+    def test_auto_trade_setup_images_use_supabase_urls_by_direction(self):
+        self.assertEqual(
+            _setup_photo_url("BULLISH"),
+            settings.bullish_setup_image_url,
+        )
+        self.assertEqual(
+            _setup_photo_url("BEARISH"),
+            settings.bearish_setup_image_url,
+        )
 
     def test_auto_trade_start_prompts_for_stake_and_uses_ai_language(self):
         auth = AuthService()
@@ -1090,6 +1153,45 @@ class MarketDataTests(unittest.TestCase):
         self.assertIn("Win rate: 100.0%", text)
         self.assertIn("Direction accuracy: 52.0%", text)
         self.assertIn("Net PnL: +$166.22", text)
+
+    def test_session_end_receipt_includes_balance_result_market_and_tokens(self):
+        state = AutoTradeService().start_run(
+            "receipt-user",
+            "step_500",
+            "BULLISH",
+            5.0,
+            max_cycles=5,
+            account_mode="demo",
+        )
+        state.status = "completed"
+        state.market_symbol = "STPRNG5"
+        state.total_profit_loss = 6.68
+        state.tokens_spent = 10
+
+        with patch(
+            "app.bot.callbacks.account_service.get_live_balances",
+            new=AsyncMock(
+                return_value={
+                    "demo": {
+                        "available": True,
+                        "balance": 172.09,
+                        "currency": "USD",
+                    },
+                }
+            ),
+        ), patch(
+            "app.bot.callbacks.trade_history_service.get_user",
+            return_value={"token_balance": 40},
+        ):
+            text = asyncio.run(_session_end_message("receipt-user", state))
+
+        self.assertIn("Victory! Session completed", text)
+        self.assertIn("Market: Step Index 500", text)
+        self.assertIn("Account: DEMO", text)
+        self.assertIn("Result: +$6.68 USD", text)
+        self.assertIn("Balance: $172.09 USD", text)
+        self.assertIn("Tokens used: 10", text)
+        self.assertIn("Tokens remaining: 40", text)
 
     def test_deriv_oauth_success_message_includes_main_menu_button(self):
         class FakeBot:

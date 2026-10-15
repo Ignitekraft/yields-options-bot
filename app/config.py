@@ -20,6 +20,10 @@ class Settings:
     environment: str = os.getenv("APP_ENV", "development")
     supabase_url: str = os.getenv("SUPABASE_URL", "")
     supabase_service_role_key: str = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+    menu_image_url: str = "https://hvvwkijquaoqsbzhpyim.supabase.co/storage/v1/object/public/Bot%20images/Yields%20Options%20Bot%20Neon%20Branding.png"
+    community_url: str = "https://t.me/+N58js2a8NF1mMzY0"
+    bullish_setup_image_url: str = "https://hvvwkijquaoqsbzhpyim.supabase.co/storage/v1/object/public/Bot%20images/Bullish%20and%20Bearish%20Market%20Setups.jpg"
+    bearish_setup_image_url: str = "https://hvvwkijquaoqsbzhpyim.supabase.co/storage/v1/object/public/Bot%20images/Bullish%20and%20Bearish%20Market%20Setups%202.jpg"
     auto_trade_markets: tuple[str, ...] = (
         "step_100",
         "step_200",

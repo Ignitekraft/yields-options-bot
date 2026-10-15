@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from pathlib import Path
 
 try:
     from telegram import InputMediaPhoto
@@ -27,6 +26,7 @@ from app.bot.handlers import (
     handle_status,
 )
 from app.bot.keyboards import TelegramKeyboard
+from app.config import settings
 from app.services.trade_execution_service import (
     TradeExecutionService,
     UnknownBuyOutcome,
@@ -61,6 +61,64 @@ async def _save_session_summary(state, session_status: str | None = None) -> Non
         )
     except Exception:
         logger.exception("Could not update Supabase Auto Trade session summary")
+
+
+async def _session_end_message(
+    user_id: str | int,
+    state,
+    reason: str | None = None,
+) -> str:
+    mode = str(state.account_mode or "demo").lower()
+    balance_text = "Unavailable"
+    currency = str(getattr(state, "currency", "USD") or "USD").upper()
+    try:
+        balances = await asyncio.wait_for(
+            account_service.get_live_balances(user_id),
+            timeout=15,
+        )
+        await asyncio.to_thread(
+            trade_history_service.update_balance_snapshots,
+            user_id,
+            balances,
+        )
+        account_balance = (balances.get(mode) or {})
+        if account_balance.get("available") and account_balance.get("balance") is not None:
+            currency = str(account_balance.get("currency") or "USD").upper()
+            balance_text = f"${float(account_balance['balance']):,.2f} {currency}"
+    except Exception:
+        logger.warning("Could not fetch final Deriv balance for session receipt")
+
+    token_balance_text = "Unavailable"
+    try:
+        profile = await asyncio.to_thread(
+            trade_history_service.get_user,
+            user_id,
+        )
+        token_balance_text = str(int(profile.get("token_balance", 0)))
+    except Exception:
+        logger.warning("Could not fetch remaining tokens for session receipt")
+
+    profit = float(state.total_profit_loss or 0.0)
+    profit_text = f"{'+' if profit >= 0 else '-'}${abs(profit):,.2f} {currency}"
+    market_label = friendly_market_name(state.market_symbol or state.symbol)
+
+    if state.status == "completed":
+        title = "🏆 Victory! Session completed\n✅"
+        closing = "🔥 Momentum is on your side.\nKeep going? 💪"
+    else:
+        title = "🏁 Session ended"
+        closing = reason or "Auto Trade stopped safely."
+
+    return (
+        f"{title}\n\n"
+        f"📈 Market: {market_label}\n"
+        f"🔴 Account: {mode.upper()}\n\n"
+        f"🎯 Result: {profit_text}\n"
+        f"💰 Balance: {balance_text}\n"
+        f"💎 Tokens used: {state.tokens_spent}\n"
+        f"💎 Tokens remaining: {token_balance_text}\n\n"
+        f"{closing}"
+    )
 
 
 async def _safe_edit_message(query, text: str, **kwargs) -> None:
@@ -112,19 +170,12 @@ async def _require_trade_tokens(update, query, account_mode: str) -> bool:
         return False
     return True
 
-def _setup_photo_path(direction: str | None) -> str | None:
+def _setup_photo_url(direction: str | None) -> str | None:
     direction_value = str(direction or "").strip().upper()
-    asset_dir = Path(__file__).resolve().parent.parent / "assets" / "trade_signals"
-
     if direction_value == "BULLISH":
-        path = asset_dir / "bullish_setup.png"
-    elif direction_value == "BEARISH":
-        path = asset_dir / "bearish_setup.png"
-    else:
-        path = None
-
-    if path is not None and path.exists():
-        return str(path)
+        return settings.bullish_setup_image_url
+    if direction_value == "BEARISH":
+        return settings.bearish_setup_image_url
     return None
 
 
@@ -188,6 +239,7 @@ async def execute_trade(user_id: str | int, state=None) -> dict:
 
         account_id = account.get("account_id")
         currency = account.get("currency") or "USD"
+        state.currency = str(currency).upper()
 
         if not account_id:
             state.status = "rejected"
@@ -217,6 +269,7 @@ async def execute_trade(user_id: str | int, state=None) -> dict:
                 "token_balance": reservation.get("token_balance", 0),
             }
         token_reserved = True
+        state.tokens_spent += 1
 
         result = await trade_execution_service.execute_trade(
             user_id=user_id,
@@ -258,6 +311,7 @@ async def execute_trade(user_id: str | int, state=None) -> dict:
                     user_id,
                     state.session_id,
                 )
+                state.tokens_spent = max(0, state.tokens_spent - 1)
             except Exception:
                 logger.exception("Could not refund token for rejected purchase")
 
@@ -275,6 +329,7 @@ async def execute_trade(user_id: str | int, state=None) -> dict:
                     user_id,
                     state.session_id,
                 )
+                state.tokens_spent = max(0, state.tokens_spent - 1)
             except Exception:
                 logger.exception("Could not refund token after pre-purchase failure")
         state.status = "rejected"
@@ -325,19 +380,17 @@ async def _run_auto_trade(update, state) -> None:
 
         if current.status == "cancelled":
             await _save_session_summary(current, "cancelled")
-            await _safe_edit_message(query, "🛑 Auto Trade cancelled.")
+            await _safe_edit_message(
+                query,
+                await _session_end_message(user_id, current, "Cancelled by you."),
+            )
             return
 
         if current.status == "completed":
             await _save_session_summary(current, "completed")
             await _safe_edit_message(
                 query,
-                "🏁 AUTO TRADE COMPLETE\n\n"
-                f"Winning cycles: {current.wins}/{current.max_cycles}\n"
-                f"Settled contracts: {current.trade_count}\n"
-                f"Total staked: ${current.total_staked:.2f}\n"
-                f"Net profit/loss: ${current.total_profit_loss:.2f}\n"
-                f"Account mode: {current.account_mode.upper()}"
+                await _session_end_message(user_id, current),
             )
             return
 
@@ -345,8 +398,11 @@ async def _run_auto_trade(update, state) -> None:
             await _save_session_summary(current, "failed")
             await _safe_edit_message(
                 query,
-                "⚠️ Auto Trade stopped.\n\n"
-                f"State: {current.status}"
+                await _session_end_message(
+                    user_id,
+                    current,
+                    f"Auto Trade stopped safely ({current.status.replace('_', ' ')}).",
+                ),
             )
             return
 
@@ -358,10 +414,11 @@ async def _run_auto_trade(update, state) -> None:
                 await _save_session_summary(current, "failed")
                 await _safe_edit_message(
                     query,
-                    "⚠️ CONTRACT MONITORING STOPPED\n\n"
-                    "The contract was purchased, but settlement could not be "
-                    "verified. The bot will not place another trade.\n\n"
-                    f"Details: {exc}"
+                    await _session_end_message(
+                        user_id,
+                        current,
+                        "Settlement could not be verified. No further trade was placed.",
+                    ),
                 )
                 return
 
@@ -372,8 +429,11 @@ async def _run_auto_trade(update, state) -> None:
                 await _save_session_summary(current, "failed")
                 await _safe_edit_message(
                     query,
-                    "⚠️ Settlement returned an invalid profit value. "
-                    "Auto Trade has stopped without placing another trade."
+                    await _session_end_message(
+                        user_id,
+                        current,
+                        "Settlement data could not be validated. No further trade was placed.",
+                    ),
                 )
                 return
 
@@ -458,8 +518,11 @@ async def _run_auto_trade(update, state) -> None:
             await _save_session_summary(current, "stopped")
             await _safe_edit_message(
                 query,
-                "🛑 Account mode changed during Auto Trade. "
-                "No further purchase will be attempted."
+                await _session_end_message(
+                    user_id,
+                    current,
+                    "Account mode changed. No further purchase was attempted.",
+                ),
             )
             return
 
@@ -475,31 +538,25 @@ async def _run_auto_trade(update, state) -> None:
             )
 
             current = auto_trade_service.get_run(user_id) or current
+            status_reason = {
+                "insufficient_tokens": (
+                    "You’re out of Yields Tokens. No token was charged for this attempt."
+                ),
+                "token_service_error": (
+                    "Your token balance could not be verified. No trade was attempted."
+                ),
+                "unknown_buy_outcome": (
+                    "The purchase outcome is uncertain. Auto Trade stopped to avoid a duplicate trade."
+                ),
+            }.get(status, "A trade could not be placed, so Auto Trade stopped safely.")
             await _save_session_summary(
                 current,
-                "failed" if status == "unknown_buy_outcome" else "stopped",
+                "failed" if status in {"unknown_buy_outcome", "token_service_error"} else "stopped",
             )
-
-            if status == "insufficient_tokens":
-                message = (
-                    "💎 You’re out of Yields Tokens, so Auto Trade has stopped "
-                    "before placing another trade. No token was charged for this attempt.\n\n"
-                )
-            elif status == "token_service_error":
-                message = (
-                    "⚠️ Auto Trade is temporarily unavailable because your token balance "
-                    "could not be verified. No trade was attempted. Please try again shortly.\n\n"
-                )
-            elif status == "unknown_buy_outcome":
-                message = (
-                    "⚠️ PURCHASE OUTCOME UNKNOWN\n\n"
-                    "The purchase may have succeeded, but confirmation was not "
-                    "received. Auto Trade has stopped to avoid a duplicate buy.\n\n"
-                )
-            else:
-                message = "⚠️ TRADE NOT PLACED\n\nAuto Trade has stopped.\n\n"
-
-            await _safe_edit_message(query, message + f"Reason: {reason}")
+            await _safe_edit_message(
+                query,
+                await _session_end_message(user_id, current, status_reason),
+            )
             return
 
         market_label = friendly_market_name(current.market_symbol or current.symbol)
@@ -573,6 +630,48 @@ async def dispatch_callback(update, context) -> None:
         await query.edit_message_text(
             handle_faq(),
             reply_markup=TelegramKeyboard.dashboard_keyboard(),
+        )
+        return
+
+    if data == "MENU_FAQ":
+        await _safe_edit_message(
+            query,
+            handle_faq(),
+            reply_markup=TelegramKeyboard.menu_keyboard(settings.community_url),
+        )
+        return
+
+    if data == "MENU_GET_TOKENS":
+        try:
+            profile = await asyncio.to_thread(
+                trade_history_service.get_user,
+                user_id,
+            )
+            token_balance = int(profile.get("token_balance", 0))
+        except Exception:
+            token_balance = None
+        balance_text = str(token_balance) if token_balance is not None else "Unavailable"
+        await _safe_edit_message(
+            query,
+            "💎 YIELDS TOKENS\n\n"
+            f"Available balance: {balance_text}\n\n"
+            "One token is used for each contract placed by Auto Trade.\n"
+            "For a token top-up, contact Sammie @samueludoh_ng.",
+            reply_markup=TelegramKeyboard.menu_keyboard(settings.community_url),
+        )
+        return
+
+    if data == "MENU_INVITE":
+        bot_username = str(settings.telegram_bot_username or "").strip().lstrip("@")
+        invite_text = (
+            f"Invite a friend to Yields: https://t.me/{bot_username}"
+            if bot_username
+            else "Open Yields in Telegram, tap the bot profile, and share it with a friend."
+        )
+        await _safe_edit_message(
+            query,
+            f"🎁 INVITE FRIENDS\n\n{invite_text}",
+            reply_markup=TelegramKeyboard.menu_keyboard(settings.community_url),
         )
         return
 
@@ -671,15 +770,14 @@ async def dispatch_callback(update, context) -> None:
         display_name = getattr(update.effective_user, "first_name", None) or getattr(update.effective_user, "username", None) or "friend"
         text = handle_auto_trade_start(user_id, display_name=display_name)
         setup = build_auto_trade_setup(user_id)
-        photo_path = _setup_photo_path(setup.get("direction"))
+        photo_url = _setup_photo_url(setup.get("direction"))
 
-        if InputMediaPhoto is not None and photo_path:
+        if InputMediaPhoto is not None and photo_url:
             try:
-                with open(photo_path, "rb") as photo_file:
-                    await query.edit_message_media(
-                        media=InputMediaPhoto(media=photo_file, caption=text),
-                        reply_markup=TelegramKeyboard.stake_keyboard(),
-                    )
+                await query.edit_message_media(
+                    media=InputMediaPhoto(media=photo_url, caption=text),
+                    reply_markup=TelegramKeyboard.stake_keyboard(),
+                )
                 return
             except Exception:
                 pass
@@ -697,15 +795,14 @@ async def dispatch_callback(update, context) -> None:
         display_name = getattr(update.effective_user, "first_name", None) or getattr(update.effective_user, "username", None) or "friend"
         text = handle_auto_trade_start(user_id, display_name=display_name)
         setup = build_auto_trade_setup(user_id)
-        photo_path = _setup_photo_path(setup.get("direction"))
+        photo_url = _setup_photo_url(setup.get("direction"))
 
-        if InputMediaPhoto is not None and photo_path:
+        if InputMediaPhoto is not None and photo_url:
             try:
-                with open(photo_path, "rb") as photo_file:
-                    await query.edit_message_media(
-                        media=InputMediaPhoto(media=photo_file, caption=text),
-                        reply_markup=TelegramKeyboard.stake_keyboard(),
-                    )
+                await query.edit_message_media(
+                    media=InputMediaPhoto(media=photo_url, caption=text),
+                    reply_markup=TelegramKeyboard.stake_keyboard(),
+                )
                 return
             except Exception:
                 pass
@@ -716,16 +813,19 @@ async def dispatch_callback(update, context) -> None:
     if data == "AUTO_TRADE_CANCEL":
         state = auto_trade_service.cancel_run(user_id)
         if state is None:
-            await query.edit_message_text(
+            await _safe_edit_message(
+                query,
                 "🛑 Auto Trade cancelled. No trade has been placed."
             )
         else:
             await _save_session_summary(state, "cancelled")
-            await query.edit_message_text(
-                "🛑 Auto Trade cancellation requested.\n\n"
-                "If a contract has already been purchased, it cannot be "
-                "cancelled by this button; the bot will not initiate another "
-                "purchase after the current monitoring step."
+            await _safe_edit_message(
+                query,
+                await _session_end_message(
+                    user_id,
+                    state,
+                    "Cancelled by you. An already purchased contract was allowed to settle.",
+                )
             )
         return
 

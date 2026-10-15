@@ -29,10 +29,12 @@ class TradeRunState:
     status: str = "pending"
     expiry_seconds: int = settings.default_expiry_seconds
     account_mode: str = "demo"
+    currency: str = "USD"
     started_at: str = field(default_factory=_now)
     completed_at: str | None = None
     total_staked: float = 0.0
     total_profit_loss: float = 0.0
+    tokens_spent: int = 0
     trade_count: int = 0
     wins: int = 0
     losses: int = 0

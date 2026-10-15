@@ -8,6 +8,7 @@ from app.bot.handlers import (
     account_mode_service,
     auth_service,
     build_start_message,
+    build_menu_message,
     handle_balance,
     handle_connect,
     handle_faq,
@@ -62,6 +63,26 @@ def create_application():
         text = await build_start_message(user_id, display_name=display_name) if connected else handle_start(user_id, display_name=display_name)
         await update.message.reply_text(text, reply_markup=keypad)
 
+    async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        user = update.effective_user
+        display_name = getattr(user, "first_name", None) or getattr(user, "username", None) or "friend"
+        text = await build_menu_message(
+            user.id,
+            display_name=getattr(user, "first_name", None),
+            last_name=getattr(user, "last_name", None),
+            username=getattr(user, "username", None),
+        )
+        keyboard = TelegramKeyboard.menu_keyboard(settings.community_url)
+        try:
+            await update.message.reply_photo(
+                photo=settings.menu_image_url,
+                caption=text,
+                reply_markup=keyboard,
+            )
+        except Exception:
+            logger.exception("Could not send the Yields menu image")
+            await update.message.reply_text(text, reply_markup=keyboard)
+
     async def connect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = update.effective_user.id
         await update.message.reply_text(handle_connect(user_id), reply_markup=TelegramKeyboard.start_keyboard())
@@ -89,6 +110,7 @@ def create_application():
         await update.message.reply_text(handle_scan(), reply_markup=TelegramKeyboard.dashboard_keyboard())
 
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("menu", menu))
     application.add_handler(CommandHandler("connect", connect))
     application.add_handler(CommandHandler("status", status))
     application.add_handler(CommandHandler("balance", balance))

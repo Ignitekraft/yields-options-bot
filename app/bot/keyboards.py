@@ -55,6 +55,31 @@ class TelegramKeyboard:
         )
 
     @staticmethod
+    def menu_keyboard(community_url: str) -> object:
+        rows = [
+            [("🚀 Auto Trade", "START_AUTO_TRADE")],
+            [("💎 Get Tokens", "MENU_GET_TOKENS"), ("🌍 Community", community_url)],
+            [("❓ Faq", "MENU_FAQ")],
+            [("🎁 Invite", "MENU_INVITE")],
+        ]
+        if InlineKeyboardMarkup is None:
+            return [[label for label, _ in row] for row in rows]
+
+        return InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        label,
+                        url=value if label == "🌍 Community" else None,
+                        callback_data=None if label == "🌍 Community" else value,
+                    )
+                    for label, value in row
+                ]
+                for row in rows
+            ]
+        )
+
+    @staticmethod
     def connect_keyboard(url: str | None = None) -> object:
         if InlineKeyboardMarkup is None:
             return [["🔐 Open Deriv", "🏠 Main Menu"]]
