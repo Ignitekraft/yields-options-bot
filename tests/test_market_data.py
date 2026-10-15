@@ -16,14 +16,12 @@ from app.bot.handlers import (
 from app.bot.keyboards import TelegramKeyboard
 from app.config import settings
 from app.main import app, deriv_oauth_callback
-from app.models.ai_analysis import AutoTradeAnalysis
 from app.models.market import MarketSnapshot
 from app.services.account_service import AccountService
 from app.services.auth_service import AuthService
 from app.services.auto_trade_service import AutoTradeService
 from app.services.deriv.auth import build_deriv_oauth_url
 from app.services.deriv.market_data import MarketDataService
-from app.services.gemini_service import GeminiService
 from app.services.scanner import SignalResult, YieldsScanner
 from app.services.trade_execution_service import TradeExecutionService
 from app.services.trading_service import TradingService
@@ -455,76 +453,56 @@ class MarketDataTests(unittest.TestCase):
         self.assertIn("Need help with something? Ask Sammie @samueludoh_ng", text)
         self.assertIn("⚡", text)
 
-    def test_auto_trade_setup_blends_ai_and_technical_signals(self):
+    def test_auto_trade_setup_ranks_markets_from_indicators_deterministically(self):
         auth = AuthService()
         auth.connect_user(
-            "blend-user",
+            "indicator-user",
             {
-                "access_token": "blend-token",
-                "refresh_token": "blend-refresh",
+                "access_token": "indicator-token",
+                "refresh_token": "indicator-refresh",
                 "expires_in": 3600,
                 "token_type": "Bearer",
             },
         )
 
         original_markets = settings.auto_trade_markets
-
-        with patch("app.bot.handlers.MarketDataService") as market_service_cls, \
-             patch("app.bot.handlers.GeminiService") as gemini_cls:
-
-            market_service = market_service_cls.return_value
-            market_service.get_historical_ticks.return_value = [
-                {"quote": 100.0, "timestamp": "1"},
-                {"quote": 101.0, "timestamp": "2"},
-                {"quote": 103.5, "timestamp": "3"},
-                {"quote": 104.6, "timestamp": "4"},
-                {"quote": 106.0, "timestamp": "5"},
-            ]
-
-            gemini_cls.return_value.analyze.return_value = type(
-                "Analysis",
-                (),
-                {
-                    "market_analyses": [
-                        type(
-                            "MarketAnalysis",
-                            (),
-                            {
-                                "symbol": "step_300",
-                                "direction": "BULLISH",
-                                "confidence": 0.85,
-                                "setup_quality": 0.9,
-                                "reasoning": "AI says bullish.",
-                            },
-                        )(),
-                        type(
-                            "MarketAnalysis",
-                            (),
-                            {
-                                "symbol": "step_500",
-                                "direction": "BEARISH",
-                                "confidence": 0.2,
-                                "setup_quality": 0.3,
-                                "reasoning": "AI says bearish.",
-                            },
-                        )(),
-                    ],
-                    "winner_symbol": "step_300",
-                    "winner_direction": "BULLISH",
-                    "winner_confidence": 0.85,
-                    "winner_setup_quality": 0.9,
-                    "overall_reasoning": "AI-led bullish setup.",
+        snapshots = [
+            MarketSnapshot(
+                symbol="step_300",
+                display_name="Step 300",
+                current_price=90.0,
+                indicators={
+                    "rsi": 50.0,
+                    "macd": -2.0,
+                    "macd_signal": -1.0,
+                    "ma50": 100.0,
+                    "ma200": 110.0,
                 },
-            )()
+            ),
+            MarketSnapshot(
+                symbol="step_500",
+                display_name="Step 500",
+                current_price=120.0,
+                indicators={
+                    "rsi": 65.0,
+                    "macd": 2.0,
+                    "macd_signal": 1.0,
+                    "ma50": 110.0,
+                    "ma200": 100.0,
+                },
+            ),
+        ]
 
+        with patch("app.bot.handlers.YieldsScanner.collect_step_market_snapshots", return_value=snapshots):
             object.__setattr__(
                 settings,
                 "auto_trade_markets",
-                ["step_300", "step_500"],
+                ("step_300", "step_500"),
             )
 
             try:
-                setup = build_auto_trade_setup("blend-user")
+                setup = build_auto_trade_setup("indicator-user")
+                repeated_setup = build_auto_trade_setup("indicator-user")
             finally:
                 object.__setattr__(
                     settings,
@@ -532,10 +510,48 @@ class MarketDataTests(unittest.TestCase):
                     original_markets,
                 )
 
-        self.assertEqual(setup["symbol"], "step_300")
-        self.assertGreater(setup["confidence"], 0.0)
-        self.assertIn("AI", setup["reasoning"])
-        self.assertIn("Technical", setup["reasoning"])
+        self.assertEqual(setup["symbol"], "step_500")
+        self.assertEqual(setup["direction"], "BULLISH")
+        self.assertEqual(setup, repeated_setup)
+        self.assertIn("MACD", setup["reasoning"])
+        self.assertIn("RSI", setup["reasoning"])
+        self.assertIn("MA50", setup["reasoning"])
+        self.assertIn("MA200", setup["reasoning"])
+
+    def test_auto_trade_setup_rejects_conflicting_indicator_votes(self):
+        auth = AuthService()
+        auth.connect_user(
+            "conflicting-indicators-user",
+            {
+                "access_token": "indicator-token",
+                "refresh_token": "indicator-refresh",
+                "expires_in": 3600,
+                "token_type": "Bearer",
+            },
+        )
+        snapshots = [
+            MarketSnapshot(
+                symbol="step_300",
+                display_name="Step 300",
+                current_price=90.0,
+                indicators={
+                    "rsi": 65.0,
+                    "macd": 2.0,
+                    "macd_signal": 1.0,
+                    "ma50": 100.0,
+                    "ma200": 110.0,
+                },
+            ),
+        ]
+
+        with patch(
+            "app.bot.handlers.YieldsScanner.collect_step_market_snapshots",
+            return_value=snapshots,
+        ):
+            setup = build_auto_trade_setup("conflicting-indicators-user")
+
+        self.assertEqual(setup["symbol"], "NO_SETUP")
+        self.assertEqual(setup["direction"], "NO_TRADE")
 
     def test_confirmation_callback_executes_trade(self):
         class FakeQuery:
@@ -634,6 +650,69 @@ class MarketDataTests(unittest.TestCase):
         self.assertIsNotNone(query.text_text)
         self.assertIsNotNone(query.caption_text)
         self.assertIn("TRADE CONFIRMATION", query.caption_text)
+
+    def test_confirm_start_callback_falls_back_to_caption_edit_when_message_is_media(self):
+        class FakeQuery:
+            def __init__(self):
+                self.caption_text = None
+                self.text_text = None
+
+            async def answer(self):
+                return None
+
+            async def edit_message_text(self, text, **kwargs):
+                self.text_text = text
+                raise RuntimeError("message is a media caption")
+
+            async def edit_message_caption(self, caption, **kwargs):
+                self.caption_text = caption
+
+        class FakeUpdate:
+            def __init__(self):
+                self.callback_query = FakeQuery()
+                self.effective_user = type("User", (), {"id": "confirm-media-user"})()
+
+        run_state = AutoTradeService()
+        state = run_state.start_run("confirm-media-user", "step_300", "BULLISH", 5.0)
+
+        update = FakeUpdate()
+
+        with patch(
+            "app.bot.callbacks.auto_trade_service",
+            run_state,
+        ), patch(
+            "app.bot.callbacks.account_mode_service.get_mode",
+            return_value="demo",
+        ), patch(
+            "app.bot.callbacks.execute_trade",
+            new=AsyncMock(
+                return_value={
+                    "status": "accepted",
+                    "contract_id": "con-123",
+                    "proposal_id": "prop-123",
+                    "buy_price": 5.0,
+                }
+            ),
+        ), patch(
+            "app.bot.callbacks._monitor_settlement",
+            new=AsyncMock(
+                return_value={"profit": 1.0}
+            ),
+        ), patch(
+            "app.bot.callbacks.friendly_market_name",
+            return_value="Step Index 300",
+        ):
+            run_state.advance_after_result = lambda user_id, won, profit: setattr(
+                state,
+                "status",
+                "completed",
+            ) or state
+            asyncio.run(_run_auto_trade(update, state))
+
+        query = update.callback_query
+        self.assertIsNotNone(query.text_text)
+        self.assertIsNotNone(query.caption_text)
+        self.assertIn("CONTRACT PURCHASED", query.caption_text)
 
     def test_deriv_oauth_success_message_includes_main_menu_button(self):
         class FakeBot:
@@ -1091,22 +1170,6 @@ class MarketDataTests(unittest.TestCase):
         self.assertEqual(
             [snapshot.symbol for snapshot in snapshots],
             list(settings.auto_trade_markets),
-        )
-
-    def test_gemini_service_returns_valid_structured_analysis(self):
-        scanner = YieldsScanner()
-        snapshots = scanner.collect_step_market_snapshots(
-            MarketDataService()
-        )
-        analysis = GeminiService(
-            api_key="fake-key",
-            model="gemini-2.0-flash",
-        ).analyze(snapshots)
-
-        self.assertIsInstance(analysis, AutoTradeAnalysis)
-        self.assertIn(
-            analysis.winner_symbol,
-            settings.auto_trade_markets,
         )
 
     def test_fixed_expiry_is_always_thirty_seconds(self):

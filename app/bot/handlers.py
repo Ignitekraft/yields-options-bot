@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import time
 
 from app.config import settings
 from app.services.account_service import AccountService
@@ -11,7 +9,6 @@ from app.services.auth_service import AuthService
 from app.services.auto_trade_service import AutoTradeService
 from app.services.deriv.auth import build_deriv_oauth_url
 from app.services.deriv.market_data import MarketDataService
-from app.services.gemini_service import GeminiService
 from app.services.scanner import YieldsScanner
 
 from .messages import (
@@ -195,13 +192,6 @@ def build_auto_trade_setup(
     service = MarketDataService()
     scanner = YieldsScanner()
     snapshots = scanner.collect_step_market_snapshots(service)
-    analysis = GeminiService().analyze(snapshots)
-
-    ai_by_symbol = {
-        market.symbol: market
-        for market in analysis.market_analyses
-    }
-
     scored = []
 
     for snapshot in snapshots:
@@ -212,68 +202,31 @@ def build_auto_trade_setup(
         ma50 = float(indicators.get("ma50", snapshot.current_price))
         ma200 = float(indicators.get("ma200", snapshot.current_price))
 
-        if snapshot.current_price >= ma50 >= ma200:
-            ma_alignment = 1.0
-        elif snapshot.current_price <= ma50 <= ma200:
-            ma_alignment = 0.0
-        else:
-            ma_alignment = 0.2
-
-        macd_strength = 1.0 if macd >= macd_signal else 0.0
-        rsi_score = max(0.0, min(1.0, (rsi - 30.0) / 70.0))
-        trend_score = max(
-            0.0,
-            min(
-                1.0,
-                abs(snapshot.momentum)
-                / max(abs(snapshot.current_price) * 0.02, 0.01),
-            ),
+        votes = (
+            1 if macd > macd_signal else -1 if macd < macd_signal else 0,
+            1 if rsi > 55.0 else -1 if rsi < 45.0 else 0,
+            1 if snapshot.current_price > ma50 else -1 if snapshot.current_price < ma50 else 0,
+            1 if snapshot.current_price > ma200 else -1 if snapshot.current_price < ma200 else 0,
         )
-
-        technical_score = min(
-            1.0,
-            (0.3 * ma_alignment)
-            + (0.3 * macd_strength)
-            + (0.2 * rsi_score)
-            + (0.2 * trend_score),
-        )
-
-        market_round = int(time.time() // 15)
-        market_hash = hashlib.sha256(
-            f"{snapshot.symbol}:{market_round}".encode("utf-8")
-        ).digest()
-        market_bias = (int.from_bytes(market_hash[:2], "big") / 65535.0) - 0.5
-        market_bias *= 0.35
-
-        ai_market = ai_by_symbol.get(snapshot.symbol)
-        ai_score = 0.0
-
-        if ai_market is not None:
-            ai_score = (
-                float(ai_market.confidence) * 0.7
-                + float(ai_market.setup_quality) * 0.3
-            )
-            if ai_market.direction == "NO_TRADE":
-                ai_score *= 0.2
-
-        combined_score = 0.6 * technical_score + 0.4 * ai_score + market_bias
-
+        directional_score = sum(votes)
         direction = (
             "BULLISH"
-            if (
-                snapshot.momentum >= 0
-                or (
-                    ai_market
-                    and ai_market.direction == "BULLISH"
-                )
-            )
+            if directional_score > 0
             else "BEARISH"
+            if directional_score < 0
+            else "NO_TRADE"
         )
+        confidence = abs(directional_score) / len(votes)
+        aligned_votes = sum(
+            vote > 0 if direction == "BULLISH" else vote < 0
+            for vote in votes
+        ) if direction != "NO_TRADE" else 0
+        setup_quality = aligned_votes / len(votes)
 
         if (
-            ai_market
-            and ai_market.direction == "NO_TRADE"
-            and snapshot.momentum == 0
+            snapshot.data_quality != "good"
+            or confidence < settings.min_indicator_confidence
+            or setup_quality < settings.min_setup_quality
         ):
             direction = "NO_TRADE"
 
@@ -282,40 +235,29 @@ def build_auto_trade_setup(
                 "symbol": snapshot.symbol,
                 "display_name": snapshot.display_name,
                 "direction": direction,
-                "confidence": max(0.0, min(1.0, combined_score)),
-                "setup_quality": max(
-                    0.0,
-                    min(1.0, (technical_score * 0.5) + (ai_score * 0.5) + (market_bias * 0.5)),
-                ),
+                "confidence": confidence,
+                "setup_quality": setup_quality,
                 "reasoning": (
-                    ai_market.reasoning
-                    if ai_market
-                    else "AI and technical structure are aligned."
-                )
-                + (
-                    f" | Technical: RSI {rsi:.1f}, MACD {macd:.4f}, "
-                    f"MA50 {ma50:.4f}, MA200 {ma200:.4f}."
+                    f"Indicator alignment: MACD {macd:.4f} vs signal "
+                    f"{macd_signal:.4f}, RSI {rsi:.1f}, current price "
+                    f"{snapshot.current_price:.4f}, MA50 {ma50:.4f}, "
+                    f"MA200 {ma200:.4f}."
                 ),
             }
         )
 
-    winner = (
-        max(
-            scored,
-            key=lambda item: (
-                item["confidence"],
-                item["setup_quality"],
-            ),
-        )
-        if scored
-        else {
+    valid_setups = [item for item in scored if item["direction"] != "NO_TRADE"]
+    winner = max(
+        valid_setups,
+        key=lambda item: (item["confidence"], item["setup_quality"]),
+        default={
             "symbol": "NO_SETUP",
             "direction": "NO_TRADE",
             "confidence": 0.0,
             "setup_quality": 0.0,
-            "reasoning": "No strong setup was returned.",
+            "reasoning": "No market met the minimum indicator-alignment thresholds.",
             "display_name": "No Setup",
-        }
+        },
     )
 
     return {

@@ -14,8 +14,6 @@ class Settings:
     deriv_app_id: str = os.getenv("DERIV_APP_ID", os.getenv("DERIV_CLIENT_ID", ""))
     deriv_public_ws_url: str = os.getenv("DERIV_PUBLIC_WS_URL", "wss://ws.derivws.com/websockets/v3")
     environment: str = os.getenv("APP_ENV", "development")
-    gemini_api_key: str = os.getenv("GEMINI_API_KEY", "")
-    gemini_model: str = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
     auto_trade_markets: tuple[str, ...] = (
         "step_100",
         "step_200",
@@ -27,7 +25,7 @@ class Settings:
     auto_trade_cycles: int = int(os.getenv("AUTO_TRADE_CYCLES", "5"))
     auto_trade_multiplier: float = float(os.getenv("AUTO_TRADE_MULTIPLIER", "2.25"))
     martingale_multiplier: float = float(os.getenv("MARTINGALE_MULTIPLIER", "2.25"))
-    min_ai_confidence: float = float(os.getenv("MIN_AI_CONFIDENCE", "0.70"))
+    min_indicator_confidence: float = float(os.getenv("MIN_INDICATOR_CONFIDENCE", "0.70"))
     min_setup_quality: float = float(os.getenv("MIN_SETUP_QUALITY", "0.70"))
 
 

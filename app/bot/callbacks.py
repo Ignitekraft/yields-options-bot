@@ -223,15 +223,16 @@ async def _run_auto_trade(update, state) -> None:
         current = auto_trade_service.get_run(user_id)
 
         if current is None:
-            await query.edit_message_text("⚠️ Auto Trade state was not found.")
+            await _safe_edit_message(query, "⚠️ Auto Trade state was not found.")
             return
 
         if current.status == "cancelled":
-            await query.edit_message_text("🛑 Auto Trade cancelled.")
+            await _safe_edit_message(query, "🛑 Auto Trade cancelled.")
             return
 
         if current.status == "completed":
-            await query.edit_message_text(
+            await _safe_edit_message(
+                query,
                 "🏁 AUTO TRADE COMPLETE\n\n"
                 f"Winning cycles: {current.wins}/{current.max_cycles}\n"
                 f"Settled contracts: {current.trade_count}\n"
@@ -242,7 +243,8 @@ async def _run_auto_trade(update, state) -> None:
             return
 
         if current.status not in {"running", "monitoring"}:
-            await query.edit_message_text(
+            await _safe_edit_message(
+                query,
                 "⚠️ Auto Trade stopped.\n\n"
                 f"State: {current.status}"
             )
@@ -253,7 +255,8 @@ async def _run_auto_trade(update, state) -> None:
                 settlement = await _monitor_settlement(user_id, current)
             except Exception as exc:
                 auto_trade_service.finish_run(user_id, "monitoring_error")
-                await query.edit_message_text(
+                await _safe_edit_message(
+                    query,
                     "⚠️ CONTRACT MONITORING STOPPED\n\n"
                     "The contract was purchased, but settlement could not be "
                     "verified. The bot will not place another trade.\n\n"
@@ -265,7 +268,8 @@ async def _run_auto_trade(update, state) -> None:
                 profit = float(settlement.get("profit") or 0.0)
             except (TypeError, ValueError):
                 auto_trade_service.finish_run(user_id, "settlement_data_error")
-                await query.edit_message_text(
+                await _safe_edit_message(
+                    query,
                     "⚠️ Settlement returned an invalid profit value. "
                     "Auto Trade has stopped without placing another trade."
                 )
@@ -304,7 +308,8 @@ async def _run_auto_trade(update, state) -> None:
         # Check the selected mode again before every purchase.
         if account_mode_service.get_mode(user_id) != current.account_mode:
             auto_trade_service.finish_run(user_id, "account_mode_changed")
-            await query.edit_message_text(
+            await _safe_edit_message(
+                query,
                 "🛑 Account mode changed during Auto Trade. "
                 "No further purchase will be attempted."
             )
@@ -330,11 +335,12 @@ async def _run_auto_trade(update, state) -> None:
             else:
                 message = "⚠️ TRADE NOT PLACED\n\nAuto Trade has stopped.\n\n"
 
-            await query.edit_message_text(message + f"Reason: {reason}")
+            await _safe_edit_message(query, message + f"Reason: {reason}")
             return
 
         market_label = friendly_market_name(current.market_symbol or current.symbol)
-        await query.edit_message_text(
+        await _safe_edit_message(
+            query,
             "⏳ CONTRACT PURCHASED\n\n"
             f"Account mode: {current.account_mode.upper()}\n"
             f"Market: {market_label}\n"
@@ -534,7 +540,8 @@ async def dispatch_callback(update, context) -> None:
         state = auto_trade_service.get_run(user_id)
 
         if state is None:
-            await query.edit_message_text(
+            await _safe_edit_message(
+                query,
                 "⚠️ No active Auto Trade session is available to confirm."
             )
             return
@@ -542,7 +549,8 @@ async def dispatch_callback(update, context) -> None:
         try:
             auto_trade_service.confirm_run(user_id)
         except RuntimeError as exc:
-            await query.edit_message_text(
+            await _safe_edit_message(
+                query,
                 f"⚠️ Auto Trade could not start: {exc}"
             )
             return
