@@ -13,8 +13,10 @@ from app.bot.handlers import (
     handle_auto_trade_start,
     handle_balance,
     handle_connect,
+    handle_faq,
     handle_logout,
     handle_start,
+    handle_stats,
     handle_status,
 )
 from app.bot.keyboards import TelegramKeyboard
@@ -314,7 +316,10 @@ async def dispatch_callback(update, context) -> None:
     user_key = str(user_id)
 
     if data == "START_CONNECT":
-        await query.edit_message_text(handle_connect(user_id))
+        await query.edit_message_text(
+            handle_connect(user_id),
+            reply_markup=TelegramKeyboard.connect_keyboard(),
+        )
         return
 
     if data == "START_INFO":
@@ -339,11 +344,31 @@ async def dispatch_callback(update, context) -> None:
         return
 
     if data == "START_BALANCE":
-        await query.edit_message_text(await handle_balance(user_id))
+        await query.edit_message_text(
+            await handle_balance(user_id),
+            reply_markup=TelegramKeyboard.status_keyboard(),
+        )
         return
 
     if data == "START_STATUS":
-        await query.edit_message_text(handle_status(user_id))
+        await query.edit_message_text(
+            handle_status(user_id),
+            reply_markup=TelegramKeyboard.status_keyboard(),
+        )
+        return
+
+    if data == "START_FAQ":
+        await query.edit_message_text(
+            handle_faq(),
+            reply_markup=TelegramKeyboard.dashboard_keyboard(),
+        )
+        return
+
+    if data == "START_STATS":
+        await query.edit_message_text(
+            handle_stats(user_id),
+            reply_markup=TelegramKeyboard.dashboard_keyboard(),
+        )
         return
 
     if data == "START_SETTINGS":

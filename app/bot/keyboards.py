@@ -44,11 +44,30 @@ class TelegramKeyboard:
                     ("📊 Status", "START_STATUS"),
                 ],
                 [
+                    ("❓ FAQ", "START_FAQ"),
+                    ("📈 Stats", "START_STATS"),
+                ],
+                [
                     ("⚙️ Account Mode", "START_SETTINGS"),
                     ("🔌 Disconnect", "START_LOGOUT"),
                 ],
             ]
         )
+
+    @staticmethod
+    def connect_keyboard(url: str | None = None) -> object:
+        if InlineKeyboardMarkup is None:
+            return [["🔐 Open Deriv", "🏠 Main Menu"]]
+
+        buttons = [
+            [
+                InlineKeyboardButton("🔐 Open Deriv", url=url or "https://deriv.com"),
+            ],
+            [
+                InlineKeyboardButton("🏠 Main Menu", callback_data="START_DASHBOARD"),
+            ],
+        ]
+        return InlineKeyboardMarkup(buttons)
 
     @staticmethod
     def account_mode_keyboard(current_mode: str) -> object:
@@ -106,7 +125,10 @@ class TelegramKeyboard:
     def status_keyboard() -> object:
         return TelegramKeyboard._keyboard(
             [
-                [("Refresh", "START_STATUS")],
-                [("Disconnect", "START_LOGOUT")],
+                [("🔄 Refresh", "START_STATUS")],
+                [("💰 Balance", "START_BALANCE")],
+                [("❓ FAQ", "START_FAQ")],
+                [("📈 Stats", "START_STATS")],
+                [("🔌 Disconnect", "START_LOGOUT")],
             ]
         )

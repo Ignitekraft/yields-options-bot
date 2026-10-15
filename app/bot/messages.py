@@ -11,14 +11,14 @@ Connect your Deriv account to unlock:
 
 Your Deriv account is connected securely through OAuth."""
 
-NO_CONNECTION_MESSAGE = "🔴 Deriv account not connected.\n\nUse /connect to link your account."
+NO_CONNECTION_MESSAGE = "🔴 Deriv account not connected.\n\nConnect your account to unlock AI scanning, Auto Trade, and balance tools."
 
-CONNECTED_MESSAGE = "🟢 Deriv account connected.\n\nYields is ready."
+CONNECTED_MESSAGE = "✅ Deriv account connected.\n\nYields is ready to scan and trade."
 
-SCAN_MESSAGE = "Scanning live market data via the Deriv public market feed..."
+SCAN_MESSAGE = "📡 Scanning live market data through the Deriv public market feed..."
 
 AUTO_TRADE_UNAVAILABLE_MESSAGE = "⚠️ Auto Trade is temporarily unavailable."
-AUTO_TRADE_RUNNING_MESSAGE = "⚠️ AUTO TRADE ALREADY RUNNING\n\nYou already have an active Auto Trade session. Please wait for it to finish or stop it first."
-AUTO_TRADE_NO_STRONG_SETUP = "⚠️ NO STRONG SETUP\n\nYields scanned all 5 Step Indices, but no market currently meets the minimum setup requirements.\n\nNo trade has been placed."
+AUTO_TRADE_RUNNING_MESSAGE = "⚠️ Auto Trade already running\n\nA live session is still active. Finish or stop it before starting a new one."
+AUTO_TRADE_NO_STRONG_SETUP = "⚠️ No strong setup right now\n\nYields scanned all 5 Step Indices, but none currently meet the minimum setup requirements.\n\nNo trade has been placed."
 AUTO_TRADE_STAKE_REQUIRED = "Choose your stake before continuing."
-AUTO_TRADE_CONFIRMATION = "⚡ TRADE CONFIRMATION\n\nProceed with the selected trade?"
+AUTO_TRADE_CONFIRMATION = "⚡ Trade confirmation\n\nProceed with the selected trade?"

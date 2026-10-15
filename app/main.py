@@ -4,6 +4,7 @@ import os
 
 from fastapi import FastAPI, Query
 from fastapi.responses import HTMLResponse
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.bot.telegram_bot import create_application
 from app.config import settings
@@ -112,19 +113,35 @@ async def deriv_oauth_callback(
     application = get_bot_application()
     if application is not None:
         try:
+            try:
+                chat_id = int(telegram_user_id)
+            except (TypeError, ValueError):
+                chat_id = telegram_user_id
+
+            main_menu_button = InlineKeyboardMarkup(
+                [[InlineKeyboardButton("🏠 Main Menu", callback_data="START_DASHBOARD")]]
+            )
+
             await application.bot.send_message(
-                chat_id=int(telegram_user_id),
-                text="✅ **Deriv account connected successfully!**\n\nYou can now use `/status`, `/scan`, and account tools.",
-                parse_mode="Markdown"
+                chat_id=chat_id,
+                text=(
+                    "✅ Deriv account connected successfully!\n\n"
+                    "Your account is active and ready.\n\n"
+                    "Tap below to return to the main menu."
+                ),
+                reply_markup=main_menu_button,
             )
         except Exception as e:
             print(f"Failed to send Telegram notification: {e}")
 
     return """
     <html>
-        <body style="font-family: Arial, sans-serif; text-align: center; padding-top: 50px;">
-            <h2 style="color: #2e7d32;">Deriv Account Connected Successfully!</h2>
-            <p>You can close this window and return to Telegram.</p>
+        <body style="font-family: Arial, sans-serif; text-align: center; padding-top: 50px; background: #0f1a24; color: #f5f7fa;">
+            <div style="max-width: 560px; margin: 0 auto; padding: 32px 20px;">
+                <h2 style="color: #3ddc97; margin-bottom: 12px;">Deriv Account Connected Successfully!</h2>
+                <p style="font-size: 16px; line-height: 1.6; margin-bottom: 18px;">You can close this window and return to Telegram.</p>
+                <div style="display: inline-block; padding: 12px 20px; border-radius: 10px; background: #2f9e74; color: white; font-weight: 600;">Open Dashboard</div>
+            </div>
         </body>
     </html>
     """

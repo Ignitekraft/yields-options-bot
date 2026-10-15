@@ -14,7 +14,7 @@ from app.bot.handlers import (
     handle_start,
 )
 from app.config import settings
-from app.main import app
+from app.main import app, deriv_oauth_callback
 from app.models.ai_analysis import AutoTradeAnalysis
 from app.models.market import MarketSnapshot
 from app.services.account_service import AccountService
@@ -510,6 +510,53 @@ class MarketDataTests(unittest.TestCase):
             asyncio.run(dispatch_callback(FakeUpdate(), None))
 
         execute_trade_mock.assert_called_once()
+
+    def test_deriv_oauth_success_message_includes_main_menu_button(self):
+        class FakeBot:
+            def __init__(self):
+                self.sent = []
+
+            async def send_message(self, **kwargs):
+                self.sent.append(kwargs)
+
+        class FakeApp:
+            def __init__(self):
+                self.bot = FakeBot()
+
+        fake_app = FakeApp()
+
+        with patch("app.main.auth_service.validate_state", return_value=True), \
+             patch("app.main.auth_service.get_pending_user_for_state", return_value="telegram-user-42"), \
+             patch("app.main.auth_service.exchange_oauth_code", return_value={"access_token": "token"}), \
+             patch("app.main.get_bot_application", return_value=fake_app):
+            response = asyncio.run(
+                deriv_oauth_callback(
+                    code="auth-code",
+                    state="state-value",
+                    error=None,
+                )
+            )
+
+        self.assertIn("Deriv Account Connected Successfully", response)
+        self.assertIn("Open Dashboard", response)
+
+        sent_message = fake_app.bot.sent[0]
+        self.assertIn("reply_markup", sent_message)
+        self.assertIsNotNone(sent_message["reply_markup"])
+
+    def test_user_messages_avoid_slash_commands_and_expose_faq_stats(self):
+        from app.bot.handlers import handle_faq, handle_logout, handle_stats, handle_status
+
+        connected_text = handle_status("status-user")
+        disconnected_text = handle_logout("logout-user")
+        faq_text = handle_faq()
+        stats_text = handle_stats("status-user")
+
+        self.assertNotIn("/connect", connected_text)
+        self.assertNotIn("/status", connected_text)
+        self.assertNotIn("/connect", disconnected_text)
+        self.assertIn("FAQ", faq_text.upper())
+        self.assertIn("STATS", stats_text.upper())
 
     def test_oauth_state_and_pkce_flow(self):
         service = AuthService()

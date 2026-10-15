@@ -336,9 +336,53 @@ def handle_status(telegram_user_id: str | int) -> str:
     mode = account_mode_service.get_mode(telegram_user_id)
 
     return (
-        "🟢 Deriv account connected successfully.\n\n"
+        "✅ Deriv account connected\n\n"
+        "Status: active and ready\n"
         f"Preferred account mode: {_mode_label(mode)}\n\n"
-        "You can use /balance, /scan, and trading tools."
+        "Your balance, market scan, and trading tools are ready to use."
+    )
+
+
+def handle_faq() -> str:
+    return (
+        "❓ YIELDS FAQ\n\n"
+        "• How does the AI rank the markets?\n"
+        "  It scores the 5 Step Indices using trend, momentum, RSI, MACD, MA50, and MA200.\n\n"
+        "• Which markets are used?\n"
+        "  Only the fixed Step Index family: 100, 200, 300, 400, and 500.\n\n"
+        "• What is Auto Trade?\n"
+        "  It picks the strongest current setup, confirms your stake, and monitors each contract until settlement.\n\n"
+        "• Can I switch between Demo and Real?\n"
+        "  Yes. Use the Account Mode panel and confirm before switching.\n\n"
+        "• How do I reconnect?\n"
+        "  Tap the secure Connect action from the dashboard or use the connection flow again."
+    )
+
+
+def handle_stats(telegram_user_id: str | int) -> str:
+    user_key = str(telegram_user_id)
+    status = account_service.get_account_status(user_key)
+
+    if not status["connected"]:
+        return (
+            "📈 YIELDS STATS\n\n"
+            "Account status: not connected\n"
+            "Markets tracked: 5 Step Indices\n"
+            "AI scan: available after connection\n\n"
+            "Connect your Deriv account to unlock the full live dashboard."
+        )
+
+    mode = account_mode_service.get_mode(user_key)
+    tokens = auth_service.get_user_tokens(user_key)
+
+    return (
+        "📈 YIELDS STATS\n\n"
+        "Account status: connected\n"
+        f"Mode: {_mode_label(mode)}\n"
+        f"Yields tokens: {tokens}\n"
+        "Markets tracked: 5 Step Indices\n"
+        "AI scan: active\n"
+        "Auto Trade: ready"
     )
 
 
@@ -347,7 +391,10 @@ async def handle_balance(telegram_user_id: str | int) -> str:
     status = account_service.get_account_status(user_key)
 
     if not status["connected"]:
-        return "🔴 Deriv account not connected. Use /connect to link your account."
+        return (
+            "🔴 Deriv account not connected\n\n"
+            "Connect your account to unlock your balance and trading tools."
+        )
 
     balances = await account_service.get_live_balances(user_key)
     real = balances.get("real", {})
@@ -394,15 +441,18 @@ def handle_connect(telegram_user_id: str | int) -> str:
     )
 
     return (
-        "Deriv account connection is required.\n\n"
-        "Tap the link below to continue securely:\n\n"
+        "🔐 Secure Deriv connection\n\n"
+        "Use the link below to continue safely and return to your dashboard.\n\n"
         f"{url}"
     )
 
 
 def handle_logout(telegram_user_id: str | int) -> str:
     auth_service.disconnect_user(str(telegram_user_id))
-    return "🔒 Deriv account disconnected. You can reconnect any time with /connect."
+    return (
+        "🔒 Deriv account disconnected\n\n"
+        "You can reconnect at any time from the dashboard or the Connect flow."
+    )
 
 
 def handle_scan() -> str:

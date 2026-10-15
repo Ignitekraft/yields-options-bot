@@ -1,7 +1,18 @@
 from __future__ import annotations
 
 from app.bot.callbacks import dispatch_callback
-from app.bot.handlers import auth_service, build_start_message, handle_balance, handle_connect, handle_logout, handle_scan, handle_start, handle_status
+from app.bot.handlers import (
+    auth_service,
+    build_start_message,
+    handle_balance,
+    handle_connect,
+    handle_faq,
+    handle_logout,
+    handle_scan,
+    handle_start,
+    handle_stats,
+    handle_status,
+)
 from app.bot.keyboards import TelegramKeyboard
 from app.config import settings
 
@@ -39,23 +50,32 @@ def create_application():
 
     async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = update.effective_user.id
-        await update.message.reply_text(handle_status(user_id))
+        await update.message.reply_text(handle_status(user_id), reply_markup=TelegramKeyboard.status_keyboard())
 
     async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = update.effective_user.id
-        await update.message.reply_text(await handle_balance(user_id))
+        await update.message.reply_text(await handle_balance(user_id), reply_markup=TelegramKeyboard.status_keyboard())
+
+    async def faq(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await update.message.reply_text(handle_faq(), reply_markup=TelegramKeyboard.dashboard_keyboard())
+
+    async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        user_id = update.effective_user.id
+        await update.message.reply_text(handle_stats(user_id), reply_markup=TelegramKeyboard.dashboard_keyboard())
 
     async def logout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = update.effective_user.id
-        await update.message.reply_text(handle_logout(user_id))
+        await update.message.reply_text(handle_logout(user_id), reply_markup=TelegramKeyboard.start_keyboard())
 
     async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await update.message.reply_text(handle_scan())
+        await update.message.reply_text(handle_scan(), reply_markup=TelegramKeyboard.dashboard_keyboard())
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("connect", connect))
     application.add_handler(CommandHandler("status", status))
     application.add_handler(CommandHandler("balance", balance))
+    application.add_handler(CommandHandler("faq", faq))
+    application.add_handler(CommandHandler("stats", stats))
     application.add_handler(CommandHandler("logout", logout))
     application.add_handler(CommandHandler("scan", scan))
     if CallbackQueryHandler is not None:
