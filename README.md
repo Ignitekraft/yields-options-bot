@@ -23,13 +23,16 @@ Implemented:
 - `app/services` owns business logic, market scanning, and auth orchestration.
 - `app/services/deriv` encapsulates Deriv public data access.
 - `app/main.py` exposes the HTTPS health and OAuth callback routes.
+- Supabase stores Telegram user profiles, read-only Deriv balance snapshots, per-contract trade history, and end-of-session summaries.
+- `/stats` reports the last 10 finalized Auto Trade sessions; session win rate is based on positive session PnL, while direction accuracy is calculated from settled contract ticks.
+- One Yields Token is reserved for each contract purchase. Explicitly rejected purchases are refunded; an uncertain purchase outcome is not refunded to prevent an uncharged possible trade.
 
 ## Setup
 
 1. Create a Python virtual environment.
 2. Install dependencies:
    `pip install -r requirements.txt`
-3. Copy `.env.example` to `.env` and add the Telegram, Deriv, and Supabase values.
+3. Copy `.env.example` to `.env` and add the Telegram and Deriv values. Set `SUPABASE_URL` and the backend-only `SUPABASE_SERVICE_ROLE_KEY` for trade history and Auto Trade.
 4. For the current Deriv OAuth flow, the App ID is used as the OAuth `client_id` value. The project does not require a separate Deriv client secret for the PKCE authorization-code flow described in Deriv's current OAuth documentation.
 5. Start the FastAPI backend:
    `uvicorn app.main:app --host 0.0.0.0 --port 8000`

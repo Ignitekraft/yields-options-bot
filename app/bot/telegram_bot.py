@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import asyncio
+import logging
+
 from app.bot.callbacks import dispatch_callback
 from app.bot.handlers import (
+    account_mode_service,
     auth_service,
     build_start_message,
     handle_balance,
@@ -12,6 +16,7 @@ from app.bot.handlers import (
     handle_start,
     handle_stats,
     handle_status,
+    trade_history_service,
 )
 from app.bot.keyboards import TelegramKeyboard
 from app.config import settings
@@ -26,6 +31,8 @@ except ImportError:  # pragma: no cover - optional dependency in local dev sandb
     CallbackQueryHandler = None
     CommandHandler = None
 
+logger = logging.getLogger(__name__)
+
 
 def create_application():
     """Create the Telegram bot application if the library and token are available."""
@@ -39,6 +46,17 @@ def create_application():
     async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = update.effective_user.id
         display_name = getattr(update.effective_user, "first_name", None) or getattr(update.effective_user, "username", None) or "friend"
+        try:
+            await asyncio.to_thread(
+                trade_history_service.ensure_user,
+                user_id,
+                first_name=getattr(update.effective_user, "first_name", None),
+                last_name=getattr(update.effective_user, "last_name", None),
+                username=getattr(update.effective_user, "username", None),
+                account_mode=account_mode_service.get_mode(user_id),
+            )
+        except Exception:
+            logger.exception("Could not register Telegram user in Supabase")
         connected = bool(auth_service.get_valid_access_token(str(user_id)))
         keypad = TelegramKeyboard.dashboard_keyboard() if connected else TelegramKeyboard.start_keyboard()
         text = await build_start_message(user_id, display_name=display_name) if connected else handle_start(user_id, display_name=display_name)

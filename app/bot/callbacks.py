@@ -38,6 +38,31 @@ trade_history_service = TradeHistoryService()
 logger = logging.getLogger(__name__)
 
 
+def _session_payload(state, session_status: str) -> dict:
+    return {
+        "session_id": state.session_id,
+        "telegram_user_id": state.user_id,
+        "session_status": session_status,
+        "winning_cycles": state.wins,
+        "trade_count": state.trade_count,
+        "total_staked": state.total_staked,
+        "net_profit": state.total_profit_loss,
+    }
+
+
+async def _save_session_summary(state, session_status: str | None = None) -> None:
+    final_status = session_status or (
+        "completed" if state.status == "completed" else "stopped"
+    )
+    try:
+        await asyncio.to_thread(
+            trade_history_service.update_session,
+            _session_payload(state, final_status),
+        )
+    except Exception:
+        logger.exception("Could not update Supabase Auto Trade session summary")
+
+
 async def _safe_edit_message(query, text: str, **kwargs) -> None:
     try:
         await query.edit_message_text(text, **kwargs)
@@ -57,6 +82,35 @@ async def _safe_edit_message(query, text: str, **kwargs) -> None:
     except Exception:
         pass
 
+
+async def _require_trade_tokens(update, query, account_mode: str) -> bool:
+    user = update.effective_user
+    try:
+        profile = await asyncio.to_thread(
+            trade_history_service.ensure_user,
+            user.id,
+            first_name=getattr(user, "first_name", None),
+            last_name=getattr(user, "last_name", None),
+            username=getattr(user, "username", None),
+            account_mode=account_mode,
+        )
+    except Exception:
+        logger.exception("Could not verify token balance before Auto Trade")
+        await _safe_edit_message(
+            query,
+            "⚠️ Auto Trade is temporarily unavailable because your token balance "
+            "could not be verified. Please try again shortly.",
+        )
+        return False
+
+    if int(profile.get("token_balance", 0)) <= 0:
+        await _safe_edit_message(
+            query,
+            "💎 You’re out of Yields Tokens, so Auto Trade can’t start. "
+            "No trade has been placed. Please contact support to top up.",
+        )
+        return False
+    return True
 
 def _setup_photo_path(direction: str | None) -> str | None:
     direction_value = str(direction or "").strip().upper()
@@ -91,7 +145,6 @@ def friendly_market_name(symbol: str | None) -> str:
         "step_400": "Step Index 400",
         "step_500": "Step Index 500",
     }
-
     return mapping.get(value, mapping.get(value.upper(), value))
 
 
@@ -105,6 +158,8 @@ async def execute_trade(user_id: str | int, state=None) -> dict:
         return {"status": "rejected", "reason": "DUPLICATE_EXECUTION"}
 
     state.status = "executing"
+    token_reserved = False
+    purchase_confirmed = False
 
     try:
         user_key = str(user_id)
@@ -143,6 +198,26 @@ async def execute_trade(user_id: str | int, state=None) -> dict:
             account_id=account_id,
         )
 
+        try:
+            reservation = await asyncio.to_thread(
+                trade_history_service.reserve_token,
+                user_id,
+                state.session_id,
+            )
+        except Exception as exc:
+            state.status = "rejected"
+            logger.exception("Could not reserve a Yields Token before purchase")
+            return {"status": "token_service_error", "reason": str(exc)}
+
+        if not reservation.get("ok"):
+            state.status = "rejected"
+            return {
+                "status": "insufficient_tokens",
+                "reason": "INSUFFICIENT_TOKENS",
+                "token_balance": reservation.get("token_balance", 0),
+            }
+        token_reserved = True
+
         result = await trade_execution_service.execute_trade(
             user_id=user_id,
             market_symbol=state.symbol,
@@ -154,6 +229,7 @@ async def execute_trade(user_id: str | int, state=None) -> dict:
             ws_url=ws_url,
             account_type=state.account_mode,
         )
+        purchase_confirmed = result.get("status") == "accepted"
 
         if result.get("account_type") != state.account_mode:
             state.status = "rejected"
@@ -176,6 +252,14 @@ async def execute_trade(user_id: str | int, state=None) -> dict:
             state.status = "unknown_buy_outcome"
         else:
             state.status = "rejected"
+            try:
+                await asyncio.to_thread(
+                    trade_history_service.refund_token,
+                    user_id,
+                    state.session_id,
+                )
+            except Exception:
+                logger.exception("Could not refund token for rejected purchase")
 
         return result
 
@@ -184,6 +268,15 @@ async def execute_trade(user_id: str | int, state=None) -> dict:
         return {"status": "unknown_buy_outcome", "reason": str(exc)}
 
     except Exception as exc:
+        if token_reserved and not purchase_confirmed:
+            try:
+                await asyncio.to_thread(
+                    trade_history_service.refund_token,
+                    user_id,
+                    state.session_id,
+                )
+            except Exception:
+                logger.exception("Could not refund token after pre-purchase failure")
         state.status = "rejected"
         return {"status": "rejected", "reason": str(exc)}
 
@@ -231,10 +324,12 @@ async def _run_auto_trade(update, state) -> None:
             return
 
         if current.status == "cancelled":
+            await _save_session_summary(current, "cancelled")
             await _safe_edit_message(query, "🛑 Auto Trade cancelled.")
             return
 
         if current.status == "completed":
+            await _save_session_summary(current, "completed")
             await _safe_edit_message(
                 query,
                 "🏁 AUTO TRADE COMPLETE\n\n"
@@ -247,6 +342,7 @@ async def _run_auto_trade(update, state) -> None:
             return
 
         if current.status not in {"running", "monitoring"}:
+            await _save_session_summary(current, "failed")
             await _safe_edit_message(
                 query,
                 "⚠️ Auto Trade stopped.\n\n"
@@ -258,7 +354,8 @@ async def _run_auto_trade(update, state) -> None:
             try:
                 settlement = await _monitor_settlement(user_id, current)
             except Exception as exc:
-                auto_trade_service.finish_run(user_id, "monitoring_error")
+                current = auto_trade_service.finish_run(user_id, "monitoring_error") or current
+                await _save_session_summary(current, "failed")
                 await _safe_edit_message(
                     query,
                     "⚠️ CONTRACT MONITORING STOPPED\n\n"
@@ -271,7 +368,8 @@ async def _run_auto_trade(update, state) -> None:
             try:
                 profit = float(settlement.get("profit") or 0.0)
             except (TypeError, ValueError):
-                auto_trade_service.finish_run(user_id, "settlement_data_error")
+                current = auto_trade_service.finish_run(user_id, "settlement_data_error") or current
+                await _save_session_summary(current, "failed")
                 await _safe_edit_message(
                     query,
                     "⚠️ Settlement returned an invalid profit value. "
@@ -300,13 +398,14 @@ async def _run_auto_trade(update, state) -> None:
                     {
                         "telegram_user_id": user_id,
                         "contract_id": settlement.get("contract_id") or current.contract_id,
+                        "session_id": current.session_id,
                         "account_mode": current.account_mode,
                         "market_symbol": current.market_symbol or current.symbol,
                         "direction": current.direction,
                         "stake": current.current_stake,
                         "profit": profit,
                         "direction_accurate": direction_accurate,
-                        "tokens_spent": 0,
+                        "tokens_spent": 1,
                     },
                 )
                 history_saved = True
@@ -319,6 +418,10 @@ async def _run_auto_trade(update, state) -> None:
                 won=won,
                 profit=profit,
             )
+            await _save_session_summary(
+                current,
+                "completed" if current.status == "completed" else "running",
+            )
 
             market_label = friendly_market_name(current.market_symbol or current.symbol)
             history_warning = (
@@ -326,7 +429,8 @@ async def _run_auto_trade(update, state) -> None:
                 if not history_saved
                 else ""
             )
-            await query.edit_message_text(
+            await _safe_edit_message(
+                query,
                 "🤖 AUTO TRADE RUNNING\n\n"
                 f"Account mode: {current.account_mode.upper()}\n"
                 f"Market: {market_label}\n"
@@ -350,7 +454,8 @@ async def _run_auto_trade(update, state) -> None:
 
         # Check the selected mode again before every purchase.
         if account_mode_service.get_mode(user_id) != current.account_mode:
-            auto_trade_service.finish_run(user_id, "account_mode_changed")
+            current = auto_trade_service.finish_run(user_id, "account_mode_changed") or current
+            await _save_session_summary(current, "stopped")
             await _safe_edit_message(
                 query,
                 "🛑 Account mode changed during Auto Trade. "
@@ -369,7 +474,23 @@ async def _run_auto_trade(update, state) -> None:
                 "unknown_buy_outcome" if status == "unknown_buy_outcome" else "rejected",
             )
 
-            if status == "unknown_buy_outcome":
+            current = auto_trade_service.get_run(user_id) or current
+            await _save_session_summary(
+                current,
+                "failed" if status == "unknown_buy_outcome" else "stopped",
+            )
+
+            if status == "insufficient_tokens":
+                message = (
+                    "💎 You’re out of Yields Tokens, so Auto Trade has stopped "
+                    "before placing another trade. No token was charged for this attempt.\n\n"
+                )
+            elif status == "token_service_error":
+                message = (
+                    "⚠️ Auto Trade is temporarily unavailable because your token balance "
+                    "could not be verified. No trade was attempted. Please try again shortly.\n\n"
+                )
+            elif status == "unknown_buy_outcome":
                 message = (
                     "⚠️ PURCHASE OUTCOME UNKNOWN\n\n"
                     "The purchase may have succeeded, but confirmation was not "
@@ -479,8 +600,16 @@ async def dispatch_callback(update, context) -> None:
             return
 
         account_mode_service.set_mode(user_id, "demo")
+        try:
+            await asyncio.to_thread(
+                trade_history_service.update_user_mode,
+                user_id,
+                "demo",
+            )
+        except Exception:
+            logger.exception("Could not sync Demo mode to Supabase user profile")
         await query.edit_message_text(
-            "🟡 Demo Mode selected.\n\n"
+            "🟠 Demo Mode selected.\n\n"
             "Auto Trade will use a verified Demo Options account. "
             "It will not fall back to Real.",
             reply_markup=TelegramKeyboard.account_mode_keyboard("demo"),
@@ -511,6 +640,14 @@ async def dispatch_callback(update, context) -> None:
             return
 
         account_mode_service.set_mode(user_id, "real")
+        try:
+            await asyncio.to_thread(
+                trade_history_service.update_user_mode,
+                user_id,
+                "real",
+            )
+        except Exception:
+            logger.exception("Could not sync Real mode to Supabase user profile")
         await query.edit_message_text(
             "🟢 Real Mode selected.\n\n"
             "Before trading, Yields will verify that a Real Options account "
@@ -525,6 +662,12 @@ async def dispatch_callback(update, context) -> None:
         return
 
     if data == "START_AUTO_TRADE":
+        if not await _require_trade_tokens(
+            update,
+            query,
+            account_mode_service.get_mode(user_id),
+        ):
+            return
         display_name = getattr(update.effective_user, "first_name", None) or getattr(update.effective_user, "username", None) or "friend"
         text = handle_auto_trade_start(user_id, display_name=display_name)
         setup = build_auto_trade_setup(user_id)
@@ -545,6 +688,12 @@ async def dispatch_callback(update, context) -> None:
         return
 
     if data == "AUTO_TRADE_START_SCAN":
+        if not await _require_trade_tokens(
+            update,
+            query,
+            account_mode_service.get_mode(user_id),
+        ):
+            return
         display_name = getattr(update.effective_user, "first_name", None) or getattr(update.effective_user, "username", None) or "friend"
         text = handle_auto_trade_start(user_id, display_name=display_name)
         setup = build_auto_trade_setup(user_id)
@@ -571,6 +720,7 @@ async def dispatch_callback(update, context) -> None:
                 "🛑 Auto Trade cancelled. No trade has been placed."
             )
         else:
+            await _save_session_summary(state, "cancelled")
             await query.edit_message_text(
                 "🛑 Auto Trade cancellation requested.\n\n"
                 "If a contract has already been purchased, it cannot be "
@@ -586,6 +736,46 @@ async def dispatch_callback(update, context) -> None:
             await _safe_edit_message(
                 query,
                 "⚠️ No active Auto Trade session is available to confirm."
+            )
+            return
+
+        effective_user = update.effective_user
+        try:
+            profile = await asyncio.to_thread(
+                trade_history_service.ensure_user,
+                user_id,
+                first_name=getattr(effective_user, "first_name", None),
+                last_name=getattr(effective_user, "last_name", None),
+                username=getattr(effective_user, "username", None),
+                account_mode=state.account_mode,
+            )
+            token_balance = int(profile.get("token_balance", 0))
+            if token_balance <= 0:
+                await _safe_edit_message(
+                    query,
+                    "💎 You’re out of Yields Tokens, so Auto Trade can’t start. "
+                    "No trade has been placed. Please contact support to top up.",
+                )
+                return
+
+            await asyncio.to_thread(
+                trade_history_service.create_session,
+                {
+                    "session_id": state.session_id,
+                    "telegram_user_id": user_id,
+                    "account_mode": state.account_mode,
+                    "market_symbol": state.symbol,
+                    "direction": state.direction,
+                    "initial_stake": state.base_stake,
+                    "target_winning_cycles": state.max_cycles,
+                },
+            )
+        except Exception:
+            logger.exception("Could not create Supabase Auto Trade session")
+            await _safe_edit_message(
+                query,
+                "⚠️ Auto Trade is temporarily unavailable because your account "
+                "could not be prepared. No trade has been placed. Please try again shortly.",
             )
             return
 
@@ -618,6 +808,35 @@ async def dispatch_callback(update, context) -> None:
             )
             return
 
+        mode = account_mode_service.get_mode(user_id)
+        effective_user = update.effective_user
+        try:
+            profile = await asyncio.to_thread(
+                trade_history_service.ensure_user,
+                user_id,
+                first_name=getattr(effective_user, "first_name", None),
+                last_name=getattr(effective_user, "last_name", None),
+                username=getattr(effective_user, "username", None),
+                account_mode=mode,
+            )
+        except Exception:
+            logger.exception("Could not check token balance for Auto Trade")
+            await _safe_edit_message(
+                query,
+                "⚠️ Auto Trade is temporarily unavailable because your token "
+                "balance could not be verified. No trade has been placed.",
+            )
+            return
+
+        token_balance = int(profile.get("token_balance", 0))
+        if token_balance <= 0:
+            await _safe_edit_message(
+                query,
+                "💎 You’re out of Yields Tokens, so Auto Trade can’t start. "
+                "No trade has been placed. Please contact support to top up.",
+            )
+            return
+
         setup = build_auto_trade_setup(user_id)
 
         if (
@@ -635,8 +854,6 @@ async def dispatch_callback(update, context) -> None:
                 "⚠️ An Auto Trade run is already active."
             )
             return
-
-        mode = account_mode_service.get_mode(user_id)
 
         try:
             auto_trade_service.start_run(
@@ -659,6 +876,7 @@ async def dispatch_callback(update, context) -> None:
             f"Direction: {setup['direction']}\n"
             f"Account mode: {mode.upper()}\n"
             f"Initial stake: ${stake_value:.2f}\n"
+            f"Available tokens: {token_balance}\n"
             "Expiry: 30 seconds\n"
             "Target: 5 winning cycles\n\n"
             "A loss stays in the current cycle and increases the next stake "

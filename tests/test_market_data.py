@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 
-from app.bot.callbacks import _run_auto_trade, dispatch_callback
+from app.bot.callbacks import _run_auto_trade, dispatch_callback, execute_trade
 from app.bot.handlers import (
     build_auto_trade_setup,
     build_start_message,
@@ -260,7 +260,7 @@ class MarketDataTests(unittest.TestCase):
             account_mode="demo",
         )
         self.assertEqual(replacement.symbol, "step_300")
-        self.assertEqual(replacement.status, "running")
+        self.assertEqual(replacement.status, "awaiting_confirmation")
 
     def test_auto_trade_keeps_martingale_without_safety_limit(self):
         service = AutoTradeService()
@@ -293,6 +293,7 @@ class MarketDataTests(unittest.TestCase):
             2.0,
             account_mode="demo",
         )
+        service.confirm_run("immediate-user")
 
         class FakeQuery:
             def __init__(self):
@@ -317,6 +318,13 @@ class MarketDataTests(unittest.TestCase):
         ), patch(
             "app.bot.callbacks.execute_trade",
             new=AsyncMock(return_value={"status": "rejected", "reason": "stop"}),
+        ), patch(
+            "app.bot.callbacks.trade_history_service",
+            SimpleNamespace(
+                reserve_token=lambda *_: {"ok": True, "token_balance": 10},
+                refund_token=lambda *_: {"ok": True, "token_balance": 10},
+                update_session=lambda *_: None,
+            ),
         ), patch(
             "app.bot.callbacks.asyncio.sleep",
             side_effect=AssertionError("post-settlement sleep should not delay the next trade"),
@@ -354,6 +362,12 @@ class MarketDataTests(unittest.TestCase):
         with patch(
             "app.bot.handlers.account_service.get_live_balances",
             new=AsyncMock(return_value=balances),
+        ), patch(
+            "app.bot.handlers.trade_history_service",
+            SimpleNamespace(
+                ensure_user=lambda *_args, **_kwargs: {"token_balance": 7},
+                update_balance_snapshots=lambda *_args: None,
+            ),
         ):
             text = asyncio.run(
                 build_start_message("live-start-user", display_name="Sam")
@@ -590,19 +604,58 @@ class MarketDataTests(unittest.TestCase):
             "app.bot.callbacks.auto_trade_service",
             run_state,
         ), patch(
-            "app.bot.callbacks.execute_trade",
-            new=AsyncMock(
-                return_value={
-                    "status": "accepted",
-                    "contract_id": "con-123",
-                    "proposal_id": "prop-123",
-                    "buy_price": 1.0,
-                }
+            "app.bot.callbacks.trade_history_service",
+            SimpleNamespace(
+                ensure_user=lambda *_args, **_kwargs: {"token_balance": 5},
+                create_session=lambda *_args: None,
             ),
-        ) as execute_trade_mock:
-            asyncio.run(dispatch_callback(FakeUpdate(), None))
+        ), patch(
+            "app.bot.callbacks._run_auto_trade",
+            new=AsyncMock(),
+        ) as run_auto_trade_mock:
+            update = FakeUpdate()
+            asyncio.run(dispatch_callback(update, None))
 
-        execute_trade_mock.assert_called_once()
+        run_auto_trade_mock.assert_awaited_once()
+
+    def test_confirm_callback_blocks_when_token_balance_is_zero(self):
+        class FakeQuery:
+            def __init__(self):
+                self.data = "AUTO_TRADE_CONFIRM"
+                self.edited = None
+
+            async def answer(self):
+                return None
+
+            async def edit_message_text(self, text, **kwargs):
+                self.edited = text
+
+        class FakeUpdate:
+            def __init__(self):
+                self.callback_query = FakeQuery()
+                self.effective_user = type("User", (), {"id": "empty-token-user"})()
+
+        run_state = AutoTradeService()
+        run_state.start_run("empty-token-user", "step_300", "BULLISH", 5.0)
+        create_session = unittest.mock.Mock()
+        update = FakeUpdate()
+
+        with patch("app.bot.callbacks.auto_trade_service", run_state), patch(
+            "app.bot.callbacks.trade_history_service",
+            SimpleNamespace(
+                ensure_user=lambda *_args, **_kwargs: {"token_balance": 0},
+                create_session=create_session,
+            ),
+        ), patch(
+            "app.bot.callbacks._run_auto_trade",
+            new=AsyncMock(),
+        ) as run_auto_trade_mock:
+            asyncio.run(dispatch_callback(update, None))
+
+        self.assertIn("out of Yields Tokens", update.callback_query.edited)
+        self.assertIn("No trade has been placed", update.callback_query.edited)
+        create_session.assert_not_called()
+        run_auto_trade_mock.assert_not_awaited()
 
     def test_stake_callback_falls_back_to_caption_edit_when_message_is_media(self):
         class FakeQuery:
@@ -647,6 +700,11 @@ class MarketDataTests(unittest.TestCase):
         ), patch(
             "app.bot.callbacks.auto_trade_service.start_run",
             return_value=object(),
+        ), patch(
+            "app.bot.callbacks.trade_history_service",
+            SimpleNamespace(
+                ensure_user=lambda *_args, **_kwargs: {"token_balance": 50},
+            ),
         ):
             asyncio.run(dispatch_callback(update, None))
 
@@ -660,6 +718,7 @@ class MarketDataTests(unittest.TestCase):
             def __init__(self):
                 self.caption_text = None
                 self.text_text = None
+                self.caption_history = []
 
             async def answer(self):
                 return None
@@ -670,6 +729,7 @@ class MarketDataTests(unittest.TestCase):
 
             async def edit_message_caption(self, caption, **kwargs):
                 self.caption_text = caption
+                self.caption_history.append(caption)
 
         class FakeUpdate:
             def __init__(self):
@@ -678,8 +738,15 @@ class MarketDataTests(unittest.TestCase):
 
         run_state = AutoTradeService()
         state = run_state.start_run("confirm-media-user", "step_300", "BULLISH", 5.0)
+        run_state.confirm_run("confirm-media-user")
 
         update = FakeUpdate()
+
+        async def fake_execute_trade(_user_id, trade_state):
+            trade_state.contract_id = "con-123"
+            trade_state.market_symbol = "STPRNG3"
+            trade_state.status = "monitoring"
+            return {"status": "accepted"}
 
         with patch(
             "app.bot.callbacks.auto_trade_service",
@@ -689,22 +756,28 @@ class MarketDataTests(unittest.TestCase):
             return_value="demo",
         ), patch(
             "app.bot.callbacks.execute_trade",
-            new=AsyncMock(
-                return_value={
-                    "status": "accepted",
-                    "contract_id": "con-123",
-                    "proposal_id": "prop-123",
-                    "buy_price": 5.0,
-                }
-            ),
+            new=AsyncMock(side_effect=fake_execute_trade),
         ), patch(
             "app.bot.callbacks._monitor_settlement",
             new=AsyncMock(
-                return_value={"profit": 1.0}
+                return_value={
+                    "status": "settled",
+                    "contract_id": "con-123",
+                    "profit": 1.0,
+                    "entry_tick": 100.0,
+                    "exit_tick": 101.0,
+                }
             ),
         ), patch(
             "app.bot.callbacks.friendly_market_name",
             return_value="Step Index 300",
+        ), patch(
+            "app.bot.callbacks.trade_history_service",
+            SimpleNamespace(
+                reserve_token=lambda *_args: {"ok": True, "token_balance": 49},
+                record_settled_trade=lambda *_args: None,
+                update_session=lambda *_args: None,
+            ),
         ):
             run_state.advance_after_result = lambda user_id, won, profit: setattr(
                 state,
@@ -716,7 +789,9 @@ class MarketDataTests(unittest.TestCase):
         query = update.callback_query
         self.assertIsNotNone(query.text_text)
         self.assertIsNotNone(query.caption_text)
-        self.assertIn("CONTRACT PURCHASED", query.caption_text)
+        self.assertTrue(
+            any("AUTO TRADE RUNNING" in caption for caption in query.caption_history)
+        )
 
     def test_settled_contract_is_persisted_with_direction_accuracy(self):
         class FakeQuery:
@@ -731,9 +806,18 @@ class MarketDataTests(unittest.TestCase):
         class FakeTradeHistory:
             def __init__(self):
                 self.trades = []
+                self.sessions = []
+                self.reservations = []
+
+            def reserve_token(self, user_id, session_id):
+                self.reservations.append((user_id, session_id))
+                return {"ok": True, "token_balance": 49}
 
             def record_settled_trade(self, trade):
                 self.trades.append(trade)
+
+            def update_session(self, session):
+                self.sessions.append(session)
 
         run_service = AutoTradeService()
         state = run_service.start_run(
@@ -744,6 +828,7 @@ class MarketDataTests(unittest.TestCase):
             max_cycles=1,
             account_mode="demo",
         )
+        run_service.confirm_run("history-user")
         update = FakeUpdate()
         trade_history = FakeTradeHistory()
 
@@ -780,8 +865,130 @@ class MarketDataTests(unittest.TestCase):
         self.assertEqual(trade_history.trades[0]["telegram_user_id"], "history-user")
         self.assertEqual(trade_history.trades[0]["account_mode"], "demo")
         self.assertEqual(trade_history.trades[0]["market_symbol"], "STPRNG5")
+        self.assertEqual(trade_history.trades[0]["session_id"], state.session_id)
         self.assertEqual(trade_history.trades[0]["stake"], 5.0)
+        self.assertEqual(trade_history.trades[0]["tokens_spent"], 1)
         self.assertTrue(trade_history.trades[0]["direction_accurate"])
+        self.assertEqual(trade_history.sessions[-1]["session_status"], "completed")
+
+    def test_zero_tokens_mid_session_stops_before_another_trade(self):
+        class FakeQuery:
+            def __init__(self):
+                self.edited = None
+
+            async def edit_message_text(self, text, **kwargs):
+                self.edited = text
+
+        class FakeUpdate:
+            def __init__(self):
+                self.callback_query = FakeQuery()
+                self.effective_user = type("User", (), {"id": "depleted-user"})()
+
+        class FakeTradeHistory:
+            def __init__(self):
+                self.sessions = []
+
+            def reserve_token(self, *_args):
+                return {
+                    "ok": False,
+                    "reason": "INSUFFICIENT_TOKENS",
+                    "token_balance": 0,
+                }
+
+            def update_session(self, session):
+                self.sessions.append(session)
+
+        run_service = AutoTradeService()
+        state = run_service.start_run(
+            "depleted-user",
+            "step_300",
+            "BULLISH",
+            1.0,
+            account_mode="demo",
+        )
+        run_service.confirm_run("depleted-user")
+        update = FakeUpdate()
+        trade_history = FakeTradeHistory()
+
+        with patch("app.bot.callbacks.auto_trade_service", run_service), patch(
+            "app.bot.callbacks.account_mode_service.get_mode",
+            return_value="demo",
+        ), patch(
+            "app.bot.callbacks.trade_history_service",
+            trade_history,
+        ), patch(
+            "app.bot.callbacks.execute_trade",
+            new=AsyncMock(
+                return_value={
+                    "status": "insufficient_tokens",
+                    "reason": "INSUFFICIENT_TOKENS",
+                }
+            ),
+        ) as execute_trade_mock:
+            asyncio.run(_run_auto_trade(update, state))
+
+        self.assertIn("out of Yields Tokens", update.callback_query.edited)
+        execute_trade_mock.assert_awaited_once()
+        self.assertEqual(trade_history.sessions[-1]["session_status"], "stopped")
+
+    def test_execute_trade_reserves_token_before_deriv_purchase(self):
+        class FakeTradeHistory:
+            def __init__(self):
+                self.reservations = []
+
+            def reserve_token(self, user_id, session_id):
+                self.reservations.append((user_id, session_id))
+                return {"ok": True, "token_balance": 4}
+
+        run_service = AutoTradeService()
+        state = run_service.start_run(
+            "reserve-before-buy-user",
+            "step_300",
+            "BULLISH",
+            5.0,
+            account_mode="demo",
+        )
+        run_service.confirm_run("reserve-before-buy-user")
+        trade_history = FakeTradeHistory()
+
+        with patch("app.bot.callbacks.auto_trade_service", run_service), patch(
+            "app.bot.callbacks.auth_service.get_valid_access_token",
+            return_value="access-token",
+        ), patch(
+            "app.bot.callbacks.account_mode_service.get_mode",
+            return_value="demo",
+        ), patch(
+            "app.bot.callbacks.account_service.get_trade_account",
+            new=AsyncMock(
+                return_value={"account_type": "demo", "account_id": "demo-1", "currency": "USD"}
+            ),
+        ), patch(
+            "app.bot.callbacks.account_service.request_account_otp_url",
+            new=AsyncMock(return_value="wss://example.test"),
+        ), patch(
+            "app.bot.callbacks.trade_history_service",
+            trade_history,
+        ), patch(
+            "app.bot.callbacks.trade_execution_service.execute_trade",
+            new=AsyncMock(
+                return_value={
+                    "status": "accepted",
+                    "account_type": "demo",
+                    "contract_id": "contract-reserved",
+                    "proposal_id": "proposal-reserved",
+                    "underlying_symbol": "STPRNG3",
+                    "contract_type": "CALL",
+                }
+            ),
+        ) as deriv_trade:
+            result = asyncio.run(execute_trade("reserve-before-buy-user", state))
+
+        self.assertEqual(result["status"], "accepted")
+        self.assertEqual(
+            trade_history.reservations,
+            [("reserve-before-buy-user", state.session_id)],
+        )
+        deriv_trade.assert_awaited_once()
 
     def test_trade_history_service_posts_idempotent_record_and_user_scoped_stats(self):
         requests = []
@@ -805,6 +1012,7 @@ class MarketDataTests(unittest.TestCase):
             {
                 "telegram_user_id": "12345",
                 "contract_id": "contract-abc",
+                "session_id": "11111111-1111-4111-8111-111111111111",
                 "account_mode": "DEMO",
                 "market_symbol": "STPRNG5",
                 "direction": "BULLISH",
@@ -839,18 +1047,24 @@ class MarketDataTests(unittest.TestCase):
                     "account_mode": "demo",
                     "market_symbol": "STPRNG5",
                     "direction": "BULLISH",
-                    "profit": 5.19,
-                    "outcome": "win",
-                    "direction_accurate": True,
+                    "net_profit": 5.19,
+                    "session_status": "completed",
+                    "trade_count": 7,
+                    "winning_cycles": 5,
                 },
             ],
+            "token_balance": 43,
             "real": {
+                "session_count": 0,
+                "wins": 0,
                 "win_rate": 0,
                 "accuracy": 0,
                 "net_pnl": 0,
                 "tokens_spent": 0,
             },
             "demo": {
+                "session_count": 13,
+                "wins": 5,
                 "win_rate": 100,
                 "accuracy": 52,
                 "net_pnl": 166.22,
@@ -862,14 +1076,17 @@ class MarketDataTests(unittest.TestCase):
             "app.bot.handlers.trade_history_service",
             SimpleNamespace(
                 is_configured=True,
+                ensure_user=lambda *_args, **_kwargs: {"token_balance": 43},
                 get_user_stats=lambda _user_id: stats,
             ),
         ):
             text = asyncio.run(handle_stats("stats-user"))
 
-        self.assertIn("LAST 10 TRADES", text)
+        self.assertIn("LAST 10 SESSIONS", text)
         self.assertIn("Step Index 500", text)
         self.assertIn("+$5.19", text)
+        self.assertIn("Token balance: 43", text)
+        self.assertIn("5/13 sessions", text)
         self.assertIn("Win rate: 100.0%", text)
         self.assertIn("Direction accuracy: 52.0%", text)
         self.assertIn("Net PnL: +$166.22", text)
@@ -913,7 +1130,20 @@ class MarketDataTests(unittest.TestCase):
         connected_text = handle_status("status-user")
         disconnected_text = handle_logout("logout-user")
         faq_text = handle_faq()
-        stats_text = asyncio.run(handle_stats("status-user"))
+        with patch(
+            "app.bot.handlers.trade_history_service",
+            SimpleNamespace(
+                is_configured=True,
+                ensure_user=lambda *_args, **_kwargs: {"token_balance": 50},
+                get_user_stats=lambda _user_id: {
+                    "token_balance": 50,
+                    "recent": [],
+                    "real": {},
+                    "demo": {},
+                },
+            ),
+        ):
+            stats_text = asyncio.run(handle_stats("status-user"))
 
         self.assertNotIn("/connect", connected_text)
         self.assertNotIn("/status", connected_text)
@@ -1382,13 +1612,13 @@ class MarketDataTests(unittest.TestCase):
         service.advance_after_result("martingale-user", False)
         self.assertEqual(
             service.get_run("martingale-user").current_stake,
-            20.0,
+            22.5,
         )
 
         service.advance_after_result("martingale-user", False)
         self.assertEqual(
             service.get_run("martingale-user").current_stake,
-            40.0,
+            50.62,
         )
 
         service.advance_after_result("martingale-user", True)
@@ -1417,6 +1647,16 @@ class MarketDataTests(unittest.TestCase):
                 "BEARISH",
                 5.0,
             )
+
+    def test_auto_trade_run_can_only_be_confirmed_once(self):
+        service = AutoTradeService()
+        run = service.start_run("single-confirm-user", "step_100", "BULLISH", 1.0)
+
+        self.assertEqual(run.status, "awaiting_confirmation")
+        service.confirm_run("single-confirm-user")
+        self.assertEqual(run.status, "running")
+        with self.assertRaises(RuntimeError):
+            service.confirm_run("single-confirm-user")
 
 
 if __name__ == "__main__":

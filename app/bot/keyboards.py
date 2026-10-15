@@ -73,7 +73,7 @@ class TelegramKeyboard:
     def account_mode_keyboard(current_mode: str) -> object:
         mode = str(current_mode or "demo").lower()
 
-        demo_label = "🟡 Demo ✓" if mode == "demo" else "🟡 Demo"
+        demo_label = "🟠 Demo ✓" if mode == "demo" else "🟠 Demo"
         real_label = "🟢 Real ✓" if mode == "real" else "🟢 Real"
 
         return TelegramKeyboard._keyboard(

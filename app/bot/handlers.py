@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 from app.config import settings
 from app.services.account_service import AccountService
@@ -27,6 +28,7 @@ account_mode_service = AccountModeService()
 auto_trade_service = AutoTradeService()
 trade_history_service = TradeHistoryService()
 HELP_FOOTER = "\n\n💬 Need help with something? Ask Sammie @samueludoh_ng"
+logger = logging.getLogger(__name__)
 
 
 def _format_currency(
@@ -43,7 +45,7 @@ def _format_currency(
 
 
 def _mode_label(mode: str) -> str:
-    return "REAL 🟢" if mode == "real" else "DEMO 🟡"
+    return "REAL 🟢" if mode == "real" else "DEMO 🟠"
 
 
 def _display_name(display_name: str | None = None) -> str:
@@ -141,10 +143,21 @@ async def build_start_message(
         if demo_entry.get("available")
         else None
     )
-    tokens = balances.get(
-        "tokens",
-        auth_service.get_user_tokens(user_key),
-    )
+    try:
+        profile = await asyncio.to_thread(
+            trade_history_service.ensure_user,
+            user_key,
+            account_mode=mode,
+        )
+        await asyncio.to_thread(
+            trade_history_service.update_balance_snapshots,
+            user_key,
+            balances,
+        )
+        tokens = int(profile.get("token_balance", 50))
+    except Exception:
+        logger.exception("Could not sync dashboard profile with Supabase")
+        tokens = 0
 
     return _dashboard_text(
         mode,
@@ -169,7 +182,7 @@ def handle_account_mode_settings(
         "⚙️ ACCOUNT MODE\n\n"
         f"Selected mode: {_mode_label(mode)}\n\n"
         "Choose which Deriv Options account Yields should use for Auto Trade.\n\n"
-        "🟡 Demo uses your Demo account.\n"
+        "� Demo uses your Demo account.\n"
         "🟢 Real uses your Real account and can risk real funds.\n\n"
         "Switching to Real requires a separate confirmation. "
         "If the selected account cannot be verified, trading will stop "
@@ -332,9 +345,12 @@ def _trade_market_name(symbol: str) -> str:
 
 
 def _stats_mode_text(label: str, icon: str, stats: dict) -> str:
+    session_count = int(stats.get("session_count") or 0)
+    wins = int(stats.get("wins") or 0)
     return (
         f"{icon} {label}\n"
-        f"🏁 Win rate: {float(stats.get('win_rate') or 0):.1f}%\n"
+        f"🏁 Win rate: {float(stats.get('win_rate') or 0):.1f}% "
+        f"({wins}/{session_count} sessions)\n"
         f"🎯 Direction accuracy: {float(stats.get('accuracy') or 0):.1f}%\n"
         f"💵 Net PnL: {_format_pnl(stats.get('net_pnl'))}\n"
         f"💎 Tokens spent: {int(stats.get('tokens_spent') or 0)}"
@@ -351,6 +367,11 @@ async def handle_stats(telegram_user_id: str | int) -> str:
         )
 
     try:
+        profile = await asyncio.to_thread(
+            trade_history_service.ensure_user,
+            user_key,
+            account_mode=account_mode_service.get_mode(user_key),
+        )
         stats = await asyncio.to_thread(
             trade_history_service.get_user_stats,
             user_key,
@@ -362,32 +383,26 @@ async def handle_stats(telegram_user_id: str | int) -> str:
             f"{HELP_FOOTER}"
         )
 
-    recent_trades = stats.get("recent") or []
-    if recent_trades:
+    recent_sessions = stats.get("recent") or []
+    if recent_sessions:
         recent_text = []
-        for trade in recent_trades[:10]:
-            is_win = trade.get("outcome") == "win"
-            result_icon = "✅" if is_win else "❌"
-            mode_label = str(trade.get("account_mode") or "").title()
-            direction_icon = "🟢" if trade.get("direction") == "BULLISH" else "🔴"
-            direction_accuracy = trade.get("direction_accurate")
-            accuracy_icon = (
-                "✓" if direction_accuracy is True
-                else "✗" if direction_accuracy is False
-                else "·"
-            )
+        for session in recent_sessions[:10]:
+            profit = float(session.get("net_profit") or 0.0)
+            result_icon = "✅" if profit > 0 else "❌" if profit < 0 else "➖"
+            mode_label = str(session.get("account_mode") or "").upper()
             recent_text.append(
-                f"🎮 {result_icon} {_trade_market_name(str(trade.get('market_symbol') or 'Market'))} "
-                f"| {_format_pnl(trade.get('profit'))} | "
-                f"{direction_icon} {mode_label} {accuracy_icon}"
+                f"🎮 {result_icon} "
+                f"{_trade_market_name(str(session.get('market_symbol') or 'Market'))} "
+                f"| {_format_pnl(profit)} | {mode_label}"
             )
         recent_section = "\n".join(recent_text)
     else:
-        recent_section = "No settled trades yet."
+        recent_section = "No completed sessions yet."
 
     return (
-        "📊 YIELDS STATS | LAST 10 TRADES\n\n"
+        "📊 YIELDS STATS | LAST 10 SESSIONS\n\n"
         f"{recent_section}\n\n"
+        f"💎 Token balance: {int(stats.get('token_balance', profile.get('token_balance', 0)) or 0)}\n\n"
         "━━━━━━━━━━━━━━━━━━\n"
         f"{_stats_mode_text('Real', '💰', stats.get('real') or {})}\n\n"
         f"{_stats_mode_text('Demo', '🎮', stats.get('demo') or {})}"
@@ -408,7 +423,22 @@ async def handle_balance(telegram_user_id: str | int) -> str:
     balances = await account_service.get_live_balances(user_key)
     real = balances.get("real", {})
     demo = balances.get("demo", {})
-    tokens = balances.get("tokens", 50)
+    mode = account_mode_service.get_mode(user_key)
+    try:
+        profile = await asyncio.to_thread(
+            trade_history_service.ensure_user,
+            user_key,
+            account_mode=mode,
+        )
+        await asyncio.to_thread(
+            trade_history_service.update_balance_snapshots,
+            user_key,
+            balances,
+        )
+        tokens = int(profile.get("token_balance", 0))
+    except Exception:
+        logger.exception("Could not sync account balances with Supabase")
+        tokens = 0
 
     def format_value(entry: dict, label: str) -> str:
         if entry.get("available"):
@@ -425,8 +455,6 @@ async def handle_balance(telegram_user_id: str | int) -> str:
             return f"{label}: Unable to fetch"
 
         return f"{label}: Not available"
-
-    mode = account_mode_service.get_mode(user_key)
 
     return (
         "💰 DERIV BALANCES\n\n"

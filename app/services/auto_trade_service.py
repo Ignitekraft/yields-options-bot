@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -21,6 +22,7 @@ class TradeRunState:
     direction: str
     base_stake: float
     current_stake: float
+    session_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     cycle: int = 1
     martingale_step: int = 1
     max_cycles: int = settings.auto_trade_cycles
@@ -128,7 +130,7 @@ class AutoTradeService:
                 base_stake=round(stake, 2),
                 current_stake=round(stake, 2),
                 max_cycles=int(max_cycles),
-                status="running",
+                status="awaiting_confirmation",
                 account_mode=mode,
             )
             self._runs[key] = state
@@ -143,7 +145,7 @@ class AutoTradeService:
             state = self._runs.get(str(user_id))
             if state is None:
                 raise RuntimeError("AUTO_TRADE_NOT_FOUND")
-            if state.status not in {"pending", "awaiting_confirmation", "running"}:
+            if state.status not in {"pending", "awaiting_confirmation"}:
                 raise RuntimeError("AUTO_TRADE_NOT_CONFIRMABLE")
             state.status = "running"
             return state
