@@ -13,6 +13,7 @@ from app.bot.handlers import (
     handle_auto_trade_start,
     handle_start,
 )
+from app.bot.keyboards import TelegramKeyboard
 from app.config import settings
 from app.main import app, deriv_oauth_callback
 from app.models.ai_analysis import AutoTradeAnalysis
@@ -193,6 +194,15 @@ class MarketDataTests(unittest.TestCase):
         self.assertEqual(result["status"], "accepted")
         self.assertIn(result["symbol"], {"STPRNG", "STPRNG2", "STPRNG3", "STPRNG4", "STPRNG5"})
         self.assertIn("contract_id", result)
+
+    def test_stake_keyboard_excludes_blocked_values(self):
+        keyboard = TelegramKeyboard.stake_keyboard()
+        labels = [button.text for row in keyboard.inline_keyboard for button in row]
+
+        self.assertNotIn("$2", labels)
+        self.assertNotIn("$20", labels)
+        self.assertNotIn("$200", labels)
+        self.assertEqual(labels.count("$5"), 1)
 
     def test_state_dir_falls_back_when_render_path_is_not_writable(self):
         import app.services.auth_service as auth_service
