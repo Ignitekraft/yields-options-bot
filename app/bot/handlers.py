@@ -102,7 +102,7 @@ def handle_start(
             "• Real-time trade monitoring\n"
             "• Account balances\n"
             "• Yields Token features\n\n"
-            "Your Deriv account is connected securely through OAuth."
+            "Connect securely through Deriv OAuth using the button below."
         )
 
     mode = account_mode_service.get_mode(user_key)

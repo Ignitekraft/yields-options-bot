@@ -40,6 +40,10 @@ trade_execution_service = TradeExecutionService()
 trade_history_service = TradeHistoryService()
 logger = logging.getLogger(__name__)
 LOW_TOKEN_WARNING_THRESHOLD = 50
+LOW_TOKEN_WARNING_IMAGE_URL = (
+    "https://hvvwkijquaoqsbzhpyim.supabase.co/storage/v1/object/public/"
+    "Bot%20images/Low%20Tokens%20Warning%20Alert.png"
+)
 RELATIVE_STAKES = {
     "0_1": Decimal("0.001"),
     "0_5": Decimal("0.005"),
@@ -163,6 +167,23 @@ async def _safe_edit_message(query, text: str, **kwargs) -> None:
         pass
 
 
+async def _send_low_token_message(query, text: str, **kwargs) -> None:
+    message = getattr(query, "message", None)
+    reply_photo = getattr(message, "reply_photo", None)
+    if reply_photo is not None:
+        try:
+            await reply_photo(
+                photo=LOW_TOKEN_WARNING_IMAGE_URL,
+                caption=text,
+                **kwargs,
+            )
+            return
+        except Exception:
+            logger.exception("Could not send low-token warning image")
+
+    await _safe_edit_message(query, text, **kwargs)
+
+
 async def _get_trade_token_balance(update, query, account_mode: str) -> int | None:
     user = update.effective_user
     try:
@@ -194,14 +215,22 @@ async def _get_trade_token_balance(update, query, account_mode: str) -> int | No
         return None
 
 
+async def _prompt_connect(update, query) -> None:
+    user_id = update.effective_user.id
+    await _safe_edit_message(
+        query,
+        handle_start(
+            user_id,
+            display_name=getattr(update.effective_user, "first_name", None),
+        ),
+        reply_markup=TelegramKeyboard.start_keyboard(),
+    )
+
+
 async def _show_auto_trade_setup(update, query) -> None:
     user_id = update.effective_user.id
     if not auth_service.get_valid_access_token(str(user_id)):
-        await _safe_edit_message(
-            query,
-            "🔐 Connect your Deriv account before starting Auto Trade.",
-            reply_markup=TelegramKeyboard.connect_keyboard(),
-        )
+        await _prompt_connect(update, query)
         return
 
     setup = build_auto_trade_setup(user_id)
@@ -232,6 +261,10 @@ async def _show_auto_trade_setup(update, query) -> None:
 
 async def _handle_auto_trade_entry(update, query, *, allow_low_balance: bool = False) -> None:
     user_id = update.effective_user.id
+    if not auth_service.get_valid_access_token(str(user_id)):
+        await _prompt_connect(update, query)
+        return
+
     token_balance = await _get_trade_token_balance(
         update,
         query,
@@ -241,7 +274,7 @@ async def _handle_auto_trade_entry(update, query, *, allow_low_balance: bool = F
         return
 
     if token_balance <= 0:
-        await _safe_edit_message(
+        await _send_low_token_message(
             query,
             "💎 You’re out of Yields Tokens, so Auto Trade can’t start. "
             "No trade has been placed. Please contact support to top up.",
@@ -249,7 +282,7 @@ async def _handle_auto_trade_entry(update, query, *, allow_low_balance: bool = F
         return
 
     if token_balance <= LOW_TOKEN_WARNING_THRESHOLD and not allow_low_balance:
-        await _safe_edit_message(
+        await _send_low_token_message(
             query,
             "💎 LOW TOKEN BALANCE\n\n"
             f"You have {token_balance} token{'s' if token_balance != 1 else ''} available.\n\n"
@@ -648,10 +681,11 @@ async def _run_auto_trade(update, state) -> None:
                 current,
                 "failed" if status in {"unknown_buy_outcome", "token_service_error"} else "stopped",
             )
-            await _safe_edit_message(
-                query,
-                await _session_end_message(user_id, current, status_reason),
-            )
+            session_message = await _session_end_message(user_id, current, status_reason)
+            if status == "insufficient_tokens":
+                await _send_low_token_message(query, session_message)
+            else:
+                await _safe_edit_message(query, session_message)
             return
 
         market_label = friendly_market_name(current.market_symbol or current.symbol)
@@ -701,6 +735,13 @@ async def dispatch_callback(update, context) -> None:
 
     if data == "START_DASHBOARD":
         display_name = getattr(update.effective_user, "first_name", None) or getattr(update.effective_user, "username", None) or "friend"
+        if not auth_service.get_valid_access_token(user_key):
+            await query.edit_message_text(
+                handle_start(user_id, display_name=display_name),
+                reply_markup=TelegramKeyboard.start_keyboard(),
+            )
+            return
+
         await query.edit_message_text(
             await build_start_message(user_id, display_name=display_name),
             reply_markup=TelegramKeyboard.dashboard_keyboard(),
@@ -908,6 +949,10 @@ async def dispatch_callback(update, context) -> None:
         return
 
     if data == "AUTO_TRADE_CONFIRM":
+        if not auth_service.get_valid_access_token(user_key):
+            await _prompt_connect(update, query)
+            return
+
         state = auto_trade_service.get_run(user_id)
 
         if state is None:
@@ -950,7 +995,7 @@ async def dispatch_callback(update, context) -> None:
             )
             token_balance = int(profile.get("token_balance", 0))
             if token_balance <= 0:
-                await _safe_edit_message(
+                await _send_low_token_message(
                     query,
                     "💎 You’re out of Yields Tokens, so Auto Trade can’t start. "
                     "No trade has been placed. Please contact support to top up.",
@@ -991,6 +1036,10 @@ async def dispatch_callback(update, context) -> None:
         return
 
     if data.startswith("AUTO_TRADE_STAKE_"):
+        if not auth_service.get_valid_access_token(user_key):
+            await _prompt_connect(update, query)
+            return
+
         percentage_key = data.removeprefix("AUTO_TRADE_STAKE_")
         if percentage_key not in RELATIVE_STAKES:
             await query.edit_message_text(
@@ -1020,7 +1069,7 @@ async def dispatch_callback(update, context) -> None:
 
         token_balance = int(profile.get("token_balance", 0))
         if token_balance <= 0:
-            await _safe_edit_message(
+            await _send_low_token_message(
                 query,
                 "💎 You’re out of Yields Tokens, so Auto Trade can’t start. "
                 "No trade has been placed. Please contact support to top up.",

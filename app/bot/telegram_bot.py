@@ -5,6 +5,7 @@ import logging
 
 from app.bot.callbacks import dispatch_callback
 from app.bot.handlers import (
+    auth_service,
     build_menu_message,
     handle_balance,
     handle_connect,
@@ -39,7 +40,11 @@ async def _send_menu_message(update: Update) -> None:
         last_name=getattr(user, "last_name", None),
         username=getattr(user, "username", None),
     )
-    keyboard = TelegramKeyboard.menu_keyboard(settings.community_url)
+    keyboard = (
+        TelegramKeyboard.menu_keyboard(settings.community_url)
+        if auth_service.get_valid_access_token(str(user.id))
+        else TelegramKeyboard.start_keyboard()
+    )
     try:
         await update.message.reply_photo(
             photo=settings.menu_image_url,

@@ -10,7 +10,9 @@ from unittest.mock import AsyncMock, patch
 import httpx
 
 from app.bot.callbacks import (
+    _handle_auto_trade_entry,
     _run_auto_trade,
+    _send_low_token_message,
     _show_auto_trade_setup,
     _setup_photo_url,
     _session_end_message,
@@ -730,12 +732,22 @@ class MarketDataTests(unittest.TestCase):
             def __init__(self):
                 self.data = "AUTO_TRADE_CONFIRM"
                 self.edited = None
+                self.photo = None
+                self.message = SimpleNamespace(reply_photo=self.reply_photo)
+                self.photo = None
+                self.message = SimpleNamespace(reply_photo=self.reply_photo)
 
             async def answer(self):
                 return None
 
             async def edit_message_text(self, text, **kwargs):
                 self.edited = text
+
+            async def reply_photo(self, **kwargs):
+                self.photo = kwargs
+
+            async def reply_photo(self, **kwargs):
+                self.photo = kwargs
 
         class FakeUpdate:
             def __init__(self):
@@ -777,12 +789,17 @@ class MarketDataTests(unittest.TestCase):
             def __init__(self):
                 self.data = "AUTO_TRADE_CONFIRM"
                 self.edited = None
+                self.photo = None
+                self.message = SimpleNamespace(reply_photo=self.reply_photo)
 
             async def answer(self):
                 return None
 
             async def edit_message_text(self, text, **kwargs):
                 self.edited = text
+
+            async def reply_photo(self, **kwargs):
+                self.photo = kwargs
 
         class FakeUpdate:
             def __init__(self):
@@ -795,6 +812,9 @@ class MarketDataTests(unittest.TestCase):
         update = FakeUpdate()
 
         with patch("app.bot.callbacks.auto_trade_service", run_state), patch(
+            "app.bot.callbacks.auth_service.get_valid_access_token",
+            return_value="access-token",
+        ), patch(
             "app.bot.callbacks.trade_history_service",
             SimpleNamespace(
                 ensure_user=lambda *_args, **_kwargs: {"token_balance": 0},
@@ -806,8 +826,9 @@ class MarketDataTests(unittest.TestCase):
         ) as run_auto_trade_mock:
             asyncio.run(dispatch_callback(update, None))
 
-        self.assertIn("out of Yields Tokens", update.callback_query.edited)
-        self.assertIn("No trade has been placed", update.callback_query.edited)
+        self.assertIn("out of Yields Tokens", update.callback_query.photo["caption"])
+        self.assertIn("No trade has been placed", update.callback_query.photo["caption"])
+        self.assertIn("Low%20Tokens%20Warning%20Alert.png", update.callback_query.photo["photo"])
         create_session.assert_not_called()
         run_auto_trade_mock.assert_not_awaited()
 
@@ -817,6 +838,8 @@ class MarketDataTests(unittest.TestCase):
                 self.data = "START_AUTO_TRADE"
                 self.edited = None
                 self.reply_markup = None
+                self.photo = None
+                self.message = SimpleNamespace(reply_photo=self.reply_photo)
 
             async def answer(self):
                 return None
@@ -824,6 +847,9 @@ class MarketDataTests(unittest.TestCase):
             async def edit_message_text(self, text, **kwargs):
                 self.edited = text
                 self.reply_markup = kwargs.get("reply_markup")
+
+            async def reply_photo(self, **kwargs):
+                self.photo = kwargs
 
         class FakeUpdate:
             def __init__(self):
@@ -833,6 +859,9 @@ class MarketDataTests(unittest.TestCase):
         update = FakeUpdate()
 
         with patch(
+            "app.bot.callbacks.auth_service.get_valid_access_token",
+            return_value="access-token",
+        ), patch(
             "app.bot.callbacks.trade_history_service",
             SimpleNamespace(
                 ensure_user=lambda *_args, **_kwargs: {"token_balance": 50},
@@ -842,10 +871,15 @@ class MarketDataTests(unittest.TestCase):
         ) as build_setup:
             asyncio.run(dispatch_callback(update, None))
 
-        self.assertIn("50 tokens", update.callback_query.edited)
-        self.assertIn("LOW TOKEN BALANCE", update.callback_query.edited)
+        self.assertIn("50 tokens", update.callback_query.photo["caption"])
+        self.assertIn("LOW TOKEN BALANCE", update.callback_query.photo["caption"])
+        self.assertEqual(
+            update.callback_query.photo["photo"],
+            "https://hvvwkijquaoqsbzhpyim.supabase.co/storage/v1/object/public/"
+            "Bot%20images/Low%20Tokens%20Warning%20Alert.png",
+        )
         build_setup.assert_not_called()
-        rows = update.callback_query.reply_markup.inline_keyboard
+        rows = update.callback_query.photo["reply_markup"].inline_keyboard
         self.assertEqual(
             [[button.text for button in row] for row in rows],
             [
@@ -856,6 +890,67 @@ class MarketDataTests(unittest.TestCase):
         self.assertEqual(
             rows[1][1].url,
             "https://t.me/samueludoh_ng",
+        )
+
+    def test_unauthenticated_auto_trade_entry_offers_oauth_connect_button(self):
+        class FakeQuery:
+            def __init__(self):
+                self.edited = None
+                self.reply_markup = None
+
+            async def edit_message_text(self, text, **kwargs):
+                self.edited = text
+                self.reply_markup = kwargs.get("reply_markup")
+
+        class FakeUpdate:
+            effective_user = SimpleNamespace(id="unauthenticated-user", first_name="Sam")
+
+        query = FakeQuery()
+        update = FakeUpdate()
+        with patch(
+            "app.bot.callbacks.auth_service.get_valid_access_token",
+            return_value=None,
+        ), patch(
+            "app.bot.callbacks.trade_history_service.ensure_user",
+        ) as ensure_user:
+            asyncio.run(_handle_auto_trade_entry(update, query))
+
+        self.assertIn("Connect your Deriv account", query.edited)
+        self.assertEqual(
+            query.reply_markup.inline_keyboard[0][0].callback_data,
+            "START_CONNECT",
+        )
+        ensure_user.assert_not_called()
+
+    def test_start_menu_offers_connect_button_for_unauthenticated_user(self):
+        class FakeMessage:
+            def __init__(self):
+                self.reply_markup = None
+
+            async def reply_photo(self, **kwargs):
+                self.reply_markup = kwargs["reply_markup"]
+
+        update = SimpleNamespace(
+            effective_user=SimpleNamespace(
+                id="unauthenticated-start-user",
+                first_name="Sam",
+                last_name=None,
+                username=None,
+            ),
+            message=FakeMessage(),
+        )
+        with patch(
+            "app.bot.telegram_bot.auth_service.get_valid_access_token",
+            return_value=None,
+        ), patch(
+            "app.bot.telegram_bot.build_menu_message",
+            new=AsyncMock(return_value="Connect your Deriv account"),
+        ):
+            asyncio.run(_send_menu_message(update))
+
+        self.assertEqual(
+            update.message.reply_markup.inline_keyboard[0][0].callback_data,
+            "START_CONNECT",
         )
 
     def test_trade_anyway_rechecks_balance_before_continuing(self):
@@ -879,6 +974,9 @@ class MarketDataTests(unittest.TestCase):
         show_setup = AsyncMock()
 
         with patch(
+            "app.bot.callbacks.auth_service.get_valid_access_token",
+            return_value="access-token",
+        ), patch(
             "app.bot.callbacks.trade_history_service",
             SimpleNamespace(
                 ensure_user=lambda *_args, **_kwargs: {"token_balance": 1},
@@ -907,6 +1005,9 @@ class MarketDataTests(unittest.TestCase):
         show_setup = AsyncMock()
 
         with patch(
+            "app.bot.callbacks.auth_service.get_valid_access_token",
+            return_value="access-token",
+        ), patch(
             "app.bot.callbacks.trade_history_service",
             SimpleNamespace(
                 ensure_user=lambda *_args, **_kwargs: {"token_balance": 51},
@@ -924,12 +1025,17 @@ class MarketDataTests(unittest.TestCase):
             def __init__(self):
                 self.data = "AUTO_TRADE_TRADE_ANYWAY"
                 self.edited = None
+                self.photo = None
+                self.message = SimpleNamespace(reply_photo=self.reply_photo)
 
             async def answer(self):
                 return None
 
             async def edit_message_text(self, text, **kwargs):
                 self.edited = text
+
+            async def reply_photo(self, **kwargs):
+                self.photo = kwargs
 
         class FakeUpdate:
             def __init__(self):
@@ -940,6 +1046,9 @@ class MarketDataTests(unittest.TestCase):
         show_setup = AsyncMock()
 
         with patch(
+            "app.bot.callbacks.auth_service.get_valid_access_token",
+            return_value="access-token",
+        ), patch(
             "app.bot.callbacks.trade_history_service",
             SimpleNamespace(
                 ensure_user=lambda *_args, **_kwargs: {"token_balance": 0},
@@ -950,7 +1059,8 @@ class MarketDataTests(unittest.TestCase):
         ):
             asyncio.run(dispatch_callback(update, None))
 
-        self.assertIn("out of Yields Tokens", update.callback_query.edited)
+        self.assertIn("out of Yields Tokens", update.callback_query.photo["caption"])
+        self.assertIn("Low%20Tokens%20Warning%20Alert.png", update.callback_query.photo["photo"])
         show_setup.assert_not_awaited()
 
     def test_auto_trade_setup_message_uses_a_single_scan_result(self):
@@ -1051,6 +1161,9 @@ class MarketDataTests(unittest.TestCase):
             "app.bot.callbacks.auto_trade_service.start_run",
             return_value=object(),
         ), patch(
+            "app.bot.callbacks.auth_service.get_valid_access_token",
+            return_value="access-token",
+        ), patch(
             "app.bot.callbacks.trade_history_service",
             SimpleNamespace(
                 ensure_user=lambda *_args, **_kwargs: {"token_balance": 50},
@@ -1125,6 +1238,9 @@ class MarketDataTests(unittest.TestCase):
         ), patch(
             "app.bot.callbacks.friendly_market_name",
             return_value="Step Index 300",
+        ), patch(
+            "app.bot.callbacks.auth_service.get_valid_access_token",
+            return_value="access-token",
         ), patch(
             "app.bot.callbacks.trade_history_service",
             SimpleNamespace(
@@ -1210,6 +1326,9 @@ class MarketDataTests(unittest.TestCase):
                 }
             ),
         ), patch(
+            "app.bot.callbacks.auth_service.get_valid_access_token",
+            return_value="access-token",
+        ), patch(
             "app.bot.callbacks.trade_history_service",
             trade_history,
         ):
@@ -1267,6 +1386,9 @@ class MarketDataTests(unittest.TestCase):
         with patch("app.bot.callbacks.auto_trade_service", run_service), patch(
             "app.bot.callbacks.account_mode_service.get_mode",
             return_value="demo",
+        ), patch(
+            "app.bot.callbacks.auth_service.get_valid_access_token",
+            return_value="access-token",
         ), patch(
             "app.bot.callbacks.trade_history_service",
             trade_history,
@@ -1923,7 +2045,7 @@ class MarketDataTests(unittest.TestCase):
 
         self.assertIn("🤖 YIELDS", message)
         self.assertIn("Connect your Deriv account", message)
-        self.assertIn("OAuth", message)
+        self.assertIn("Connect securely through Deriv OAuth", message)
 
     def test_authenticated_user_sees_dashboard(self):
         auth = AuthService()
