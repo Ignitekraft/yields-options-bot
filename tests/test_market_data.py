@@ -1100,6 +1100,7 @@ class MarketDataTests(unittest.TestCase):
         service.confirm_run("three-loss-report-user")
         executed_stakes = []
         cycle_reports = []
+        end_photos = []
 
         class FakeCycleMessage:
             def __init__(self, text, parse_mode=None):
@@ -1117,6 +1118,9 @@ class MarketDataTests(unittest.TestCase):
                 report = FakeCycleMessage(text, kwargs.get("parse_mode"))
                 cycle_reports.append(report)
                 return report
+
+            async def reply_photo(self, **kwargs):
+                end_photos.append(kwargs)
 
         class FakeQuery:
             def __init__(self):
@@ -1208,6 +1212,16 @@ class MarketDataTests(unittest.TestCase):
             cycle_reports[1].text,
         )
         self.assertEqual(state.status, "loss_limit")
+        self.assertEqual(len(end_photos), 1)
+        self.assertEqual(
+            end_photos[0]["photo"],
+            "https://hvvwkijquaoqsbzhpyim.supabase.co/storage/v1/object/public/"
+            "Bot%20images/Bullish%20and%20Bearish%20Market%20Setups%202.jpg",
+        )
+        self.assertEqual(
+            end_photos[0]["caption"],
+            "Session stopped after three losses.",
+        )
 
     def test_completed_auto_trade_sends_victory_receipt_after_cycle_report(self):
         service = AutoTradeService()
@@ -1292,12 +1306,13 @@ class MarketDataTests(unittest.TestCase):
             "🏆 Victory! Session completed.",
         )
 
-    def test_victory_image_matches_direction_and_falls_back_to_text(self):
+    def test_session_end_image_matches_direction_and_falls_back_to_new_text(self):
         class FakeMessage:
             def __init__(self, fail_photo=False):
                 self.photos = []
                 self.replies = []
                 self.fail_photo = fail_photo
+                self.edits = []
 
             async def reply_photo(self, **kwargs):
                 if self.fail_photo:
@@ -1307,9 +1322,12 @@ class MarketDataTests(unittest.TestCase):
             async def reply_text(self, text):
                 self.replies.append(text)
 
-        async def run_case(direction, fail_photo=False):
+            async def edit_text(self, text):
+                self.edits.append(text)
+
+        async def run_case(direction, status, fail_photo=False):
             message = FakeMessage(fail_photo=fail_photo)
-            state = SimpleNamespace(status="completed", direction=direction)
+            state = SimpleNamespace(status=status, direction=direction)
             query = SimpleNamespace(message=message)
             with patch(
                 "app.bot.callbacks._session_end_message",
@@ -1320,15 +1338,24 @@ class MarketDataTests(unittest.TestCase):
                 await _send_session_end_message(query, "user", state)
             return message
 
-        bullish = asyncio.run(run_case("BULLISH"))
+        bullish = asyncio.run(run_case("BULLISH", "loss_limit"))
         self.assertEqual(
             bullish.photos[0]["photo"],
             "https://hvvwkijquaoqsbzhpyim.supabase.co/storage/v1/object/public/"
             "Bot%20images/Bullish%20and%20Bearish%20Market%20Setups.jpg",
         )
+        self.assertEqual(bullish.edits, [])
 
-        fallback = asyncio.run(run_case("BEARISH", fail_photo=True))
+        bearish = asyncio.run(run_case("BEARISH", "completed"))
+        self.assertEqual(
+            bearish.photos[0]["photo"],
+            "https://hvvwkijquaoqsbzhpyim.supabase.co/storage/v1/object/public/"
+            "Bot%20images/Bullish%20and%20Bearish%20Market%20Setups%202.jpg",
+        )
+
+        fallback = asyncio.run(run_case("BEARISH", "loss_limit", fail_photo=True))
         self.assertEqual(fallback.replies, ["Victory!"])
+        self.assertEqual(fallback.edits, [])
 
     def test_settlement_failure_updates_pending_report_and_ends_run(self):
         service = AutoTradeService()

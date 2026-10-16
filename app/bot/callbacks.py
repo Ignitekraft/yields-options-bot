@@ -244,17 +244,16 @@ async def _send_session_end_message(
 ) -> None:
     text = await _session_end_message(user_id, state, reason)
     message = getattr(query, "message", None)
-    if state.status == "completed":
-        reply_photo = getattr(message, "reply_photo", None)
-        photo_url = VICTORY_SETUP_IMAGE_URLS.get(
-            str(state.direction or "").upper()
-        )
-        if reply_photo is not None and photo_url is not None:
-            try:
-                await reply_photo(photo=photo_url, caption=text)
-                return
-            except Exception:
-                logger.exception("Could not send Auto Trade victory image")
+    reply_photo = getattr(message, "reply_photo", None)
+    photo_url = VICTORY_SETUP_IMAGE_URLS.get(
+        str(state.direction or "").upper()
+    )
+    if reply_photo is not None and photo_url is not None:
+        try:
+            await reply_photo(photo=photo_url, caption=text)
+            return
+        except Exception:
+            logger.exception("Could not send Auto Trade session image")
 
     reply_text = getattr(message, "reply_text", None)
     if reply_text is not None:
@@ -263,7 +262,7 @@ async def _send_session_end_message(
             return
         except Exception:
             logger.exception("Could not send Auto Trade session-end message")
-    await _safe_edit_message(query, text)
+    logger.error("Could not send Auto Trade session-end message as a new reply")
 
 
 async def _send_low_token_message(query, text: str, **kwargs) -> None:
@@ -280,7 +279,14 @@ async def _send_low_token_message(query, text: str, **kwargs) -> None:
         except Exception:
             logger.exception("Could not send low-token warning image")
 
-    await _safe_edit_message(query, text, **kwargs)
+    reply_text = getattr(message, "reply_text", None)
+    if reply_text is not None:
+        try:
+            await reply_text(text, **kwargs)
+            return
+        except Exception:
+            logger.exception("Could not send low-token warning as a new message")
+    logger.error("Could not send low-token warning as a new message")
 
 
 async def _send_scan_message(query, text: str, **kwargs) -> None:
@@ -745,9 +751,11 @@ async def _run_auto_trade(update, state) -> None:
 
         if current.status == "cancelled":
             await _save_session_summary(current, "cancelled")
-            await _safe_edit_message(
+            await _send_session_end_message(
                 query,
-                await _session_end_message(user_id, current, "Cancelled by you."),
+                user_id,
+                current,
+                "Cancelled by you.",
             )
             return
 
@@ -762,27 +770,23 @@ async def _run_auto_trade(update, state) -> None:
 
         if current.status == "loss_limit":
             await _save_session_summary(current, "stopped")
-            await _safe_edit_message(
+            await _send_session_end_message(
                 query,
-                await _session_end_message(
-                    user_id,
-                    current,
-                    "Auto Trade stopped after "
-                    f"{auto_trade_service.MAX_CONSECUTIVE_LOSSES} consecutive losses "
-                    "to limit further exposure.",
-                ),
+                user_id,
+                current,
+                "Auto Trade stopped after "
+                f"{auto_trade_service.MAX_CONSECUTIVE_LOSSES} consecutive losses "
+                "to limit further exposure.",
             )
             return
 
         if current.status not in {"running", "monitoring"}:
             await _save_session_summary(current, "failed")
-            await _safe_edit_message(
+            await _send_session_end_message(
                 query,
-                await _session_end_message(
-                    user_id,
-                    current,
-                    f"Auto Trade stopped safely ({current.status.replace('_', ' ')}).",
-                ),
+                user_id,
+                current,
+                f"Auto Trade stopped safely ({current.status.replace('_', ' ')}).",
             )
             return
 
@@ -819,13 +823,11 @@ async def _run_auto_trade(update, state) -> None:
             except (TypeError, ValueError):
                 current = auto_trade_service.finish_run(user_id, "settlement_data_error") or current
                 await _save_session_summary(current, "failed")
-                await _safe_edit_message(
+                await _send_session_end_message(
                     query,
-                    await _session_end_message(
-                        user_id,
-                        current,
-                        "Settlement data could not be validated. No further trade was placed.",
-                    ),
+                    user_id,
+                    current,
+                    "Settlement data could not be validated. No further trade was placed.",
                 )
                 return
 
@@ -934,13 +936,11 @@ async def _run_auto_trade(update, state) -> None:
         if account_mode_service.get_mode(user_id) != current.account_mode:
             current = auto_trade_service.finish_run(user_id, "account_mode_changed") or current
             await _save_session_summary(current, "stopped")
-            await _safe_edit_message(
+            await _send_session_end_message(
                 query,
-                await _session_end_message(
-                    user_id,
-                    current,
-                    "Account mode changed. No further purchase was attempted.",
-                ),
+                user_id,
+                current,
+                "Account mode changed. No further purchase was attempted.",
             )
             return
 
@@ -975,19 +975,19 @@ async def _run_auto_trade(update, state) -> None:
                 current,
                 "failed" if status in {"unknown_buy_outcome", "token_service_error"} else "stopped",
             )
-            session_message = (
-                TOKEN_EXHAUSTED_MESSAGE
-                if status == "insufficient_tokens"
-                else await _session_end_message(user_id, current, status_reason)
-            )
             if status == "insufficient_tokens":
                 await _send_low_token_message(
                     query,
-                    session_message,
+                    TOKEN_EXHAUSTED_MESSAGE,
                     reply_markup=TelegramKeyboard.exhausted_token_keyboard(),
                 )
             else:
-                await _safe_edit_message(query, session_message)
+                await _send_session_end_message(
+                    query,
+                    user_id,
+                    current,
+                    status_reason,
+                )
             return
 
         market_label = friendly_market_name(current.market_symbol or current.symbol)
@@ -1465,13 +1465,11 @@ async def dispatch_callback(update, context) -> None:
             )
         else:
             await _save_session_summary(state, "cancelled")
-            await _safe_edit_message(
+            await _send_session_end_message(
                 query,
-                await _session_end_message(
-                    user_id,
-                    state,
-                    "Cancelled by you. An already purchased contract was allowed to settle.",
-                )
+                user_id,
+                state,
+                "Cancelled by you. An already purchased contract was allowed to settle.",
             )
         return
 
