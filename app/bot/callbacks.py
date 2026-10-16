@@ -205,6 +205,23 @@ async def _safe_edit_message(query, text: str, **kwargs) -> None:
         pass
 
 
+async def _send_session_end_message(
+    query,
+    user_id: str | int,
+    state,
+    reason: str | None = None,
+) -> None:
+    text = await _session_end_message(user_id, state, reason)
+    reply_text = getattr(getattr(query, "message", None), "reply_text", None)
+    if reply_text is not None:
+        try:
+            await reply_text(text)
+            return
+        except Exception:
+            logger.exception("Could not send Auto Trade session-end message")
+    await _safe_edit_message(query, text)
+
+
 async def _send_low_token_message(query, text: str, **kwargs) -> None:
     message = getattr(query, "message", None)
     reply_photo = getattr(message, "reply_photo", None)
@@ -662,6 +679,7 @@ async def _monitor_settlement(user_id: str | int, state) -> dict:
         contract_id=state.contract_id,
         ws_url=ws_url,
         timeout_seconds=75,
+        market_symbol=state.market_symbol or state.symbol,
     )
 
 
@@ -691,9 +709,10 @@ async def _run_auto_trade(update, state) -> None:
 
         if current.status == "completed":
             await _save_session_summary(current, "completed")
-            await _safe_edit_message(
+            await _send_session_end_message(
                 query,
-                await _session_end_message(user_id, current),
+                user_id,
+                current,
             )
             return
 
@@ -826,7 +845,7 @@ async def _run_auto_trade(update, state) -> None:
             )
             if not won and current.status == "running":
                 result_text += (
-                    "\n\n🔄 Smart Scaling activated."
+                    "\n\n🔄 Smart Scaling activated. "
                     f"Next stake: ${current.current_stake:.2f}"
                 )
             elif current.status == "loss_limit":

@@ -677,6 +677,7 @@ class TradeExecutionService:
         contract_id: str,
         ws_url: str,
         timeout_seconds: int = 75,
+        market_symbol: str | None = None,
     ) -> dict[str, Any]:
         """Monitor a contract until Deriv reports it has settled."""
 
@@ -692,6 +693,7 @@ class TradeExecutionService:
 
         req_id = self.next_req_id()
         normalized_contract_id = self.normalize_contract_id(contract_id)
+        tick_req_id = self.next_req_id() if market_symbol else None
 
         payload = {
             "proposal_open_contract": 1,
@@ -710,11 +712,23 @@ class TradeExecutionService:
             await websocket.send(
                 json.dumps(payload)
             )
+            if market_symbol and tick_req_id is not None:
+                await websocket.send(
+                    json.dumps(
+                        {
+                            "ticks": self.normalize_step_symbol(market_symbol),
+                            "subscribe": 1,
+                            "req_id": tick_req_id,
+                        }
+                    )
+                )
 
             deadline = (
                 asyncio.get_running_loop().time()
                 + timeout_seconds
             )
+            entry_price = None
+            latest_tick = None
 
             while True:
                 remaining = (
@@ -747,16 +761,41 @@ class TradeExecutionService:
                     "echo_req"
                 )
 
+                tick = response.get("tick")
                 if isinstance(echo_req, dict):
                     response_req_id = (
                         echo_req.get("req_id")
                     )
-
                     if (
-                        response_req_id is not None
-                        and response_req_id != req_id
+                        response_req_id == tick_req_id
+                        and "error" in response
                     ):
+                        raise DerivRequestError(
+                            self._error_message(response)
+                        )
+                    if response_req_id == tick_req_id:
+                        if isinstance(tick, dict):
+                            try:
+                                quote = float(tick.get("quote"))
+                            except (TypeError, ValueError):
+                                continue
+                            if math.isfinite(quote) and quote > 0:
+                                latest_tick = quote
+                                if entry_price is None:
+                                    entry_price = quote
                         continue
+                    if response_req_id is not None and response_req_id != req_id:
+                        continue
+                elif isinstance(tick, dict):
+                    try:
+                        quote = float(tick.get("quote"))
+                    except (TypeError, ValueError):
+                        continue
+                    if math.isfinite(quote) and quote > 0:
+                        latest_tick = quote
+                        if entry_price is None:
+                            entry_price = quote
+                    continue
 
                 if "error" in response:
                     raise DerivRequestError(
@@ -781,6 +820,17 @@ class TradeExecutionService:
                     != str(normalized_contract_id)
                 ):
                     continue
+
+                if entry_price is None:
+                    entry_price = self._contract_price(
+                        contract,
+                        "entry_tick",
+                        "entry_spot",
+                        "entry_tick_display_value",
+                        "entry_spot_display_value",
+                        "current_spot",
+                        "spot",
+                    )
 
                 if bool(
                     contract.get("is_sold")
@@ -828,14 +878,44 @@ class TradeExecutionService:
                         "sell_price": contract.get(
                             "sell_price"
                         ),
-                        "entry_tick": contract.get(
-                            "entry_tick"
+                        "entry_tick": (
+                            self._contract_price(
+                                contract,
+                                "entry_tick",
+                                "entry_spot",
+                                "entry_tick_display_value",
+                                "entry_spot_display_value",
+                            )
+                            or entry_price
                         ),
-                        "exit_tick": contract.get(
-                            "exit_tick"
+                        "exit_tick": (
+                            self._contract_price(
+                                contract,
+                                "exit_tick",
+                                "exit_spot",
+                                "exit_tick_display_value",
+                                "exit_spot_display_value",
+                                "current_spot",
+                                "spot",
+                            )
+                            or latest_tick
                         ),
                         "contract": contract,
                     }
+
+    @staticmethod
+    def _contract_price(contract: dict[str, Any], *keys: str) -> float | None:
+        for key in keys:
+            value = contract.get(key)
+            if isinstance(value, dict):
+                value = value.get("display_value", value.get("value"))
+            try:
+                price = float(value)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(price) and price > 0:
+                return price
+        return None
 
     @classmethod
     def calculate_next_stake(

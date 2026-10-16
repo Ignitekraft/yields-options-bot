@@ -481,6 +481,83 @@ class MarketDataTests(unittest.TestCase):
         self.assertEqual(result["status"], "settled")
         self.assertIsInstance(result["contract_id"], str)
         self.assertEqual(result["contract_id"], "123456789")
+        self.assertEqual(result["entry_tick"], 100)
+        self.assertEqual(result["exit_tick"], 101)
+
+    def test_monitor_contract_uses_live_ticks_when_contract_ticks_are_missing(self):
+        service = TradeExecutionService()
+
+        class FakeWebSocket:
+            def __init__(self):
+                self.sent = []
+                self.responses = None
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return None
+
+            async def send(self, payload):
+                self.sent.append(json.loads(payload))
+                if len(self.sent) == 2:
+                    contract_req_id = self.sent[0]["req_id"]
+                    tick_req_id = self.sent[1]["req_id"]
+                    self.responses = iter(
+                        [
+                            json.dumps(
+                                {
+                                    "echo_req": {"req_id": contract_req_id},
+                                    "proposal_open_contract": {
+                                        "contract_id": 123456789,
+                                        "is_sold": False,
+                                        "current_spot": 100.25,
+                                    },
+                                }
+                            ),
+                            json.dumps(
+                                {
+                                    "echo_req": {"req_id": tick_req_id},
+                                    "tick": {"quote": 100.75},
+                                }
+                            ),
+                            json.dumps(
+                                {
+                                    "echo_req": {"req_id": contract_req_id},
+                                    "proposal_open_contract": {
+                                        "contract_id": 123456789,
+                                        "is_sold": True,
+                                        "profit": 1.0,
+                                        "payout": 2.0,
+                                    },
+                                }
+                            ),
+                        ]
+                    )
+
+            async def recv(self):
+                return next(self.responses)
+
+        fake_websocket = FakeWebSocket()
+        with patch(
+            "app.services.trade_execution_service.websockets.connect",
+            return_value=fake_websocket,
+        ):
+            result = asyncio.run(
+                service.monitor_contract(
+                    "123456789",
+                    "wss://example.com",
+                    timeout_seconds=1,
+                    market_symbol="STPRNG",
+                )
+            )
+
+        self.assertEqual(
+            fake_websocket.sent[1]["ticks"],
+            "STPRNG",
+        )
+        self.assertEqual(result["entry_tick"], 100.25)
+        self.assertEqual(result["exit_tick"], 100.75)
 
     def test_execute_trade_retries_invalid_asset_candidates(self):
         class FakeWebSocket:
@@ -872,6 +949,78 @@ class MarketDataTests(unittest.TestCase):
             cycle_reports[1].text,
         )
         self.assertEqual(state.status, "loss_limit")
+
+    def test_completed_auto_trade_sends_victory_receipt_after_cycle_report(self):
+        service = AutoTradeService()
+        state = service.start_run(
+            "victory-receipt-user",
+            "step_500",
+            "BEARISH",
+            10.0,
+            max_cycles=1,
+            account_mode="demo",
+        )
+        service.confirm_run("victory-receipt-user")
+
+        class FakeMessage:
+            def __init__(self):
+                self.replies = []
+
+            async def reply_text(self, text, **_kwargs):
+                self.replies.append(text)
+                return SimpleNamespace(edit_text=AsyncMock())
+
+        class FakeQuery:
+            def __init__(self):
+                self.message = FakeMessage()
+
+            async def edit_message_text(self, _text, **_kwargs):
+                return None
+
+        update = SimpleNamespace(
+            callback_query=FakeQuery(),
+            effective_user=SimpleNamespace(id="victory-receipt-user"),
+        )
+
+        async def fake_execute_trade(_user_id, trade_state):
+            trade_state.contract_id = "victory-contract"
+            trade_state.market_symbol = "STPRNG5"
+            trade_state.status = "monitoring"
+            return {"status": "accepted"}
+
+        with patch(
+            "app.bot.callbacks.auto_trade_service",
+            service,
+        ), patch(
+            "app.bot.callbacks.account_mode_service.get_mode",
+            return_value="demo",
+        ), patch(
+            "app.bot.callbacks.execute_trade",
+            new=AsyncMock(side_effect=fake_execute_trade),
+        ), patch(
+            "app.bot.callbacks._monitor_settlement",
+            new=AsyncMock(return_value={"profit": 958.88, "status": "settled"}),
+        ), patch(
+            "app.bot.callbacks.trade_history_service",
+            SimpleNamespace(record_settled_trade=lambda *_args: None),
+        ), patch(
+            "app.bot.callbacks._save_session_summary",
+            new=AsyncMock(),
+        ), patch(
+            "app.bot.callbacks._session_end_message",
+            new=AsyncMock(return_value="🏆 Victory! Session completed."),
+        ), patch(
+            "app.bot.callbacks._safe_edit_message",
+            new=AsyncMock(),
+        ):
+            asyncio.run(_run_auto_trade(update, state))
+
+        self.assertEqual(state.status, "completed")
+        self.assertIn("Cycle 1", update.callback_query.message.replies[0])
+        self.assertEqual(
+            update.callback_query.message.replies[-1],
+            "🏆 Victory! Session completed.",
+        )
 
     def test_auto_trade_starts_next_cycle_without_delay_after_settlement(self):
         service = AutoTradeService()
