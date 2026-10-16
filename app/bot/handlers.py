@@ -31,6 +31,16 @@ auto_trade_service = AutoTradeService()
 trade_history_service = TradeHistoryService()
 HELP_FOOTER = "\n\n💬 Need help with something? Ask Sammie @samueludoh_ng"
 logger = logging.getLogger(__name__)
+TOKEN_STORE_IMAGE_URL = (
+    "https://hvvwkijquaoqsbzhpyim.supabase.co/storage/v1/object/public/"
+    "Bot%20images/fb421bed-8e95-4895-b92f-9e277693b83f.png"
+)
+TOKEN_PACKAGES = {
+    50: ("5.50", "https://whop.com/ignitekraft-limited/get-50-tokens/"),
+    100: ("8.50", "https://whop.com/ignitekraft-limited/get-100-tokens/"),
+    200: ("14.50", "https://whop.com/ignitekraft-limited/get-200-tokens/"),
+    500: ("35.00", "https://whop.com/ignitekraft-limited/get-500-tokens/"),
+}
 
 
 def _format_currency(
@@ -55,6 +65,26 @@ def _display_name(display_name: str | None = None) -> str:
     if value:
         return value
     return "friend"
+
+
+def build_token_store_message() -> str:
+    return (
+        "💎 YIELDS TOKENS\n\n"
+        "Tokens are used when Auto Trade places contracts. "
+        "One token is used for each contract.\n\n"
+        "Choose a package below to continue to secure payment with Whop."
+    )
+
+
+def build_token_purchase_message(token_amount: int) -> str:
+    package = TOKEN_PACKAGES.get(token_amount)
+    if package is None:
+        raise ValueError("UNSUPPORTED_TOKEN_PACKAGE")
+    price, _payment_url = package
+    return (
+        f"You're purchasing: {token_amount} Tokens 💎 - {price} USD.\n"
+        "Proceed to payment to complete your purchase."
+    )
 
 
 def _dashboard_text(

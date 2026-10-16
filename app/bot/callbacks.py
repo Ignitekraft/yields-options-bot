@@ -28,6 +28,10 @@ from app.bot.handlers import (
     handle_start,
     handle_stats,
     handle_status,
+    TOKEN_PACKAGES,
+    TOKEN_STORE_IMAGE_URL,
+    build_token_purchase_message,
+    build_token_store_message,
 )
 from app.bot.keyboards import TelegramKeyboard
 from app.config import settings
@@ -230,6 +234,47 @@ async def _send_scan_message(query, text: str, **kwargs) -> None:
         return
 
     await _safe_edit_message(query, text, **kwargs)
+
+
+async def _show_token_photo(query, caption: str, reply_markup) -> None:
+    if InputMediaPhoto is not None and hasattr(query, "edit_message_media"):
+        try:
+            await query.edit_message_media(
+                media=InputMediaPhoto(
+                    media=TOKEN_STORE_IMAGE_URL,
+                    caption=caption,
+                ),
+                reply_markup=reply_markup,
+            )
+            return
+        except Exception:
+            logger.info(
+                "Could not replace current message media with the token-store image",
+                exc_info=True,
+            )
+
+    message = getattr(query, "message", None)
+    reply_photo = getattr(message, "reply_photo", None)
+    if reply_photo is not None:
+        try:
+            await reply_photo(
+                photo=TOKEN_STORE_IMAGE_URL,
+                caption=caption,
+                reply_markup=reply_markup,
+            )
+            try:
+                await message.delete()
+            except Exception:
+                logger.exception("Could not remove the previous token-store message")
+            return
+        except Exception:
+            logger.exception("Could not send the token-store image")
+
+    await _safe_edit_message(
+        query,
+        caption,
+        reply_markup=reply_markup,
+    )
 
 
 async def _get_trade_token_balance(update, query, account_mode: str) -> int | None:
@@ -752,7 +797,11 @@ async def _run_auto_trade(update, state) -> None:
                 "unknown_buy_outcome": (
                     "The purchase outcome is uncertain. Auto Trade stopped to avoid a duplicate trade."
                 ),
-            }.get(status, "A trade could not be placed, so Auto Trade stopped safely.")
+            }.get(
+                status,
+                "The next trade could not be placed, so Auto Trade stopped safely. "
+                f"Deriv response: {reason}",
+            )
             await _save_session_summary(
                 current,
                 "failed" if status in {"unknown_buy_outcome", "token_service_error"} else "stopped",
@@ -883,22 +932,29 @@ async def dispatch_callback(update, context) -> None:
         return
 
     if data == "MENU_GET_TOKENS":
-        try:
-            profile = await asyncio.to_thread(
-                trade_history_service.get_user,
-                user_id,
-            )
-            token_balance = int(profile.get("token_balance", 0))
-        except Exception:
-            token_balance = None
-        balance_text = str(token_balance) if token_balance is not None else "Unavailable"
-        await _safe_edit_message(
+        await _show_token_photo(
             query,
-            "💎 YIELDS TOKENS\n\n"
-            f"Available balance: {balance_text}\n\n"
-            "One token is used for each contract placed by Auto Trade.\n"
-            "For a token top-up, contact Sammie @samueludoh_ng.",
-            reply_markup=TelegramKeyboard.menu_keyboard(settings.community_url),
+            build_token_store_message(),
+            TelegramKeyboard.token_store_keyboard(),
+        )
+        return
+
+    if data.startswith("TOKEN_PACKAGE_"):
+        try:
+            token_amount = int(data.removeprefix("TOKEN_PACKAGE_"))
+            _price, payment_url = TOKEN_PACKAGES[token_amount]
+        except (KeyError, ValueError):
+            await _safe_edit_message(
+                query,
+                "⚠️ That token package is unavailable. Please choose a package again.",
+                reply_markup=TelegramKeyboard.token_store_keyboard(),
+            )
+            return
+
+        await _show_token_photo(
+            query,
+            build_token_purchase_message(token_amount),
+            TelegramKeyboard.token_purchase_keyboard(payment_url),
         )
         return
 

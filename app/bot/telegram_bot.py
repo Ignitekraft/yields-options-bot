@@ -14,6 +14,8 @@ from app.bot.handlers import (
     handle_scan,
     handle_stats,
     handle_status,
+    build_token_store_message,
+    TOKEN_STORE_IMAGE_URL,
     trade_history_service,
 )
 from app.bot.keyboards import TelegramKeyboard
@@ -61,6 +63,20 @@ async def _send_stats_message(update: Update) -> None:
     await update.message.reply_text(text)
 
 
+async def _send_tokens_message(update: Update) -> None:
+    text = build_token_store_message()
+    keyboard = TelegramKeyboard.token_store_keyboard()
+    try:
+        await update.message.reply_photo(
+            photo=TOKEN_STORE_IMAGE_URL,
+            caption=text,
+            reply_markup=keyboard,
+        )
+    except Exception:
+        logger.exception("Could not send the token-store image")
+        await update.message.reply_text(text, reply_markup=keyboard)
+
+
 def create_application():
     """Create the Telegram bot application if the library and token are available."""
     if Application is None:
@@ -95,6 +111,9 @@ def create_application():
     async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await _send_stats_message(update)
 
+    async def tokens(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await _send_tokens_message(update)
+
     async def logout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = update.effective_user.id
         await update.message.reply_text(handle_logout(user_id), reply_markup=TelegramKeyboard.start_keyboard())
@@ -119,6 +138,7 @@ def create_application():
     application.add_handler(CommandHandler("balance", balance))
     application.add_handler(CommandHandler("faq", faq))
     application.add_handler(CommandHandler("stats", stats))
+    application.add_handler(CommandHandler("tokens", tokens))
     application.add_handler(CommandHandler("logout", logout))
     application.add_handler(CommandHandler("scan", scan))
     if CallbackQueryHandler is not None:

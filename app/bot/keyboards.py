@@ -71,6 +71,34 @@ class TelegramKeyboard:
         )
 
     @staticmethod
+    def token_store_keyboard() -> object:
+        rows = [
+            [("50 Tokens", "TOKEN_PACKAGE_50")],
+            [("100 Tokens", "TOKEN_PACKAGE_100")],
+            [("200 Tokens", "TOKEN_PACKAGE_200")],
+            [("500 Tokens", "TOKEN_PACKAGE_500")],
+            [("🏠 Main Menu", "MENU_MAIN")],
+        ]
+        return TelegramKeyboard._keyboard(rows)
+
+    @staticmethod
+    def token_purchase_keyboard(payment_url: str) -> object:
+        if InlineKeyboardMarkup is None:
+            return [["💳 Pay in Whop"], ["↩️ Back to Tokens"]]
+
+        return InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("💳 Pay in Whop", url=payment_url)],
+                [
+                    InlineKeyboardButton(
+                        "↩️ Back to Tokens",
+                        callback_data="MENU_GET_TOKENS",
+                    )
+                ],
+            ]
+        )
+
+    @staticmethod
     def low_token_keyboard(support_url: str) -> object:
         if InlineKeyboardMarkup is None:
             return [

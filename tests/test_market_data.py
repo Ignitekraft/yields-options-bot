@@ -26,11 +26,15 @@ from app.bot.handlers import (
     build_menu_message,
     build_auto_trade_setup,
     build_start_message,
+    build_token_purchase_message,
+    build_token_store_message,
+    TOKEN_PACKAGES,
+    TOKEN_STORE_IMAGE_URL,
     handle_auto_trade_start,
     handle_start,
 )
 from app.bot.keyboards import TelegramKeyboard
-from app.bot.telegram_bot import _send_menu_message
+from app.bot.telegram_bot import _send_menu_message, _send_tokens_message
 from app.config import settings
 from app.main import app, deriv_oauth_callback
 from app.models.market import MarketSnapshot
@@ -661,6 +665,79 @@ class MarketDataTests(unittest.TestCase):
         self.assertGreater(state.current_stake, 2.0)
         self.assertEqual(state.martingale_step, 11)
 
+    def test_auto_trade_multiplies_each_losing_stake_and_resets_after_win(self):
+        service = AutoTradeService()
+        state = service.start_run(
+            "martingale-progression-user",
+            "step_100",
+            "BULLISH",
+            10.0,
+            max_cycles=1,
+            account_mode="demo",
+        )
+        service.confirm_run("martingale-progression-user")
+        executed_stakes = []
+        settlements = iter(
+            [
+                {"status": "settled", "profit": -10.0},
+                {"status": "settled", "profit": -23.0},
+                {"status": "settled", "profit": 5.0},
+            ]
+        )
+
+        class FakeQuery:
+            async def edit_message_text(self, _text, **_kwargs):
+                return None
+
+        update = SimpleNamespace(
+            callback_query=FakeQuery(),
+            effective_user=SimpleNamespace(id="martingale-progression-user"),
+        )
+
+        async def fake_execute_trade(_user_id, trade_state):
+            executed_stakes.append(trade_state.current_stake)
+            service.record_trade_stake(
+                trade_state.user_id,
+                trade_state.current_stake,
+            )
+            trade_state.contract_id = f"contract-{len(executed_stakes)}"
+            trade_state.market_symbol = "STPRNG"
+            trade_state.status = "monitoring"
+            return {"status": "accepted"}
+
+        with patch(
+            "app.bot.callbacks.auto_trade_service",
+            service,
+        ), patch(
+            "app.bot.callbacks.account_mode_service.get_mode",
+            return_value="demo",
+        ), patch(
+            "app.bot.callbacks.execute_trade",
+            new=AsyncMock(side_effect=fake_execute_trade),
+        ), patch(
+            "app.bot.callbacks._monitor_settlement",
+            new=AsyncMock(side_effect=lambda *_args: next(settlements)),
+        ), patch(
+            "app.bot.callbacks.trade_history_service",
+            SimpleNamespace(record_settled_trade=lambda *_args: None),
+        ), patch(
+            "app.bot.callbacks._save_session_summary",
+            new=AsyncMock(),
+        ), patch(
+            "app.bot.callbacks._session_end_message",
+            new=AsyncMock(return_value="Session completed."),
+        ), patch(
+            "app.bot.callbacks._safe_edit_message",
+            new=AsyncMock(),
+        ):
+            asyncio.run(_run_auto_trade(update, state))
+
+        self.assertEqual(executed_stakes, [10.0, 23.0, 52.9])
+        self.assertEqual(state.losses, 2)
+        self.assertEqual(state.wins, 1)
+        self.assertEqual(state.current_stake, 10.0)
+        self.assertEqual(state.status, "completed")
+
     def test_auto_trade_starts_next_cycle_without_delay_after_settlement(self):
         service = AutoTradeService()
         service.start_run(
@@ -801,6 +878,174 @@ class MarketDataTests(unittest.TestCase):
             ],
         )
         self.assertEqual(rows[1][1].url, "https://t.me/+N58js2a8NF1mMzY0")
+
+    def test_token_store_keyboard_has_four_packages_and_main_menu(self):
+        keyboard = TelegramKeyboard.token_store_keyboard()
+
+        self.assertEqual(
+            [[button.text for button in row] for row in keyboard.inline_keyboard],
+            [
+                ["50 Tokens"],
+                ["100 Tokens"],
+                ["200 Tokens"],
+                ["500 Tokens"],
+                ["🏠 Main Menu"],
+            ],
+        )
+        self.assertEqual(
+            [
+                row[0].callback_data
+                for row in keyboard.inline_keyboard[:-1]
+            ],
+            [
+                "TOKEN_PACKAGE_50",
+                "TOKEN_PACKAGE_100",
+                "TOKEN_PACKAGE_200",
+                "TOKEN_PACKAGE_500",
+            ],
+        )
+        self.assertEqual(
+            keyboard.inline_keyboard[-1][0].callback_data,
+            "MENU_MAIN",
+        )
+
+    def test_token_purchase_messages_match_package_amounts_and_prices(self):
+        self.assertEqual(
+            TOKEN_PACKAGES,
+            {
+                50: (
+                    "5.50",
+                    "https://whop.com/ignitekraft-limited/get-50-tokens/",
+                ),
+                100: (
+                    "8.50",
+                    "https://whop.com/ignitekraft-limited/get-100-tokens/",
+                ),
+                200: (
+                    "14.50",
+                    "https://whop.com/ignitekraft-limited/get-200-tokens/",
+                ),
+                500: (
+                    "35.00",
+                    "https://whop.com/ignitekraft-limited/get-500-tokens/",
+                ),
+            },
+        )
+        for amount, (price, _url) in TOKEN_PACKAGES.items():
+            self.assertEqual(
+                build_token_purchase_message(amount),
+                f"You're purchasing: {amount} Tokens 💎 - {price} USD.\n"
+                "Proceed to payment to complete your purchase.",
+            )
+        with self.assertRaisesRegex(ValueError, "UNSUPPORTED_TOKEN_PACKAGE"):
+            build_token_purchase_message(25)
+
+    def test_token_purchase_keyboard_links_to_whop_and_back_to_store(self):
+        payment_url = TOKEN_PACKAGES[100][1]
+        keyboard = TelegramKeyboard.token_purchase_keyboard(payment_url)
+
+        self.assertEqual(
+            keyboard.inline_keyboard[0][0].text,
+            "💳 Pay in Whop",
+        )
+        self.assertEqual(keyboard.inline_keyboard[0][0].url, payment_url)
+        self.assertEqual(
+            keyboard.inline_keyboard[1][0].text,
+            "↩️ Back to Tokens",
+        )
+        self.assertEqual(
+            keyboard.inline_keyboard[1][0].callback_data,
+            "MENU_GET_TOKENS",
+        )
+
+    def test_get_tokens_command_sends_store_image_and_five_buttons(self):
+        class FakeMessage:
+            photo_args = None
+
+            async def reply_photo(self, **kwargs):
+                self.photo_args = kwargs
+
+        update = SimpleNamespace(message=FakeMessage())
+
+        asyncio.run(_send_tokens_message(update))
+
+        self.assertEqual(update.message.photo_args["photo"], TOKEN_STORE_IMAGE_URL)
+        self.assertEqual(
+            update.message.photo_args["caption"],
+            build_token_store_message(),
+        )
+        self.assertEqual(
+            len(update.message.photo_args["reply_markup"].inline_keyboard),
+            5,
+        )
+
+    def test_get_tokens_callback_shows_image_and_package_buttons(self):
+        class FakeQuery:
+            data = "MENU_GET_TOKENS"
+
+            def __init__(self):
+                self.media_args = None
+
+            async def answer(self):
+                return None
+
+            async def edit_message_media(self, **kwargs):
+                self.media_args = kwargs
+
+        query = FakeQuery()
+        update = SimpleNamespace(
+            callback_query=query,
+            effective_user=SimpleNamespace(id="tokens-callback-user"),
+        )
+
+        asyncio.run(dispatch_callback(update, None))
+
+        self.assertEqual(query.media_args["media"].media, TOKEN_STORE_IMAGE_URL)
+        self.assertEqual(
+            query.media_args["media"].caption,
+            build_token_store_message(),
+        )
+        self.assertEqual(
+            len(query.media_args["reply_markup"].inline_keyboard),
+            5,
+        )
+
+    def test_token_package_callback_shows_correct_payment_and_back_buttons(self):
+        class FakeQuery:
+            data = "TOKEN_PACKAGE_100"
+
+            def __init__(self):
+                self.media_args = None
+
+            async def answer(self):
+                return None
+
+            async def edit_message_media(self, **kwargs):
+                self.media_args = kwargs
+
+        query = FakeQuery()
+        update = SimpleNamespace(
+            callback_query=query,
+            effective_user=SimpleNamespace(id="tokens-purchase-user"),
+        )
+
+        asyncio.run(dispatch_callback(update, None))
+
+        self.assertEqual(query.media_args["media"].media, TOKEN_STORE_IMAGE_URL)
+        self.assertEqual(
+            query.media_args["media"].caption,
+            "You're purchasing: 100 Tokens 💎 - 8.50 USD.\n"
+            "Proceed to payment to complete your purchase.",
+        )
+        purchase_keyboard = query.media_args["reply_markup"].inline_keyboard
+        self.assertEqual(
+            purchase_keyboard[0][0].url,
+            TOKEN_PACKAGES[100][1],
+        )
+        self.assertEqual(
+            purchase_keyboard[1][0].callback_data,
+            "MENU_GET_TOKENS",
+        )
 
     def test_start_menu_sender_sends_brand_image_and_menu_keyboard(self):
         class FakeMessage:

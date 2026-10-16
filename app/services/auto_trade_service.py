@@ -233,7 +233,7 @@ class AutoTradeService:
 
             multiplier = float(getattr(settings, "martingale_multiplier", 2.3))
             state.current_stake = round(
-                state.base_stake * (multiplier ** (state.martingale_step - 1)),
+                state.current_stake * multiplier,
                 2,
             )
             state.status = "running"
