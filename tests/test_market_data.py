@@ -323,6 +323,75 @@ class MarketDataTests(unittest.TestCase):
         )
         self.assertEqual(candles[0]["close"], 100.5)
 
+    def test_batch_market_history_reuses_one_public_connection(self):
+        now = int(time.time())
+
+        class FakeSocket:
+            def __init__(self):
+                self.sent = []
+                self.responses = iter(
+                    [
+                        {"history": {"prices": ["100.1"], "times": [now]}},
+                        {
+                            "candles": [
+                                {
+                                    "epoch": now - 60,
+                                    "open": "100",
+                                    "high": "101",
+                                    "low": "99",
+                                    "close": "100.5",
+                                }
+                            ]
+                        },
+                        {"history": {"prices": ["200.1"], "times": [now]}},
+                        {
+                            "candles": [
+                                {
+                                    "epoch": now - 60,
+                                    "open": "200",
+                                    "high": "201",
+                                    "low": "199",
+                                    "close": "200.5",
+                                }
+                            ]
+                        },
+                    ]
+                )
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def send(self, payload):
+                self.sent.append(json.loads(payload))
+
+            def recv(self, timeout=None):
+                return json.dumps(next(self.responses))
+
+        socket = FakeSocket()
+        with patch(
+            "app.services.deriv.market_data.websocket_client.connect",
+            return_value=socket,
+        ) as connect_mock:
+            results = MarketDataService().get_step_market_data_batch(
+                ["step_100", "step_200"],
+                tick_count=1000,
+                candle_count=60,
+            )
+
+        connect_mock.assert_called_once()
+        self.assertEqual(len(socket.sent), 4)
+        self.assertEqual(
+            [request["req_id"] for request in socket.sent],
+            [1, 2, 3, 4],
+        )
+        self.assertEqual(results["step_100"][0][0]["quote"], 100.1)
+        self.assertEqual(results["step_100"][1][0]["close"], 100.5)
+        self.assertEqual(results["step_200"][0][0]["quote"], 200.1)
+        self.assertEqual(results["step_200"][1][0]["close"], 200.5)
+
     def test_active_symbols_uses_current_underlying_symbol_fields(self):
         service = MarketDataService()
         with patch.object(
@@ -487,11 +556,31 @@ class MarketDataTests(unittest.TestCase):
         ])
         self.assertEqual([button.style for button in rows[0]], ["success", "success", None])
 
+    def test_stake_keyboard_carries_the_analyzed_market_and_direction(self):
+        keyboard = TelegramKeyboard.stake_keyboard("step_100", "BULLISH")
+
+        self.assertEqual(
+            [button.callback_data for button in keyboard.inline_keyboard[0]],
+            [
+                "AUTO_TRADE_STAKE_0_1_step_100_BULLISH",
+                "AUTO_TRADE_STAKE_0_5_step_100_BULLISH",
+                "AUTO_TRADE_STAKE_1_step_100_BULLISH",
+            ],
+        )
+
     def test_relative_stakes_use_half_up_whole_number_rounding(self):
         self.assertEqual(calculate_relative_stake(5000, "0_1"), 5)
         self.assertEqual(calculate_relative_stake(5000, "0_5"), 25)
         self.assertEqual(calculate_relative_stake(5000, "1"), 50)
         self.assertEqual(calculate_relative_stake(250.5, "0_5"), 1)
+        stake = calculate_relative_stake(220_800, "0_1")
+        self.assertEqual(stake, 221)
+        proposal = TradeExecutionService.build_proposal_payload(
+            "step_100",
+            "BULLISH",
+            stake,
+        )
+        self.assertEqual(proposal["amount"], 221)
         self.assertEqual(calculate_relative_stake(400, "0_1"), 0)
 
     def test_state_dir_falls_back_when_render_path_is_not_writable(self):
@@ -1826,7 +1915,7 @@ class MarketDataTests(unittest.TestCase):
     def test_stake_callback_falls_back_to_caption_edit_when_message_is_media(self):
         class FakeQuery:
             def __init__(self):
-                self.data = "AUTO_TRADE_STAKE_0_1"
+                self.data = "AUTO_TRADE_STAKE_0_1_step_100_BULLISH"
                 self.caption_text = None
                 self.text_text = None
                 self.answer_calls = 0
@@ -1856,7 +1945,7 @@ class MarketDataTests(unittest.TestCase):
                 "direction": "BULLISH",
                 "signal_strength": 0.92,
             },
-        ), patch(
+        ) as build_setup, patch(
             "app.bot.callbacks.account_mode_service.get_mode",
             return_value="demo",
         ), patch(
@@ -1865,7 +1954,7 @@ class MarketDataTests(unittest.TestCase):
                 return_value={
                     "account_type": "demo",
                     "account_id": "demo-1",
-                    "balance": 5000,
+                    "balance": 220800,
                     "currency": "USD",
                 }
             ),
@@ -1875,7 +1964,7 @@ class MarketDataTests(unittest.TestCase):
         ), patch(
             "app.bot.callbacks.auto_trade_service.start_run",
             return_value=object(),
-        ), patch(
+        ) as start_run, patch(
             "app.bot.callbacks.auth_service.get_valid_access_token",
             return_value="access-token",
         ), patch(
@@ -1890,10 +1979,78 @@ class MarketDataTests(unittest.TestCase):
         self.assertIsNotNone(query.text_text)
         self.assertIsNotNone(query.caption_text)
         self.assertIn("TRADE CONFIRMATION", query.caption_text)
+        self.assertIn("Market: Step Index 100", query.caption_text)
         self.assertIn(
-            "Initial stake: 5 USD (0.1% of 5,000.00 USD balance)",
+            "Initial stake: 221 USD (0.1% of 220,800.00 USD balance)",
             query.caption_text,
         )
+        build_setup.assert_not_called()
+        start_run.assert_called_once()
+        self.assertEqual(start_run.call_args.kwargs["symbol"], "step_100")
+        self.assertEqual(start_run.call_args.kwargs["direction"], "BULLISH")
+        self.assertEqual(start_run.call_args.kwargs["base_stake"], 221)
+
+    def test_confirm_refreshes_relative_stake_as_whole_units(self):
+        class FakeQuery:
+            data = "AUTO_TRADE_CONFIRM"
+
+            async def answer(self):
+                return None
+
+            async def edit_message_text(self, _text, **_kwargs):
+                return None
+
+        update = SimpleNamespace(
+            callback_query=FakeQuery(),
+            effective_user=SimpleNamespace(
+                id="confirm-relative-stake-user",
+                first_name="Test",
+                last_name="User",
+                username="test_user",
+            ),
+        )
+        run_service = AutoTradeService()
+        state = run_service.start_run(
+            "confirm-relative-stake-user",
+            "step_100",
+            "BULLISH",
+            220.8,
+            account_mode="demo",
+        )
+        state.stake_percentage_key = "0_1"
+
+        with patch(
+            "app.bot.callbacks.auto_trade_service",
+            run_service,
+        ), patch(
+            "app.bot.callbacks.auth_service.get_valid_access_token",
+            return_value="access-token",
+        ), patch(
+            "app.bot.callbacks.account_mode_service.get_mode",
+            return_value="demo",
+        ), patch(
+            "app.bot.callbacks.account_service.get_trade_account",
+            new=AsyncMock(
+                return_value={
+                    "balance": 220_800,
+                    "currency": "USD",
+                }
+            ),
+        ), patch(
+            "app.bot.callbacks.trade_history_service",
+            SimpleNamespace(
+                ensure_user=lambda *_args, **_kwargs: {"token_balance": 50},
+                create_session=lambda *_args, **_kwargs: None,
+            ),
+        ), patch(
+            "app.bot.callbacks._run_auto_trade",
+            new=AsyncMock(),
+        ) as run_auto_trade:
+            asyncio.run(dispatch_callback(update, None))
+
+        self.assertEqual(state.base_stake, 221.0)
+        self.assertEqual(state.current_stake, 221.0)
+        run_auto_trade.assert_awaited_once_with(update, state)
 
     def test_confirm_start_callback_falls_back_to_caption_edit_when_message_is_media(self):
         class FakeQuery:

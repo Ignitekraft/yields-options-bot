@@ -77,14 +77,14 @@ def _stake_selection_from_callback(
             continue
         selected_market_and_direction = suffix[len(prefix):]
         if "_" not in selected_market_and_direction:
-            return percentage_key, None, None
+            return None, None, None
         market_symbol, direction = selected_market_and_direction.rsplit("_", 1)
         if (
             market_symbol in settings.auto_trade_markets
             and direction in {"BULLISH", "BEARISH"}
         ):
             return percentage_key, market_symbol, direction
-        return percentage_key, None, None
+        return None, None, None
     return None, None, None
 
 

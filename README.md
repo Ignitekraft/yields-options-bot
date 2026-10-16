@@ -46,6 +46,10 @@ contract. Live data errors stop a market scan instead of producing a signal
 from sample data. Public market data uses Deriv's unauthenticated public
 WebSocket; the Auto Trade product flow still requires the user to connect an
 account before scanning or trading.
+The scan requests tick and candle history over one public WebSocket connection
+for the configured markets. The stake buttons use 0.1%, 0.5%, or 1% of the
+selected account balance, rounded to the nearest whole currency unit. The
+selected market and direction remain pinned from analysis through confirmation.
 
 ## Setup
 
