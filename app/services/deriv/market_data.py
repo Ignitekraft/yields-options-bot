@@ -39,13 +39,17 @@ class MarketDataService:
 
     def _connection_url(self) -> str:
         parts = urlsplit(self.ws_url)
+        hostname = (parts.hostname or "").lower()
+        netloc = parts.netloc
+        if hostname == "ws.binaryws.com":
+            netloc = netloc.replace(hostname, "ws.derivws.com", 1)
         query = dict(parse_qsl(parts.query, keep_blank_values=True))
         if self.app_id and not query.get("app_id"):
             query["app_id"] = self.app_id
         return urlunsplit(
             (
                 parts.scheme,
-                parts.netloc,
+                netloc,
                 parts.path,
                 urlencode(query),
                 parts.fragment,

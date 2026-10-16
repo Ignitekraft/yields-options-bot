@@ -284,6 +284,22 @@ def build_auto_trade_setup(
         for snapshot in snapshots
         if snapshot.data_quality == "good"
     ]
+    market_issues = [
+        {
+            "display_name": snapshot.display_name,
+            "reason": str(
+                (snapshot.indicators or {}).get("signal_reason")
+                or "Market data could not be analyzed."
+            ),
+        }
+        for snapshot in snapshots
+        if snapshot.data_quality != "good"
+    ]
+    scan_summary = {
+        "markets_scanned": len(snapshots),
+        "markets_available": len(candidates),
+        "market_issues": market_issues,
+    }
     winner = max(
         tradable or candidates,
         key=lambda snapshot: float(
@@ -293,28 +309,24 @@ def build_auto_trade_setup(
     )
 
     if winner is None:
-        diagnostic = snapshots[0] if snapshots else None
-        reasoning = str(
-            (diagnostic.indicators or {}).get("signal_reason")
-            if diagnostic is not None
-            else ""
-        ) or "No usable live Deriv tick history was available."
+        issue_details = "; ".join(
+            f"{item['display_name']}: {item['reason']}"
+            for item in market_issues
+        )
+        reasoning = (
+            "No usable live market data was available."
+            + (f" {issue_details}" if issue_details else "")
+        )
         return {
             "symbol": "NO_SETUP",
-            "display_name": (
-                diagnostic.display_name
-                if diagnostic is not None
-                else "No Setup"
-            ),
+            "display_name": "Market Scan",
             "direction": "NO_TRADE",
-            "indicators": (
-                diagnostic.indicators
-                if diagnostic is not None
-                else {"signal_reason": reasoning}
-            ),
+            "scan_status": "unavailable",
+            "indicators": {"signal_reason": reasoning},
             "current_price": 0.0,
             "signal_strength": 0.0,
             "reasoning": reasoning,
+            **scan_summary,
         }
 
     is_tradable = winner in tradable
@@ -341,6 +353,8 @@ def build_auto_trade_setup(
         "current_price": winner.current_price,
         "signal_strength": signal_strength if is_tradable else 0.0,
         "reasoning": reasoning,
+        "scan_status": "ready" if is_tradable else "no_setup",
+        **scan_summary,
     }
 
 
@@ -593,6 +607,23 @@ def handle_auto_trade_start(
         if setup is not None
         else build_auto_trade_setup(telegram_user_id)
     )
+    if setup_data.get("scan_status") == "unavailable":
+        markets_scanned = int(setup_data.get("markets_scanned") or 0)
+        issues = setup_data.get("market_issues") or []
+        issue_lines = [
+            f"• {html.escape(str(item['display_name']))}: "
+            f"{html.escape(str(item['reason']))}"
+            for item in issues
+        ]
+        details = "\n".join(issue_lines)
+        return (
+            "⚠️ LIVE MARKET DATA UNAVAILABLE\n\n"
+            f"Could not retrieve usable live data for any of the "
+            f"{markets_scanned} configured markets.\n"
+            "No signal was generated and no trade was placed."
+            + (f"\n\nMarket errors:\n{details}" if details else "")
+        )
+
     direction = setup_data.get("direction", "NO_TRADE")
 
     indicators = setup_data.get("indicators") or {}
@@ -690,10 +721,26 @@ def handle_auto_trade_start(
             )
         )
     )
+    markets_scanned = int(setup_data.get("markets_scanned") or 0)
+    markets_available = int(setup_data.get("markets_available") or 0)
+    market_issues = setup_data.get("market_issues") or []
+    availability_note = ""
+    if markets_scanned and market_issues:
+        issue_lines = [
+            f"• {html.escape(str(item['display_name']))}: "
+            f"{html.escape(str(item['reason']))}"
+            for item in market_issues
+        ]
+        availability_note = (
+            f"\n\nData available for {markets_available}/{markets_scanned} "
+            "markets. Could not scan:\n"
+            + "\n".join(issue_lines)
+        )
     return (
         f"{setup_title}\n\n"
         f"<pre>{html.escape(indicator_report)}</pre>\n\n"
         f"{next_step}"
+        f"{availability_note}"
     )
 
 

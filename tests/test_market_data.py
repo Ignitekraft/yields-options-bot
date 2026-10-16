@@ -233,6 +233,17 @@ class MarketDataTests(unittest.TestCase):
         self.assertEqual(socket.sent[0]["count"], 5000)
         self.assertEqual(socket.sent[0]["style"], "ticks")
 
+    def test_legacy_binary_ws_endpoint_is_upgraded_to_deriv_ws(self):
+        service = MarketDataService(
+            "wss://ws.binaryws.com/websockets/v3",
+            app_id="test-app",
+        )
+
+        self.assertEqual(
+            service._connection_url(),
+            "wss://ws.derivws.com/websockets/v3?app_id=test-app",
+        )
+
     def test_monitor_contract_uses_numeric_contract_id(self):
         service = TradeExecutionService()
 
@@ -2565,6 +2576,94 @@ class MarketDataTests(unittest.TestCase):
         self.assertTrue(
             all(snapshot.data_quality == "good" for snapshot in snapshots[1:])
         )
+        self.assertIn("TimeoutError", snapshots[0].indicators["data_error"])
+
+    def test_all_market_data_failures_are_reported_as_one_scan_failure(self):
+        failed_snapshots = [
+            MarketSnapshot(
+                symbol=symbol,
+                display_name=f"Step {index * 100}",
+                current_price=0.0,
+                trend="neutral",
+                indicators={
+                    "signal_reason": "Market data request failed: "
+                    "InvalidStatus (HTTP 520)",
+                    "data_error": "InvalidStatus (HTTP 520)",
+                },
+                data_quality="unavailable",
+            )
+            for index, symbol in enumerate(settings.auto_trade_markets, 1)
+        ]
+
+        with (
+            patch(
+                "app.bot.handlers.auth_service.get_valid_access_token",
+                return_value="test-token",
+            ),
+            patch(
+                "app.bot.handlers.YieldsScanner.collect_step_market_snapshots",
+                return_value=failed_snapshots,
+            ),
+        ):
+            setup = build_auto_trade_setup("scan-user")
+            message = handle_auto_trade_start("scan-user", setup)
+
+        self.assertEqual(setup["scan_status"], "unavailable")
+        self.assertEqual(setup["markets_scanned"], 5)
+        self.assertEqual(setup["markets_available"], 0)
+        self.assertEqual(len(setup["market_issues"]), 5)
+        self.assertIn("Step 500", setup["reasoning"])
+        self.assertIn("any of the 5 configured markets", message)
+        self.assertIn("Step 100", message)
+        self.assertIn("Step 500", message)
+        self.assertIn("HTTP 520", message)
+        self.assertNotIn("RSI(7): unavailable", message)
+
+    def test_partial_market_failures_are_disclosed_with_available_count(self):
+        snapshots = [
+            MarketSnapshot(
+                symbol=settings.auto_trade_markets[0],
+                display_name="Step 100",
+                current_price=100.0,
+                trend="neutral",
+                indicators={"signal_strength": 0.0},
+                data_quality="good",
+            ),
+            *[
+                MarketSnapshot(
+                    symbol=symbol,
+                    display_name=f"Step {index * 100}",
+                    current_price=0.0,
+                    trend="neutral",
+                    indicators={
+                        "signal_reason": "Market data request failed: "
+                        "TimeoutError"
+                    },
+                    data_quality="unavailable",
+                )
+                for index, symbol in enumerate(
+                    settings.auto_trade_markets[1:], 2
+                )
+            ],
+        ]
+
+        with (
+            patch(
+                "app.bot.handlers.auth_service.get_valid_access_token",
+                return_value="test-token",
+            ),
+            patch(
+                "app.bot.handlers.YieldsScanner.collect_step_market_snapshots",
+                return_value=snapshots,
+            ),
+        ):
+            setup = build_auto_trade_setup("scan-user")
+            message = handle_auto_trade_start("scan-user", setup)
+
+        self.assertEqual(setup["scan_status"], "no_setup")
+        self.assertEqual(setup["markets_available"], 1)
+        self.assertIn("Data available for 1/5 markets", message)
+        self.assertIn("Step 500", message)
 
     def test_fixed_expiry_is_always_thirty_seconds(self):
         payload = TradeExecutionService.build_proposal_payload(

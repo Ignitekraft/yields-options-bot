@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import logging
 import math
+import re
 from statistics import median
 import time
 from typing import Any
@@ -22,6 +23,13 @@ MOMENTUM_MIN_ATR_RATIO = 0.15
 RSI_PERIOD = 7
 RSI_LOWER_VETO = 20.0
 RSI_UPPER_VETO = 80.0
+
+
+def _market_data_error_summary(error: Exception) -> str:
+    http_status = re.search(r"\bHTTP\s+\d{3}\b", str(error))
+    if http_status:
+        return f"{type(error).__name__} ({http_status.group(0)})"
+    return type(error).__name__
 logger = logging.getLogger(__name__)
 
 
@@ -385,7 +393,8 @@ class YieldsScanner:
                         history,
                     )
                 )
-            except Exception:
+            except Exception as exc:
+                error_summary = _market_data_error_summary(exc)
                 logger.exception(
                     "Could not scan Deriv market %s",
                     symbol,
@@ -398,9 +407,10 @@ class YieldsScanner:
                         trend="neutral",
                         indicators={
                             "signal_reason": (
-                                f"Live market data for {display_name} "
-                                "was unavailable."
-                            )
+                                f"{display_name}: market data request failed: "
+                                f"{error_summary}"
+                            ),
+                            "data_error": error_summary,
                         },
                         data_quality="unavailable",
                     )
