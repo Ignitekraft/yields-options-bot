@@ -39,18 +39,9 @@ class TelegramKeyboard:
         return TelegramKeyboard._keyboard(
             [
                 [("🤖 Auto Trade", "START_AUTO_TRADE")],
-                [
-                    ("💰 Balance", "START_BALANCE"),
-                    ("📊 Status", "START_STATUS"),
-                ],
-                [
-                    ("❓ FAQ", "START_FAQ"),
-                    ("📈 Stats", "START_STATS"),
-                ],
-                [
-                    ("⚙️ Account Mode", "START_SETTINGS"),
-                    ("🔌 Disconnect", "START_LOGOUT"),
-                ],
+                [("💰 Balance", "START_BALANCE"), ("📊 Status", "START_STATUS")],
+                [("❓ FAQ", "START_FAQ"), ("📈 Stats", "START_STATS")],
+                [("⚙️ Account Mode", "START_SETTINGS"), ("🔌 Disconnect", "START_LOGOUT")],
             ]
         )
 
@@ -80,27 +71,55 @@ class TelegramKeyboard:
         )
 
     @staticmethod
+    def low_token_keyboard(support_url: str) -> object:
+        if InlineKeyboardMarkup is None:
+            return [
+                ["🚀 Trade Anyway", "💎 Get Tokens"],
+                ["🏠 Main Menu", "💬 Message Sammie"],
+            ]
+
+        return InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "🚀 Trade Anyway",
+                        callback_data="AUTO_TRADE_TRADE_ANYWAY",
+                    ),
+                    InlineKeyboardButton(
+                        "💎 Get Tokens",
+                        callback_data="MENU_GET_TOKENS",
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        "🏠 Main Menu",
+                        callback_data="MENU_MAIN",
+                    ),
+                    InlineKeyboardButton(
+                        "💬 Message Sammie",
+                        url=support_url,
+                    ),
+                ],
+            ]
+        )
+
+    @staticmethod
     def connect_keyboard(url: str | None = None) -> object:
         if InlineKeyboardMarkup is None:
             return [["🔐 Open Deriv", "🏠 Main Menu"]]
 
-        buttons = [
+        return InlineKeyboardMarkup(
             [
-                InlineKeyboardButton("🔐 Open Deriv", url=url or "https://deriv.com"),
-            ],
-            [
-                InlineKeyboardButton("🏠 Main Menu", callback_data="START_DASHBOARD"),
-            ],
-        ]
-        return InlineKeyboardMarkup(buttons)
+                [InlineKeyboardButton("🔐 Open Deriv", url=url or "https://deriv.com")],
+                [InlineKeyboardButton("🏠 Main Menu", callback_data="START_DASHBOARD")],
+            ]
+        )
 
     @staticmethod
     def account_mode_keyboard(current_mode: str) -> object:
         mode = str(current_mode or "demo").lower()
-
         demo_label = "🟠 Demo ✓" if mode == "demo" else "🟠 Demo"
         real_label = "🟢 Real ✓" if mode == "real" else "🟢 Real"
-
         return TelegramKeyboard._keyboard(
             [
                 [(demo_label, "ACCOUNT_MODE_DEMO")],
@@ -129,11 +148,26 @@ class TelegramKeyboard:
 
     @staticmethod
     def stake_keyboard() -> object:
-        return TelegramKeyboard._keyboard(
-            [
-                [("$1", "AUTO_TRADE_STAKE_1"), ("$3", "AUTO_TRADE_STAKE_3"), ("$5", "AUTO_TRADE_STAKE_5"), ("$10", "AUTO_TRADE_STAKE_10")],
-                [("$30", "AUTO_TRADE_STAKE_30"), ("$100", "AUTO_TRADE_STAKE_100"), ("$300", "AUTO_TRADE_STAKE_300"), ("$500", "AUTO_TRADE_STAKE_500")],
-            ]
+        if InlineKeyboardMarkup is None:
+            return [["🟢 0.1%", "🟢 0.5%", "🟠 1%"]]
+
+        return InlineKeyboardMarkup(
+            [[
+                InlineKeyboardButton(
+                    "🟢 0.1%",
+                    callback_data="AUTO_TRADE_STAKE_0_1",
+                    style="success",
+                ),
+                InlineKeyboardButton(
+                    "🟢 0.5%",
+                    callback_data="AUTO_TRADE_STAKE_0_5",
+                    style="success",
+                ),
+                InlineKeyboardButton(
+                    "🟠 1%",
+                    callback_data="AUTO_TRADE_STAKE_1",
+                ),
+            ]]
         )
 
     @staticmethod

@@ -23,6 +23,7 @@ class TradeRunState:
     base_stake: float
     current_stake: float
     session_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    stake_percentage_key: str | None = None
     cycle: int = 1
     martingale_step: int = 1
     max_cycles: int = settings.auto_trade_cycles

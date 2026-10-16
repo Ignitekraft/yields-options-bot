@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 
 from app.config import settings
@@ -36,10 +37,10 @@ def _format_currency(
     currency: str = "USD",
 ) -> str:
     if value is None or value == "Ready":
-        return f"$0.00 {currency}"
+        return f"0.00 {currency}"
 
     try:
-        return f"${float(value):,.2f} {currency}"
+        return f"{float(value):,.2f} {currency}"
     except (TypeError, ValueError):
         return f"{value} {currency}"
 
@@ -62,7 +63,7 @@ def _dashboard_text(
     tokens: int,
     display_name: str | None = None,
 ) -> str:
-    name = _display_name(display_name or username)
+    name = _display_name(display_name)
     return (
         "🤖 YIELDS\n\n"
         f"Welcome back, {name}.\n\n"
@@ -268,6 +269,8 @@ def build_auto_trade_setup(
         return {
             "symbol": "NO_SETUP",
             "direction": "NO_TRADE",
+            "indicators": {},
+            "current_price": 0.0,
             "confidence": 0.0,
             "setup_quality": 0.0,
             "reasoning": "Account not connected.",
@@ -319,6 +322,14 @@ def build_auto_trade_setup(
                 "symbol": snapshot.symbol,
                 "display_name": snapshot.display_name,
                 "direction": direction,
+                "indicators": {
+                    "rsi": rsi,
+                    "macd": macd,
+                    "macd_signal": macd_signal,
+                    "ma50": ma50,
+                    "ma200": ma200,
+                },
+                "current_price": snapshot.current_price,
                 "confidence": confidence,
                 "setup_quality": setup_quality,
                 "reasoning": (
@@ -337,6 +348,8 @@ def build_auto_trade_setup(
         default={
             "symbol": "NO_SETUP",
             "direction": "NO_TRADE",
+            "indicators": {},
+            "current_price": 0.0,
             "confidence": 0.0,
             "setup_quality": 0.0,
             "reasoning": "No market met the minimum indicator-alignment thresholds.",
@@ -348,6 +361,8 @@ def build_auto_trade_setup(
         "symbol": winner["symbol"],
         "display_name": winner["display_name"],
         "direction": winner["direction"],
+        "indicators": winner["indicators"],
+        "current_price": winner["current_price"],
         "confidence": float(winner["confidence"]),
         "setup_quality": float(winner["setup_quality"]),
         "reasoning": winner["reasoning"],
@@ -587,44 +602,69 @@ def handle_scan() -> str:
 
 def handle_auto_trade_start(
     telegram_user_id: str | int,
-    display_name: str | None = None,
+    setup: dict | None = None,
 ) -> str:
     if not auth_service.get_valid_access_token(str(telegram_user_id)):
         return AUTO_TRADE_UNAVAILABLE_MESSAGE
 
-    setup = build_auto_trade_setup(telegram_user_id)
-    direction = setup.get("direction", "NO_TRADE")
-    name = _display_name(display_name)
+    setup_data = setup if setup is not None else build_auto_trade_setup(telegram_user_id)
+    direction = setup_data.get("direction", "NO_TRADE")
+
+    indicators = setup_data.get("indicators") or {}
+    current_price = setup_data.get("current_price")
+    rsi = indicators.get("rsi")
+    macd = indicators.get("macd")
+    macd_signal = indicators.get("macd_signal")
+    ma50 = indicators.get("ma50")
+    ma200 = indicators.get("ma200")
+
+    rsi_state = (
+        "oversold" if rsi <= 30
+        else "overbought" if rsi >= 70
+        else "neutral"
+    ) if rsi is not None else "unavailable"
+    macd_state = (
+        "bullish" if macd > macd_signal
+        else "bearish" if macd < macd_signal
+        else "flat"
+    ) if macd is not None and macd_signal is not None else "unavailable"
+
+    def moving_average_state(value: float | None) -> str:
+        if current_price is None or value is None:
+            return "unavailable"
+        return (
+            "price above" if current_price > value
+            else "price below" if current_price < value
+            else "at price"
+        )
 
     direction_text = (
-        "🟢 BULLISH"
+        "UP 🟢" if direction == "BULLISH"
+        else "DOWN 🔴" if direction == "BEARISH"
+        else "NO TRADE ⚪"
+    )
+    setup_title = (
+        "🟢 Strong Bullish Setup Detected"
         if direction == "BULLISH"
-        else "🔴 BEARISH"
+        else "🔴 Strong Bearish Setup Detected"
         if direction == "BEARISH"
-        else "⚪ NO_TRADE"
+        else "⚪ No Strong Setup Detected"
+    )
+    indicator_report = "\n".join(
+        [
+            f"Trading pair: {setup_data.get('display_name', 'Current market')}",
+            f"RSI: {rsi_state}",
+            f"MACD: {macd_state}",
+            f"MA50: {moving_average_state(ma50)}",
+            f"MA200: {moving_average_state(ma200)}",
+            f"Direction: {direction_text}",
+        ]
     )
 
-    confidence = int(float(setup.get("confidence", 0.0)) * 100)
-    setup_quality = int(float(setup.get("setup_quality", 0.0)) * 100)
-    mode = account_mode_service.get_mode(telegram_user_id)
-
     return (
-        f"Hi {name},\n\n"
-        "⚡ AI Auto Trade\n\n"
-        "🏆 Best setup\n\n"
-        f"Market: {setup.get('display_name', 'Current winner')}\n"
-        f"Direction: {direction_text}\n"
-        f"Confidence: {confidence}%\n"
-        f"Setup quality: {setup_quality}%\n"
-        f"Account mode: {_mode_label(mode)}\n\n"
-        "Why this setup works:\n"
-        f"• {setup.get('reasoning', 'AI trend and momentum are aligned.')}\n"
-        "• AI trend, momentum, RSI, MACD, MA50, and MA200 inform the ranking.\n"
-        "• Select your stake to continue.\n\n"
-        "The selected market and direction will remain fixed for this run.\n\n"
-        "Expiry: 30 seconds\n"
-        "Target: 5 winning cycles"
-        f"{HELP_FOOTER}"
+        f"{setup_title}\n\n"
+        f"<pre>{html.escape(indicator_report)}</pre>\n\n"
+        "Select trade amount 👇"
     )
 
 

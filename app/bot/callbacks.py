@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 try:
     from telegram import InputMediaPhoto
+    from telegram.constants import ParseMode
 except ImportError:  # pragma: no cover
     InputMediaPhoto = None
+    ParseMode = None
 
 from app.bot.handlers import (
     account_mode_service,
@@ -36,6 +39,25 @@ from app.services.trade_history_service import TradeHistoryService
 trade_execution_service = TradeExecutionService()
 trade_history_service = TradeHistoryService()
 logger = logging.getLogger(__name__)
+LOW_TOKEN_WARNING_THRESHOLD = 50
+RELATIVE_STAKES = {
+    "0_1": Decimal("0.001"),
+    "0_5": Decimal("0.005"),
+    "1": Decimal("0.01"),
+}
+
+
+def calculate_relative_stake(account_balance: object, percentage_key: str) -> int:
+    percentage = RELATIVE_STAKES.get(percentage_key)
+    if percentage is None:
+        raise ValueError("UNSUPPORTED_STAKE_PERCENTAGE")
+    try:
+        balance = Decimal(str(account_balance))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise ValueError("INVALID_ACCOUNT_BALANCE") from exc
+    if not balance.is_finite() or balance <= 0:
+        raise ValueError("INVALID_ACCOUNT_BALANCE")
+    return int((balance * percentage).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
 
 
 def _session_payload(state, session_status: str) -> dict:
@@ -84,7 +106,7 @@ async def _session_end_message(
         account_balance = (balances.get(mode) or {})
         if account_balance.get("available") and account_balance.get("balance") is not None:
             currency = str(account_balance.get("currency") or "USD").upper()
-            balance_text = f"${float(account_balance['balance']):,.2f} {currency}"
+            balance_text = f"{float(account_balance['balance']):,.2f} {currency}"
     except Exception:
         logger.warning("Could not fetch final Deriv balance for session receipt")
 
@@ -141,7 +163,7 @@ async def _safe_edit_message(query, text: str, **kwargs) -> None:
         pass
 
 
-async def _require_trade_tokens(update, query, account_mode: str) -> bool:
+async def _get_trade_token_balance(update, query, account_mode: str) -> int | None:
     user = update.effective_user
     try:
         profile = await asyncio.to_thread(
@@ -159,16 +181,89 @@ async def _require_trade_tokens(update, query, account_mode: str) -> bool:
             "⚠️ Auto Trade is temporarily unavailable because your token balance "
             "could not be verified. Please try again shortly.",
         )
-        return False
+        return None
 
-    if int(profile.get("token_balance", 0)) <= 0:
+    try:
+        return max(0, int(profile.get("token_balance", 0)))
+    except (TypeError, ValueError):
+        await _safe_edit_message(
+            query,
+            "⚠️ Auto Trade is temporarily unavailable because your token balance "
+            "could not be verified. Please try again shortly.",
+        )
+        return None
+
+
+async def _show_auto_trade_setup(update, query) -> None:
+    user_id = update.effective_user.id
+    if not auth_service.get_valid_access_token(str(user_id)):
+        await _safe_edit_message(
+            query,
+            "🔐 Connect your Deriv account before starting Auto Trade.",
+            reply_markup=TelegramKeyboard.connect_keyboard(),
+        )
+        return
+
+    setup = build_auto_trade_setup(user_id)
+    text = handle_auto_trade_start(user_id, setup=setup)
+    photo_url = _setup_photo_url(setup.get("direction"))
+
+    if InputMediaPhoto is not None and photo_url:
+        try:
+            await query.edit_message_media(
+                media=InputMediaPhoto(
+                    media=photo_url,
+                    caption=text,
+                    parse_mode=ParseMode.HTML if ParseMode else "HTML",
+                ),
+                reply_markup=TelegramKeyboard.stake_keyboard(),
+            )
+            return
+        except Exception:
+            pass
+
+    await _safe_edit_message(
+        query,
+        text,
+        reply_markup=TelegramKeyboard.stake_keyboard(),
+        parse_mode=ParseMode.HTML if ParseMode else "HTML",
+    )
+
+
+async def _handle_auto_trade_entry(update, query, *, allow_low_balance: bool = False) -> None:
+    user_id = update.effective_user.id
+    token_balance = await _get_trade_token_balance(
+        update,
+        query,
+        account_mode_service.get_mode(user_id),
+    )
+    if token_balance is None:
+        return
+
+    if token_balance <= 0:
         await _safe_edit_message(
             query,
             "💎 You’re out of Yields Tokens, so Auto Trade can’t start. "
             "No trade has been placed. Please contact support to top up.",
         )
-        return False
-    return True
+        return
+
+    if token_balance <= LOW_TOKEN_WARNING_THRESHOLD and not allow_low_balance:
+        await _safe_edit_message(
+            query,
+            "💎 LOW TOKEN BALANCE\n\n"
+            f"You have {token_balance} token{'s' if token_balance != 1 else ''} available.\n\n"
+            "Each contract uses 1 token. If your balance reaches zero, Auto Trade "
+            "will stop before placing another contract. Any contract already "
+            "placed will still be monitored until it settles.\n\n"
+            "You can top up now or continue with your current balance.",
+            reply_markup=TelegramKeyboard.low_token_keyboard(
+                settings.support_contact_url,
+            ),
+        )
+        return
+
+    await _show_auto_trade_setup(update, query)
 
 def _setup_photo_url(direction: str | None) -> str | None:
     direction_value = str(direction or "").strip().upper()
@@ -641,6 +736,27 @@ async def dispatch_callback(update, context) -> None:
         )
         return
 
+    if data == "MENU_MAIN":
+        display_name = getattr(update.effective_user, "first_name", None)
+        text = await build_menu_message(
+            user_id,
+            display_name=display_name,
+            last_name=getattr(update.effective_user, "last_name", None),
+            username=getattr(update.effective_user, "username", None),
+        )
+        try:
+            await query.edit_message_media(
+                media=InputMediaPhoto(media=settings.menu_image_url, caption=text),
+                reply_markup=TelegramKeyboard.menu_keyboard(settings.community_url),
+            )
+        except Exception:
+            await _safe_edit_message(
+                query,
+                text,
+                reply_markup=TelegramKeyboard.menu_keyboard(settings.community_url),
+            )
+        return
+
     if data == "MENU_GET_TOKENS":
         try:
             profile = await asyncio.to_thread(
@@ -761,53 +877,15 @@ async def dispatch_callback(update, context) -> None:
         return
 
     if data == "START_AUTO_TRADE":
-        if not await _require_trade_tokens(
-            update,
-            query,
-            account_mode_service.get_mode(user_id),
-        ):
-            return
-        display_name = getattr(update.effective_user, "first_name", None) or getattr(update.effective_user, "username", None) or "friend"
-        text = handle_auto_trade_start(user_id, display_name=display_name)
-        setup = build_auto_trade_setup(user_id)
-        photo_url = _setup_photo_url(setup.get("direction"))
-
-        if InputMediaPhoto is not None and photo_url:
-            try:
-                await query.edit_message_media(
-                    media=InputMediaPhoto(media=photo_url, caption=text),
-                    reply_markup=TelegramKeyboard.stake_keyboard(),
-                )
-                return
-            except Exception:
-                pass
-
-        await query.edit_message_text(text, reply_markup=TelegramKeyboard.stake_keyboard())
+        await _handle_auto_trade_entry(update, query)
         return
 
     if data == "AUTO_TRADE_START_SCAN":
-        if not await _require_trade_tokens(
-            update,
-            query,
-            account_mode_service.get_mode(user_id),
-        ):
-            return
-        display_name = getattr(update.effective_user, "first_name", None) or getattr(update.effective_user, "username", None) or "friend"
-        text = handle_auto_trade_start(user_id, display_name=display_name)
-        setup = build_auto_trade_setup(user_id)
-        photo_url = _setup_photo_url(setup.get("direction"))
+        await _handle_auto_trade_entry(update, query)
+        return
 
-        if InputMediaPhoto is not None and photo_url:
-            try:
-                await query.edit_message_media(
-                    media=InputMediaPhoto(media=photo_url, caption=text),
-                    reply_markup=TelegramKeyboard.stake_keyboard(),
-                )
-                return
-            except Exception:
-                pass
-
-        await query.edit_message_text(text, reply_markup=TelegramKeyboard.stake_keyboard())
+    if data == "AUTO_TRADE_TRADE_ANYWAY":
+        await _handle_auto_trade_entry(update, query, allow_low_balance=True)
         return
 
     if data == "AUTO_TRADE_CANCEL":
@@ -841,6 +919,27 @@ async def dispatch_callback(update, context) -> None:
 
         effective_user = update.effective_user
         try:
+            if state.stake_percentage_key is not None:
+                selected_account = await account_service.get_trade_account(
+                    user_id,
+                    account_mode=state.account_mode,
+                )
+                refreshed_stake = calculate_relative_stake(
+                    selected_account.get("balance"),
+                    state.stake_percentage_key,
+                )
+                if refreshed_stake < 1:
+                    await _safe_edit_message(
+                        query,
+                        "⚠️ This percentage rounds to 0 in your current account "
+                        "balance, so no trade can be placed. Increase your balance "
+                        "or choose a higher percentage.",
+                    )
+                    return
+                state.base_stake = float(refreshed_stake)
+                state.current_stake = float(refreshed_stake)
+                state.currency = str(selected_account.get("currency") or "USD").upper()
+
             profile = await asyncio.to_thread(
                 trade_history_service.ensure_user,
                 user_id,
@@ -892,19 +991,10 @@ async def dispatch_callback(update, context) -> None:
         return
 
     if data.startswith("AUTO_TRADE_STAKE_"):
-        raw_stake = data.removeprefix("AUTO_TRADE_STAKE_")
-
-        try:
-            stake_value = float(raw_stake)
-        except (TypeError, ValueError):
+        percentage_key = data.removeprefix("AUTO_TRADE_STAKE_")
+        if percentage_key not in RELATIVE_STAKES:
             await query.edit_message_text(
                 "⚠️ Invalid stake selection. Choose one of the available stake buttons."
-            )
-            return
-
-        if stake_value not in {1.0, 3.0, 5.0, 10.0, 30.0, 100.0, 300.0, 500.0}:
-            await query.edit_message_text(
-                "⚠️ Unsupported stake selection."
             )
             return
 
@@ -937,6 +1027,32 @@ async def dispatch_callback(update, context) -> None:
             )
             return
 
+        try:
+            selected_account = await account_service.get_trade_account(
+                user_id,
+                account_mode=mode,
+            )
+            account_balance = selected_account.get("balance")
+            stake_value = calculate_relative_stake(account_balance, percentage_key)
+        except Exception:
+            logger.exception("Could not calculate percentage stake from selected account")
+            await _safe_edit_message(
+                query,
+                "⚠️ The selected account balance could not be verified, so no "
+                "stake was calculated. Please refresh your balance and try again.",
+            )
+            return
+
+        if stake_value < 1:
+            await _safe_edit_message(
+                query,
+                "⚠️ This percentage rounds to 0 in your current account balance, "
+                "so no trade can be placed. Increase your balance or choose a "
+                "higher percentage.",
+            )
+            return
+
+        currency = str(selected_account.get("currency") or "USD").upper()
         setup = build_auto_trade_setup(user_id)
 
         if (
@@ -963,6 +1079,10 @@ async def dispatch_callback(update, context) -> None:
                 base_stake=stake_value,
                 account_mode=mode,
             )
+            state = auto_trade_service.get_run(user_id)
+            if state is not None:
+                state.stake_percentage_key = percentage_key
+                state.currency = currency
         except (RuntimeError, ValueError) as exc:
             await query.edit_message_text(
                 f"⚠️ Unable to prepare Auto Trade: {exc}"
@@ -975,7 +1095,9 @@ async def dispatch_callback(update, context) -> None:
             f"Market: {setup.get('display_name', setup['symbol'])}\n"
             f"Direction: {setup['direction']}\n"
             f"Account mode: {mode.upper()}\n"
-            f"Initial stake: ${stake_value:.2f}\n"
+            f"Initial stake: {stake_value:,} {currency} "
+            f"({float(RELATIVE_STAKES[percentage_key] * 100):g}% of "
+            f"{float(account_balance):,.2f} {currency} balance)\n"
             f"Available tokens: {token_balance}\n"
             "Expiry: 30 seconds\n"
             "Target: 5 winning cycles\n\n"

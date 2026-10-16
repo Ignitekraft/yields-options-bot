@@ -5,16 +5,12 @@ import logging
 
 from app.bot.callbacks import dispatch_callback
 from app.bot.handlers import (
-    account_mode_service,
-    auth_service,
-    build_start_message,
     build_menu_message,
     handle_balance,
     handle_connect,
     handle_faq,
     handle_logout,
     handle_scan,
-    handle_start,
     handle_stats,
     handle_status,
     trade_history_service,
@@ -35,6 +31,26 @@ except ImportError:  # pragma: no cover - optional dependency in local dev sandb
 logger = logging.getLogger(__name__)
 
 
+async def _send_menu_message(update: Update) -> None:
+    user = update.effective_user
+    text = await build_menu_message(
+        user.id,
+        display_name=getattr(user, "first_name", None),
+        last_name=getattr(user, "last_name", None),
+        username=getattr(user, "username", None),
+    )
+    keyboard = TelegramKeyboard.menu_keyboard(settings.community_url)
+    try:
+        await update.message.reply_photo(
+            photo=settings.menu_image_url,
+            caption=text,
+            reply_markup=keyboard,
+        )
+    except Exception:
+        logger.exception("Could not send the Yields start-menu image")
+        await update.message.reply_text(text, reply_markup=keyboard)
+
+
 def create_application():
     """Create the Telegram bot application if the library and token are available."""
     if Application is None:
@@ -45,43 +61,7 @@ def create_application():
     application = Application.builder().token(settings.telegram_bot_token).build()
 
     async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        user_id = update.effective_user.id
-        display_name = getattr(update.effective_user, "first_name", None) or getattr(update.effective_user, "username", None) or "friend"
-        try:
-            await asyncio.to_thread(
-                trade_history_service.ensure_user,
-                user_id,
-                first_name=getattr(update.effective_user, "first_name", None),
-                last_name=getattr(update.effective_user, "last_name", None),
-                username=getattr(update.effective_user, "username", None),
-                account_mode=account_mode_service.get_mode(user_id),
-            )
-        except Exception:
-            logger.exception("Could not register Telegram user in Supabase")
-        connected = bool(auth_service.get_valid_access_token(str(user_id)))
-        keypad = TelegramKeyboard.dashboard_keyboard() if connected else TelegramKeyboard.start_keyboard()
-        text = await build_start_message(user_id, display_name=display_name) if connected else handle_start(user_id, display_name=display_name)
-        await update.message.reply_text(text, reply_markup=keypad)
-
-    async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        user = update.effective_user
-        display_name = getattr(user, "first_name", None) or getattr(user, "username", None) or "friend"
-        text = await build_menu_message(
-            user.id,
-            display_name=getattr(user, "first_name", None),
-            last_name=getattr(user, "last_name", None),
-            username=getattr(user, "username", None),
-        )
-        keyboard = TelegramKeyboard.menu_keyboard(settings.community_url)
-        try:
-            await update.message.reply_photo(
-                photo=settings.menu_image_url,
-                caption=text,
-                reply_markup=keyboard,
-            )
-        except Exception:
-            logger.exception("Could not send the Yields menu image")
-            await update.message.reply_text(text, reply_markup=keyboard)
+        await _send_menu_message(update)
 
     async def connect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = update.effective_user.id
@@ -110,7 +90,6 @@ def create_application():
         await update.message.reply_text(handle_scan(), reply_markup=TelegramKeyboard.dashboard_keyboard())
 
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("menu", menu))
     application.add_handler(CommandHandler("connect", connect))
     application.add_handler(CommandHandler("status", status))
     application.add_handler(CommandHandler("balance", balance))

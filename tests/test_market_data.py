@@ -11,8 +11,10 @@ import httpx
 
 from app.bot.callbacks import (
     _run_auto_trade,
+    _show_auto_trade_setup,
     _setup_photo_url,
     _session_end_message,
+    calculate_relative_stake,
     dispatch_callback,
     execute_trade,
 )
@@ -24,6 +26,7 @@ from app.bot.handlers import (
     handle_start,
 )
 from app.bot.keyboards import TelegramKeyboard
+from app.bot.telegram_bot import _send_menu_message
 from app.config import settings
 from app.main import app, deriv_oauth_callback
 from app.models.market import MarketSnapshot
@@ -206,12 +209,25 @@ class MarketDataTests(unittest.TestCase):
 
     def test_stake_keyboard_excludes_blocked_values(self):
         keyboard = TelegramKeyboard.stake_keyboard()
-        labels = [button.text for row in keyboard.inline_keyboard for button in row]
+        rows = keyboard.inline_keyboard
 
-        self.assertNotIn("$2", labels)
-        self.assertNotIn("$20", labels)
-        self.assertNotIn("$200", labels)
-        self.assertEqual(labels.count("$5"), 1)
+        self.assertEqual(
+            [[button.text for button in row] for row in rows],
+            [["🟢 0.1%", "🟢 0.5%", "🟠 1%"]],
+        )
+        self.assertEqual([button.callback_data for button in rows[0]], [
+            "AUTO_TRADE_STAKE_0_1",
+            "AUTO_TRADE_STAKE_0_5",
+            "AUTO_TRADE_STAKE_1",
+        ])
+        self.assertEqual([button.style for button in rows[0]], ["success", "success", None])
+
+    def test_relative_stakes_use_half_up_whole_number_rounding(self):
+        self.assertEqual(calculate_relative_stake(5000, "0_1"), 5)
+        self.assertEqual(calculate_relative_stake(5000, "0_5"), 25)
+        self.assertEqual(calculate_relative_stake(5000, "1"), 50)
+        self.assertEqual(calculate_relative_stake(250.5, "0_5"), 1)
+        self.assertEqual(calculate_relative_stake(400, "0_1"), 0)
 
     def test_state_dir_falls_back_when_render_path_is_not_writable(self):
         import app.services.auth_service as auth_service
@@ -381,8 +397,8 @@ class MarketDataTests(unittest.TestCase):
             )
 
         self.assertIn("Welcome back, Sam.", text)
-        self.assertIn("$1,250.50 USD", text)
-        self.assertIn("$750.25 USD", text)
+        self.assertIn("1,250.50 USD", text)
+        self.assertIn("750.25 USD", text)
         self.assertIn("AI", text)
         self.assertNotIn("Gemini", text)
 
@@ -432,6 +448,53 @@ class MarketDataTests(unittest.TestCase):
         )
         self.assertEqual(rows[1][1].url, "https://t.me/+N58js2a8NF1mMzY0")
 
+    def test_start_menu_sender_sends_brand_image_and_menu_keyboard(self):
+        class FakeMessage:
+            def __init__(self):
+                self.photo = None
+                self.text = None
+
+            async def reply_photo(self, **kwargs):
+                self.photo = kwargs
+
+            async def reply_text(self, text, **kwargs):
+                self.text = (text, kwargs)
+
+        class FakeUpdate:
+            def __init__(self):
+                self.effective_user = type(
+                    "User",
+                    (),
+                    {
+                        "id": "start-menu-user",
+                        "first_name": "Sam",
+                        "last_name": "User",
+                        "username": "sam_user",
+                    },
+                )()
+                self.message = FakeMessage()
+
+        update = FakeUpdate()
+        with patch(
+            "app.bot.telegram_bot.build_menu_message",
+            new=AsyncMock(return_value="Welcome to Yields"),
+        ):
+            asyncio.run(_send_menu_message(update))
+
+        self.assertIsNotNone(update.message.photo)
+        self.assertEqual(update.message.photo["photo"], settings.menu_image_url)
+        self.assertEqual(update.message.photo["caption"], "Welcome to Yields")
+        rows = update.message.photo["reply_markup"].inline_keyboard
+        self.assertEqual(
+            [[button.text for button in row] for row in rows],
+            [
+                ["🚀 Auto Trade"],
+                ["💎 Get Tokens", "🌍 Community"],
+                ["❓ Faq"],
+                ["🎁 Invite"],
+            ],
+        )
+
     def test_auto_trade_setup_images_use_supabase_urls_by_direction(self):
         self.assertEqual(
             _setup_photo_url("BULLISH"),
@@ -442,7 +505,7 @@ class MarketDataTests(unittest.TestCase):
             settings.bearish_setup_image_url,
         )
 
-    def test_auto_trade_start_prompts_for_stake_and_uses_ai_language(self):
+    def test_auto_trade_start_matches_indicator_setup_format(self):
         auth = AuthService()
         auth.connect_user(
             "trade-user",
@@ -458,18 +521,34 @@ class MarketDataTests(unittest.TestCase):
             "app.bot.handlers.build_auto_trade_setup",
             return_value={
                 "symbol": "STPRNG",
+                "display_name": "Step Index 100",
                 "direction": "BULLISH",
                 "confidence": 0.83,
                 "setup_quality": 0.88,
+                "current_price": 120.0,
+                "indicators": {
+                    "rsi": 25.0,
+                    "macd": 2.0,
+                    "macd_signal": 1.0,
+                    "ma50": 110.0,
+                    "ma200": 100.0,
+                },
                 "reasoning": "Strong upward trend and trend alignment.",
             },
         ):
-            text = handle_auto_trade_start("trade-user", display_name="Sam")
+            text = handle_auto_trade_start("trade-user")
 
-        self.assertIn("Hi Sam", text)
-        self.assertIn("AI", text)
-        self.assertNotIn("Gemini", text)
-        self.assertIn("Select your stake", text)
+        self.assertEqual(
+            text,
+            "🟢 Strong Bullish Setup Detected\n\n"
+            "<pre>Trading pair: Step Index 100\n"
+            "RSI: oversold\n"
+            "MACD: bullish\n"
+            "MA50: price above\n"
+            "MA200: price above\n"
+            "Direction: UP 🟢</pre>\n\n"
+            "Select trade amount 👇",
+        )
 
     def test_auto_trade_start_message_is_clear_and_meaningful(self):
         auth = AuthService()
@@ -491,22 +570,26 @@ class MarketDataTests(unittest.TestCase):
                 "direction": "BULLISH",
                 "confidence": 0.76,
                 "setup_quality": 0.76,
+                "current_price": 120.0,
+                "indicators": {
+                    "rsi": 65.0,
+                    "macd": 2.0,
+                    "macd_signal": 1.0,
+                    "ma50": 110.0,
+                    "ma200": 100.0,
+                },
                 "reasoning": "The Step 400 shows bullish pressure with MA50/MA200 alignment and RSI confirmation.",
             },
         ):
-            text = handle_auto_trade_start("readable-user", display_name="Samuel")
+            text = handle_auto_trade_start("readable-user")
 
-        self.assertIn("Hi Samuel", text)
-        self.assertIn("AI Auto Trade", text)
-        self.assertIn("Best setup", text)
-        self.assertIn("Market:", text)
-        self.assertIn("Direction:", text)
-        self.assertIn("Confidence:", text)
-        self.assertIn("Setup quality:", text)
-        self.assertIn("Why this setup works", text)
-        self.assertIn("Select your stake to continue", text)
+        self.assertIn("Strong Bullish Setup Detected", text)
+        self.assertIn("Trading pair: Step 400", text)
+        self.assertIn("Direction: UP 🟢", text)
+        self.assertIn("<pre>", text)
+        self.assertIn("Select trade amount", text)
 
-    def test_premium_trade_summary_has_help_footer(self):
+    def test_auto_trade_setup_has_copyable_analysis_block(self):
         auth = AuthService()
         auth.connect_user(
             "premium-user",
@@ -526,13 +609,21 @@ class MarketDataTests(unittest.TestCase):
                 "direction": "BULLISH",
                 "confidence": 0.76,
                 "setup_quality": 0.76,
+                "current_price": 120.0,
+                "indicators": {
+                    "rsi": 65.0,
+                    "macd": 2.0,
+                    "macd_signal": 1.0,
+                    "ma50": 110.0,
+                    "ma200": 100.0,
+                },
                 "reasoning": "The Step 400 shows bullish pressure with MA50/MA200 alignment and RSI confirmation.",
             },
         ):
-            text = handle_auto_trade_start("premium-user", display_name="Samuel")
+            text = handle_auto_trade_start("premium-user")
 
-        self.assertIn("Need help with something? Ask Sammie @samueludoh_ng", text)
-        self.assertIn("⚡", text)
+        self.assertIn("<pre>", text)
+        self.assertIn("Select trade amount 👇", text)
 
     def test_auto_trade_setup_ranks_markets_from_indicators_deterministically(self):
         auth = AuthService()
@@ -720,10 +811,196 @@ class MarketDataTests(unittest.TestCase):
         create_session.assert_not_called()
         run_auto_trade_mock.assert_not_awaited()
 
+    def test_auto_trade_warns_at_fifty_tokens_before_scanning(self):
+        class FakeQuery:
+            def __init__(self):
+                self.data = "START_AUTO_TRADE"
+                self.edited = None
+                self.reply_markup = None
+
+            async def answer(self):
+                return None
+
+            async def edit_message_text(self, text, **kwargs):
+                self.edited = text
+                self.reply_markup = kwargs.get("reply_markup")
+
+        class FakeUpdate:
+            def __init__(self):
+                self.callback_query = FakeQuery()
+                self.effective_user = type("User", (), {"id": "low-token-user"})()
+
+        update = FakeUpdate()
+
+        with patch(
+            "app.bot.callbacks.trade_history_service",
+            SimpleNamespace(
+                ensure_user=lambda *_args, **_kwargs: {"token_balance": 50},
+            ),
+        ), patch(
+            "app.bot.callbacks.build_auto_trade_setup",
+        ) as build_setup:
+            asyncio.run(dispatch_callback(update, None))
+
+        self.assertIn("50 tokens", update.callback_query.edited)
+        self.assertIn("LOW TOKEN BALANCE", update.callback_query.edited)
+        build_setup.assert_not_called()
+        rows = update.callback_query.reply_markup.inline_keyboard
+        self.assertEqual(
+            [[button.text for button in row] for row in rows],
+            [
+                ["🚀 Trade Anyway", "💎 Get Tokens"],
+                ["🏠 Main Menu", "💬 Message Sammie"],
+            ],
+        )
+        self.assertEqual(
+            rows[1][1].url,
+            "https://t.me/samueludoh_ng",
+        )
+
+    def test_trade_anyway_rechecks_balance_before_continuing(self):
+        class FakeQuery:
+            def __init__(self):
+                self.data = "AUTO_TRADE_TRADE_ANYWAY"
+                self.edited = None
+
+            async def answer(self):
+                return None
+
+            async def edit_message_text(self, text, **kwargs):
+                self.edited = text
+
+        class FakeUpdate:
+            def __init__(self):
+                self.callback_query = FakeQuery()
+                self.effective_user = type("User", (), {"id": "trade-anyway-user"})()
+
+        update = FakeUpdate()
+        show_setup = AsyncMock()
+
+        with patch(
+            "app.bot.callbacks.trade_history_service",
+            SimpleNamespace(
+                ensure_user=lambda *_args, **_kwargs: {"token_balance": 1},
+            ),
+        ), patch(
+            "app.bot.callbacks._show_auto_trade_setup",
+            new=show_setup,
+        ):
+            asyncio.run(dispatch_callback(update, None))
+
+        show_setup.assert_awaited_once()
+
+    def test_balance_above_fifty_skips_low_token_warning(self):
+        class FakeQuery:
+            def __init__(self):
+                self.data = "START_AUTO_TRADE"
+
+            async def answer(self):
+                return None
+
+        class FakeUpdate:
+            def __init__(self):
+                self.callback_query = FakeQuery()
+                self.effective_user = type("User", (), {"id": "above-threshold-user"})()
+
+        show_setup = AsyncMock()
+
+        with patch(
+            "app.bot.callbacks.trade_history_service",
+            SimpleNamespace(
+                ensure_user=lambda *_args, **_kwargs: {"token_balance": 51},
+            ),
+        ), patch(
+            "app.bot.callbacks._show_auto_trade_setup",
+            new=show_setup,
+        ):
+            asyncio.run(dispatch_callback(FakeUpdate(), None))
+
+        show_setup.assert_awaited_once()
+
+    def test_trade_anyway_stops_if_balance_has_reached_zero(self):
+        class FakeQuery:
+            def __init__(self):
+                self.data = "AUTO_TRADE_TRADE_ANYWAY"
+                self.edited = None
+
+            async def answer(self):
+                return None
+
+            async def edit_message_text(self, text, **kwargs):
+                self.edited = text
+
+        class FakeUpdate:
+            def __init__(self):
+                self.callback_query = FakeQuery()
+                self.effective_user = type("User", (), {"id": "now-empty-user"})()
+
+        update = FakeUpdate()
+        show_setup = AsyncMock()
+
+        with patch(
+            "app.bot.callbacks.trade_history_service",
+            SimpleNamespace(
+                ensure_user=lambda *_args, **_kwargs: {"token_balance": 0},
+            ),
+        ), patch(
+            "app.bot.callbacks._show_auto_trade_setup",
+            new=show_setup,
+        ):
+            asyncio.run(dispatch_callback(update, None))
+
+        self.assertIn("out of Yields Tokens", update.callback_query.edited)
+        show_setup.assert_not_awaited()
+
+    def test_auto_trade_setup_message_uses_a_single_scan_result(self):
+        class FakeQuery:
+            def __init__(self):
+                self.edited = None
+
+            async def edit_message_text(self, text, **kwargs):
+                self.edited = text
+
+        class FakeUpdate:
+            def __init__(self):
+                self.callback_query = FakeQuery()
+                self.effective_user = type("User", (), {"id": "single-scan-user"})()
+
+        setup = {
+            "symbol": "step_100",
+            "display_name": "Step Index 100",
+            "direction": "BULLISH",
+            "current_price": 120.0,
+            "indicators": {
+                "rsi": 25.0,
+                "macd": 2.0,
+                "macd_signal": 1.0,
+                "ma50": 110.0,
+                "ma200": 100.0,
+            },
+        }
+        update = FakeUpdate()
+
+        with patch(
+            "app.bot.callbacks.auth_service.get_valid_access_token",
+            return_value="access-token",
+        ), patch(
+            "app.bot.callbacks.build_auto_trade_setup",
+            return_value=setup,
+        ) as build_setup, patch(
+            "app.bot.callbacks._setup_photo_url",
+            return_value=None,
+        ):
+            asyncio.run(_show_auto_trade_setup(update, update.callback_query))
+
+        build_setup.assert_called_once_with("single-scan-user")
+        self.assertIn("Trading pair: Step Index 100", update.callback_query.edited)
+        self.assertIn("<pre>", update.callback_query.edited)
+
     def test_stake_callback_falls_back_to_caption_edit_when_message_is_media(self):
         class FakeQuery:
             def __init__(self):
-                self.data = "AUTO_TRADE_STAKE_5"
+                self.data = "AUTO_TRADE_STAKE_0_1"
                 self.caption_text = None
                 self.text_text = None
                 self.answer_calls = 0
@@ -758,6 +1035,16 @@ class MarketDataTests(unittest.TestCase):
             "app.bot.callbacks.account_mode_service.get_mode",
             return_value="demo",
         ), patch(
+            "app.bot.callbacks.account_service.get_trade_account",
+            new=AsyncMock(
+                return_value={
+                    "account_type": "demo",
+                    "account_id": "demo-1",
+                    "balance": 5000,
+                    "currency": "USD",
+                }
+            ),
+        ), patch(
             "app.bot.callbacks.auto_trade_service.is_running",
             return_value=False,
         ), patch(
@@ -775,6 +1062,10 @@ class MarketDataTests(unittest.TestCase):
         self.assertIsNotNone(query.text_text)
         self.assertIsNotNone(query.caption_text)
         self.assertIn("TRADE CONFIRMATION", query.caption_text)
+        self.assertIn(
+            "Initial stake: 5 USD (0.1% of 5,000.00 USD balance)",
+            query.caption_text,
+        )
 
     def test_confirm_start_callback_falls_back_to_caption_edit_when_message_is_media(self):
         class FakeQuery:
@@ -1189,7 +1480,7 @@ class MarketDataTests(unittest.TestCase):
         self.assertIn("Market: Step Index 500", text)
         self.assertIn("Account: DEMO", text)
         self.assertIn("Result: +$6.68 USD", text)
-        self.assertIn("Balance: $172.09 USD", text)
+        self.assertIn("Balance: 172.09 USD", text)
         self.assertIn("Tokens used: 10", text)
         self.assertIn("Tokens remaining: 40", text)
 
