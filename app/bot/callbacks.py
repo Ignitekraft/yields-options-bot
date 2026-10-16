@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 try:
@@ -77,6 +78,25 @@ def calculate_relative_stake(account_balance: object, percentage_key: str) -> fl
             rounding=ROUND_HALF_UP,
         )
     )
+
+
+def parse_custom_stake(value: object) -> float:
+    raw_value = str(value or "").strip()
+    if len(raw_value) > 24 or not re.fullmatch(
+        r"\$?(?:\d+|\d{1,3}(?:,\d{3})+)(?:\.\d{1,2})?",
+        raw_value,
+    ):
+        raise ValueError("INVALID_CUSTOM_STAKE")
+    try:
+        amount = Decimal(raw_value.removeprefix("$").replace(",", ""))
+        cents = amount.quantize(Decimal("0.01"))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise ValueError("INVALID_CUSTOM_STAKE") from exc
+    if not amount.is_finite() or amount <= 0:
+        raise ValueError("INVALID_CUSTOM_STAKE")
+    if cents != amount:
+        raise ValueError("CUSTOM_STAKE_MAX_TWO_DECIMAL_PLACES")
+    return float(amount)
 
 
 def _stake_selection_from_callback(
@@ -973,6 +993,197 @@ async def _run_auto_trade(update, state) -> None:
         )
 
 
+async def _prepare_trade_confirmation(
+    update,
+    query,
+    *,
+    setup: dict,
+    stake_value: float,
+    currency: str,
+    account_mode: str,
+    token_balance: int,
+    stake_description: str,
+    stake_percentage_key: str | None = None,
+) -> bool:
+    user_id = update.effective_user.id
+
+    async def report(text: str) -> None:
+        if hasattr(query, "edit_message_text"):
+            await _safe_edit_message(query, text)
+        else:
+            await query.reply_text(text)
+
+    if auto_trade_service.is_running(user_id):
+        await report("⚠️ An Auto Trade run is already active.")
+        return False
+
+    try:
+        auto_trade_service.start_run(
+            user_id=user_id,
+            symbol=setup["symbol"],
+            direction=setup["direction"],
+            base_stake=stake_value,
+            account_mode=account_mode,
+        )
+        state = auto_trade_service.get_run(user_id)
+        if state is not None:
+            state.currency = currency
+            state.stake_percentage_key = stake_percentage_key
+    except (RuntimeError, ValueError) as exc:
+        await report(f"⚠️ Unable to prepare Auto Trade: {exc}")
+        return False
+
+    confirmation = (
+        "⚡ TRADE CONFIRMATION\n\n"
+        f"Market: {setup.get('display_name', setup['symbol'])}\n"
+        f"Direction: {setup['direction']}\n"
+        f"Account mode: {account_mode.upper()}\n"
+        f"Initial stake: {stake_value:,.2f} {currency}"
+        f"{stake_description}\n"
+        f"Available tokens: {token_balance}\n"
+        "Expiry: 30 seconds\n"
+        "Target: 5 winning cycles\n"
+        f"Safety stop: {auto_trade_service.MAX_CONSECUTIVE_LOSSES} "
+        "consecutive losses\n\n"
+        "A loss stays in the current cycle and increases the next stake "
+        "through Smart Scaling to help recover. "
+        "A settled win advances the cycle and resets the stake.\n\n"
+        "Confirm to begin."
+    )
+    keyboard = TelegramKeyboard.confirmation_keyboard()
+    if hasattr(query, "edit_message_text"):
+        await _safe_edit_message(
+            query,
+            confirmation,
+            reply_markup=keyboard,
+        )
+    else:
+        await query.reply_text(confirmation, reply_markup=keyboard)
+    return True
+
+
+async def handle_custom_stake_input(update, context=None) -> None:
+    del context
+    message = update.message
+    user = update.effective_user
+    request = auto_trade_service.get_custom_stake_request(user.id)
+    if request is None:
+        return
+
+    def reply(text: str, **kwargs):
+        return message.reply_text(text, **kwargs)
+
+    try:
+        stake_value = parse_custom_stake(message.text)
+    except ValueError:
+        await reply(
+            "⚠️ Enter a valid stake greater than zero, with no more than "
+            "two decimal places (for example, 12.50)."
+        )
+        return
+
+    account_mode = str(request["account_mode"])
+    if account_mode_service.get_mode(user.id) != account_mode:
+        auto_trade_service.clear_custom_stake_request(user.id)
+        await reply(
+            "⚠️ Your account mode changed. Please select a stake again "
+            "from the current Auto Trade setup."
+        )
+        return
+    if not auth_service.get_valid_access_token(str(user.id)):
+        auto_trade_service.clear_custom_stake_request(user.id)
+        await reply("⚠️ Connect your Deriv account before setting a stake.")
+        return
+
+    try:
+        profile = await asyncio.to_thread(
+            trade_history_service.ensure_user,
+            user.id,
+            first_name=getattr(user, "first_name", None),
+            last_name=getattr(user, "last_name", None),
+            username=getattr(user, "username", None),
+            account_mode=account_mode,
+        )
+        token_balance = max(0, int(profile.get("token_balance", 0)))
+    except Exception:
+        logger.exception("Could not verify tokens for custom-stake Auto Trade")
+        await reply(
+            "⚠️ Auto Trade is temporarily unavailable because your token "
+            "balance could not be verified. Please try again shortly."
+        )
+        return
+    if token_balance <= 0:
+        auto_trade_service.clear_custom_stake_request(user.id)
+        await reply(TOKEN_EXHAUSTED_MESSAGE)
+        return
+
+    try:
+        selected_account = await account_service.get_trade_account(
+            user.id,
+            account_mode=account_mode,
+        )
+        balance = Decimal(str(selected_account.get("balance")))
+        if not balance.is_finite() or balance <= 0:
+            raise ValueError("INVALID_ACCOUNT_BALANCE")
+    except Exception:
+        logger.exception("Could not verify account balance for custom stake")
+        await reply(
+            "⚠️ The selected account balance could not be verified, so no "
+            "trade was prepared. Please try again."
+        )
+        return
+
+    if Decimal(str(stake_value)) > balance:
+        await reply(
+            f"⚠️ Your stake (${stake_value:,.2f}) exceeds the available "
+            f"{account_mode.upper()} balance of "
+            f"${balance:,.2f} {selected_account.get('currency') or 'USD'}. "
+            "Enter a smaller amount."
+        )
+        return
+
+    symbol = request.get("symbol")
+    direction = request.get("direction")
+    if symbol and direction:
+        setup = {
+            "symbol": symbol,
+            "display_name": friendly_market_name(symbol),
+            "direction": direction,
+        }
+    else:
+        try:
+            setup = await asyncio.to_thread(build_auto_trade_setup, user.id)
+        except Exception:
+            logger.exception("Could not retrieve setup for custom-stake Auto Trade")
+            await reply(
+                "⚠️ Live market data is temporarily unavailable. "
+                "No trade was placed. Please try again shortly."
+            )
+            return
+    if (
+        setup.get("symbol") == "NO_SETUP"
+        or setup.get("direction") not in {"BULLISH", "BEARISH"}
+    ):
+        auto_trade_service.clear_custom_stake_request(user.id)
+        await reply(
+            "⚠️ No tradable setup is currently available. No trade has been placed."
+        )
+        return
+
+    confirmed = await _prepare_trade_confirmation(
+        update,
+        message,
+        setup=setup,
+        stake_value=stake_value,
+        currency=str(selected_account.get("currency") or "USD").upper(),
+        account_mode=account_mode,
+        token_balance=token_balance,
+        stake_description=" (custom amount)",
+    )
+    if confirmed:
+        auto_trade_service.clear_custom_stake_request(user.id)
+
+
 async def dispatch_callback(update, context) -> None:
     if update.callback_query is None:
         return
@@ -1218,6 +1429,7 @@ async def dispatch_callback(update, context) -> None:
         return
 
     if data == "AUTO_TRADE_CANCEL":
+        auto_trade_service.clear_custom_stake_request(user_id)
         state = auto_trade_service.cancel_run(user_id)
         if state is None:
             await _safe_edit_message(
@@ -1323,6 +1535,61 @@ async def dispatch_callback(update, context) -> None:
         await _run_auto_trade(update, state)
         return
 
+    if data.startswith("AUTO_TRADE_CUSTOM_STAKE"):
+        if not auth_service.get_valid_access_token(user_key):
+            await _prompt_connect(update, query)
+            return
+        if auto_trade_service.is_running(user_id):
+            await _safe_edit_message(
+                query,
+                "⚠️ An Auto Trade run is already active.",
+            )
+            return
+
+        selection = data.removeprefix("AUTO_TRADE_CUSTOM_STAKE")
+        selected_symbol = None
+        selected_direction = None
+        if selection:
+            if not selection.startswith("_"):
+                await _safe_edit_message(
+                    query,
+                    "⚠️ Invalid custom-stake selection. Please restart Auto Trade.",
+                )
+                return
+            market_and_direction = selection[1:]
+            if "_" not in market_and_direction:
+                await _safe_edit_message(
+                    query,
+                    "⚠️ Invalid custom-stake selection. Please restart Auto Trade.",
+                )
+                return
+            selected_symbol, selected_direction = market_and_direction.rsplit("_", 1)
+            if (
+                selected_symbol not in settings.auto_trade_markets
+                or selected_direction not in {"BULLISH", "BEARISH"}
+            ):
+                await _safe_edit_message(
+                    query,
+                    "⚠️ Invalid custom-stake selection. Please restart Auto Trade.",
+                )
+                return
+
+        mode = account_mode_service.get_mode(user_id)
+        auto_trade_service.set_custom_stake_request(
+            user_id,
+            selected_symbol,
+            selected_direction,
+            mode,
+        )
+        await _safe_edit_message(
+            query,
+            "✏️ Send your preferred stake amount as a number, for example "
+            "12.50. The amount must be greater than zero, may have up to "
+            "two decimal places, and cannot exceed your available account balance.",
+            reply_markup=TelegramKeyboard.custom_stake_prompt_keyboard(),
+        )
+        return
+
     if data.startswith("AUTO_TRADE_STAKE_"):
         if not auth_service.get_valid_access_token(user_key):
             await _prompt_connect(update, query)
@@ -1425,49 +1692,19 @@ async def dispatch_callback(update, context) -> None:
                 )
                 return
 
-        if auto_trade_service.is_running(user_id):
-            await query.edit_message_text(
-                "⚠️ An Auto Trade run is already active."
-            )
-            return
-
-        try:
-            auto_trade_service.start_run(
-                user_id=user_id,
-                symbol=setup["symbol"],
-                direction=setup["direction"],
-                base_stake=stake_value,
-                account_mode=mode,
-            )
-            state = auto_trade_service.get_run(user_id)
-            if state is not None:
-                state.stake_percentage_key = percentage_key
-                state.currency = currency
-        except (RuntimeError, ValueError) as exc:
-            await query.edit_message_text(
-                f"⚠️ Unable to prepare Auto Trade: {exc}"
-            )
-            return
-
-        await _safe_edit_message(
+        await _prepare_trade_confirmation(
+            update,
             query,
-            "⚡ TRADE CONFIRMATION\n\n"
-            f"Market: {setup.get('display_name', setup['symbol'])}\n"
-            f"Direction: {setup['direction']}\n"
-            f"Account mode: {mode.upper()}\n"
-            f"Initial stake: {stake_value:,.2f} {currency} "
-            f"({float(RELATIVE_STAKES[percentage_key] * 100):g}% of "
-            f"{float(account_balance):,.2f} {currency} balance)\n"
-            f"Available tokens: {token_balance}\n"
-            "Expiry: 30 seconds\n"
-            "Target: 5 winning cycles\n"
-            f"Safety stop: {auto_trade_service.MAX_CONSECUTIVE_LOSSES} "
-            "consecutive losses\n\n"
-            "A loss stays in the current cycle and increases the next stake "
-            "through Smart Scaling to help recover. "
-            "A settled win advances the cycle and resets the stake.\n\n"
-            "Confirm to begin.",
-            reply_markup=TelegramKeyboard.confirmation_keyboard(),
+            setup=setup,
+            stake_value=stake_value,
+            currency=currency,
+            account_mode=mode,
+            token_balance=token_balance,
+            stake_description=(
+                f" ({float(RELATIVE_STAKES[percentage_key] * 100):g}% of "
+                f"{float(account_balance):,.2f} {currency} balance)"
+            ),
+            stake_percentage_key=percentage_key,
         )
         return
 

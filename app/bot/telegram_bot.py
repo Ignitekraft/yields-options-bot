@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from app.bot.callbacks import dispatch_callback
+from app.bot.callbacks import dispatch_callback, handle_custom_stake_input
 from app.bot.handlers import (
     auth_service,
     build_connect_prompt,
@@ -23,13 +23,22 @@ from app.config import settings
 
 try:
     from telegram import Update
-    from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
+    from telegram.ext import (
+        Application,
+        CallbackQueryHandler,
+        CommandHandler,
+        ContextTypes,
+        MessageHandler,
+        filters,
+    )
 except ImportError:  # pragma: no cover - optional dependency in local dev sandbox
     Update = object
     ContextTypes = object
     Application = None
     CallbackQueryHandler = None
     CommandHandler = None
+    MessageHandler = None
+    filters = None
 
 logger = logging.getLogger(__name__)
 
@@ -143,4 +152,11 @@ def create_application():
     application.add_handler(CommandHandler("scan", scan))
     if CallbackQueryHandler is not None:
         application.add_handler(CallbackQueryHandler(dispatch_callback))
+    if MessageHandler is not None and filters is not None:
+        application.add_handler(
+            MessageHandler(
+                filters.TEXT & ~filters.COMMAND,
+                handle_custom_stake_input,
+            )
+        )
     return application

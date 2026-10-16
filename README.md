@@ -50,8 +50,11 @@ WebSocket; the Auto Trade product flow still requires the user to connect an
 account before scanning or trading.
 The scan requests tick and candle history over one public WebSocket connection
 for the configured markets. The stake buttons use 0.1%, 0.5%, or 1% of the
-selected account balance, rounded to the nearest whole currency unit. The
-selected market and direction remain pinned from analysis through confirmation.
+selected account balance, calculated to the nearest cent. Users can also
+choose Custom amount and enter a stake directly; the amount must be positive,
+have no more than two decimal places, and not exceed the selected account
+balance. The selected market and direction remain pinned from analysis through
+confirmation.
 
 ## Setup
 

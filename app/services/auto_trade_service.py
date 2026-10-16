@@ -66,6 +66,41 @@ class AutoTradeService:
         self._lock = threading.RLock()
         self._runs: dict[str, TradeRunState] = {}
         self._executing: set[str] = set()
+        self._custom_stake_requests: dict[str, dict[str, str | None]] = {}
+
+    def set_custom_stake_request(
+        self,
+        user_id: str | int,
+        symbol: str | None,
+        direction: str | None,
+        account_mode: str,
+    ) -> None:
+        mode = str(account_mode or "").strip().lower()
+        if mode not in {"demo", "real"}:
+            raise ValueError("INVALID_ACCOUNT_MODE")
+        if direction is not None and direction not in {
+            "BULLISH",
+            "BEARISH",
+        }:
+            raise ValueError("NO_VALID_TRADE_DIRECTION")
+        with self._lock:
+            self._custom_stake_requests[str(user_id)] = {
+                "symbol": symbol,
+                "direction": direction,
+                "account_mode": mode,
+            }
+
+    def get_custom_stake_request(
+        self,
+        user_id: str | int,
+    ) -> dict[str, str | None] | None:
+        with self._lock:
+            request = self._custom_stake_requests.get(str(user_id))
+            return dict(request) if request is not None else None
+
+    def clear_custom_stake_request(self, user_id: str | int) -> None:
+        with self._lock:
+            self._custom_stake_requests.pop(str(user_id), None)
 
     @staticmethod
     def _parse_started_at(value: str | None) -> datetime | None:

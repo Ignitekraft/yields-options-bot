@@ -193,25 +193,36 @@ class TelegramKeyboard:
             selection_suffix = f"_{symbol}_{direction.upper()}"
 
         if InlineKeyboardMarkup is None:
-            return [["🟢 0.1%", "🟢 0.5%", "🟠 1%"]]
+            return [
+                ["🟢 0.1%", "🟢 0.5%", "🟠 1%"],
+                ["✏️ Custom amount"],
+            ]
 
         return InlineKeyboardMarkup(
-            [[
-                InlineKeyboardButton(
-                    "🟢 0.1%",
-                    callback_data=f"AUTO_TRADE_STAKE_0_1{selection_suffix}",
-                    style="success",
-                ),
-                InlineKeyboardButton(
-                    "🟢 0.5%",
-                    callback_data=f"AUTO_TRADE_STAKE_0_5{selection_suffix}",
-                    style="success",
-                ),
-                InlineKeyboardButton(
-                    "🟠 1%",
-                    callback_data=f"AUTO_TRADE_STAKE_1{selection_suffix}",
-                ),
-            ]]
+            [
+                [
+                    InlineKeyboardButton(
+                        "🟢 0.1%",
+                        callback_data=f"AUTO_TRADE_STAKE_0_1{selection_suffix}",
+                        style="success",
+                    ),
+                    InlineKeyboardButton(
+                        "🟢 0.5%",
+                        callback_data=f"AUTO_TRADE_STAKE_0_5{selection_suffix}",
+                        style="success",
+                    ),
+                    InlineKeyboardButton(
+                        "🟠 1%",
+                        callback_data=f"AUTO_TRADE_STAKE_1{selection_suffix}",
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        "✏️ Custom amount",
+                        callback_data=f"AUTO_TRADE_CUSTOM_STAKE{selection_suffix}",
+                    )
+                ],
+            ]
         )
 
     @staticmethod
@@ -221,6 +232,12 @@ class TelegramKeyboard:
                 [("✅ Confirm & Start", "AUTO_TRADE_CONFIRM")],
                 [("✕ Cancel", "AUTO_TRADE_CANCEL")],
             ]
+        )
+
+    @staticmethod
+    def custom_stake_prompt_keyboard() -> object:
+        return TelegramKeyboard._keyboard(
+            [[("✕ Cancel", "AUTO_TRADE_CANCEL")]]
         )
 
     @staticmethod

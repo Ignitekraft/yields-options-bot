@@ -14,6 +14,8 @@ import httpx
 from app.bot.callbacks import (
     _handle_auto_trade_entry,
     _run_auto_trade,
+    handle_custom_stake_input,
+    parse_custom_stake,
     _send_low_token_message,
     _show_auto_trade_setup,
     _setup_photo_url,
@@ -713,7 +715,7 @@ class MarketDataTests(unittest.TestCase):
 
         self.assertEqual(
             [[button.text for button in row] for row in rows],
-            [["🟢 0.1%", "🟢 0.5%", "🟠 1%"]],
+            [["🟢 0.1%", "🟢 0.5%", "🟠 1%"], ["✏️ Custom amount"]],
         )
         self.assertEqual([button.callback_data for button in rows[0]], [
             "AUTO_TRADE_STAKE_0_1",
@@ -721,6 +723,10 @@ class MarketDataTests(unittest.TestCase):
             "AUTO_TRADE_STAKE_1",
         ])
         self.assertEqual([button.style for button in rows[0]], ["success", "success", None])
+        self.assertEqual(
+            rows[1][0].callback_data,
+            "AUTO_TRADE_CUSTOM_STAKE",
+        )
 
     def test_stake_keyboard_carries_the_analyzed_market_and_direction(self):
         keyboard = TelegramKeyboard.stake_keyboard("step_100", "BULLISH")
@@ -732,6 +738,181 @@ class MarketDataTests(unittest.TestCase):
                 "AUTO_TRADE_STAKE_0_5_step_100_BULLISH",
                 "AUTO_TRADE_STAKE_1_step_100_BULLISH",
             ],
+        )
+        self.assertEqual(
+            keyboard.inline_keyboard[1][0].callback_data,
+            "AUTO_TRADE_CUSTOM_STAKE_step_100_BULLISH",
+        )
+
+    def test_custom_stake_parser_accepts_cents_and_rejects_invalid_amounts(self):
+        self.assertEqual(parse_custom_stake("$1,250.35"), 1250.35)
+        self.assertEqual(parse_custom_stake("0.01"), 0.01)
+        for invalid in ("", "0", "-1", "1.234", "NaN", "abc"):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                parse_custom_stake(invalid)
+
+    def test_custom_stake_button_prompts_for_amount_and_remembers_setup(self):
+        service = AutoTradeService()
+
+        class FakeQuery:
+            data = "AUTO_TRADE_CUSTOM_STAKE_step_100_BULLISH"
+
+            def __init__(self):
+                self.edited = None
+
+            async def answer(self):
+                return None
+
+            async def edit_message_text(self, text, **_kwargs):
+                self.edited = text
+
+        query = FakeQuery()
+        update = SimpleNamespace(
+            callback_query=query,
+            effective_user=SimpleNamespace(id="custom-stake-prompt-user"),
+        )
+        with patch(
+            "app.bot.callbacks.auto_trade_service",
+            service,
+        ), patch(
+            "app.bot.callbacks.auth_service.get_valid_access_token",
+            return_value="access-token",
+        ), patch(
+            "app.bot.callbacks.account_mode_service.get_mode",
+            return_value="demo",
+        ):
+            asyncio.run(dispatch_callback(update, None))
+
+        self.assertIn("Send your preferred stake amount", query.edited)
+        self.assertEqual(
+            service.get_custom_stake_request("custom-stake-prompt-user"),
+            {
+                "symbol": "step_100",
+                "direction": "BULLISH",
+                "account_mode": "demo",
+            },
+        )
+
+    def test_custom_stake_input_creates_confirmation_for_selected_setup(self):
+        service = AutoTradeService()
+        service.set_custom_stake_request(
+            "custom-stake-user",
+            "step_300",
+            "BEARISH",
+            "demo",
+        )
+
+        class FakeMessage:
+            def __init__(self):
+                self.text = "$12.34"
+                self.replies = []
+
+            async def reply_text(self, text, **kwargs):
+                self.replies.append((text, kwargs))
+
+        message = FakeMessage()
+        update = SimpleNamespace(
+            message=message,
+            effective_user=SimpleNamespace(
+                id="custom-stake-user",
+                first_name="Test",
+                last_name="User",
+                username="test_user",
+            ),
+        )
+
+        with patch(
+            "app.bot.callbacks.auto_trade_service",
+            service,
+        ), patch(
+            "app.bot.callbacks.account_mode_service.get_mode",
+            return_value="demo",
+        ), patch(
+            "app.bot.callbacks.auth_service.get_valid_access_token",
+            return_value="access-token",
+        ), patch(
+            "app.bot.callbacks.trade_history_service.ensure_user",
+            return_value={"token_balance": 12},
+        ), patch(
+            "app.bot.callbacks.account_service.get_trade_account",
+            new=AsyncMock(
+                return_value={
+                    "account_type": "demo",
+                    "balance": 50.0,
+                    "currency": "USD",
+                }
+            ),
+        ):
+            asyncio.run(handle_custom_stake_input(update))
+
+        state = service.get_run("custom-stake-user")
+        self.assertEqual(state.base_stake, 12.34)
+        self.assertEqual(state.symbol, "step_300")
+        self.assertEqual(state.direction, "BEARISH")
+        self.assertEqual(state.status, "awaiting_confirmation")
+        self.assertIn("Initial stake: 12.34 USD (custom amount)", message.replies[0][0])
+        self.assertIsNotNone(message.replies[0][1]["reply_markup"])
+        self.assertIsNone(
+            service.get_custom_stake_request("custom-stake-user")
+        )
+
+    def test_custom_stake_input_rejects_amount_above_account_balance(self):
+        service = AutoTradeService()
+        service.set_custom_stake_request(
+            "custom-stake-too-large-user",
+            "step_300",
+            "BEARISH",
+            "demo",
+        )
+
+        class FakeMessage:
+            text = "20.00"
+
+            def __init__(self):
+                self.replies = []
+
+            async def reply_text(self, text, **_kwargs):
+                self.replies.append(text)
+
+        message = FakeMessage()
+        update = SimpleNamespace(
+            message=message,
+            effective_user=SimpleNamespace(
+                id="custom-stake-too-large-user",
+                first_name="Test",
+                last_name="User",
+                username="test_user",
+            ),
+        )
+
+        with patch(
+            "app.bot.callbacks.auto_trade_service",
+            service,
+        ), patch(
+            "app.bot.callbacks.account_mode_service.get_mode",
+            return_value="demo",
+        ), patch(
+            "app.bot.callbacks.auth_service.get_valid_access_token",
+            return_value="access-token",
+        ), patch(
+            "app.bot.callbacks.trade_history_service.ensure_user",
+            return_value={"token_balance": 12},
+        ), patch(
+            "app.bot.callbacks.account_service.get_trade_account",
+            new=AsyncMock(
+                return_value={
+                    "account_type": "demo",
+                    "balance": 10.0,
+                    "currency": "USD",
+                }
+            ),
+        ):
+            asyncio.run(handle_custom_stake_input(update))
+
+        self.assertIn("exceeds the available DEMO balance", message.replies[0])
+        self.assertIsNone(service.get_run("custom-stake-too-large-user"))
+        self.assertIsNotNone(
+            service.get_custom_stake_request("custom-stake-too-large-user")
         )
 
     def test_relative_stakes_preserve_cents(self):
