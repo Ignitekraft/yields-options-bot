@@ -69,7 +69,7 @@ def _dashboard_text(
         f"Welcome back, {name}.\n\n"
         "Your Deriv account is connected.\n\n"
         f"Account Mode: {_mode_label(mode)}\n\n"
-        "━━━━━━━━━━━━━━━━━━\n"
+        "--------\n\n"
         "💰 ACCOUNT\n\n"
         f"Real: {_format_currency(real_balance)}\n"
         f"Demo: {_format_currency(demo_balance)}\n\n"

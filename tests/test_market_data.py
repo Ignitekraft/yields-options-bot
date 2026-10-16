@@ -1179,6 +1179,58 @@ class MarketDataTests(unittest.TestCase):
             query.reply_markup.inline_keyboard[0][0].url,
             oauth_url,
         )
+        self.assertEqual(
+            query.reply_markup.inline_keyboard[1][0].callback_data,
+            "MENU_MAIN",
+        )
+
+    def test_main_menu_callback_uses_start_menu_for_disconnected_user(self):
+        class FakeQuery:
+            data = "MENU_MAIN"
+
+            def __init__(self):
+                self.media = None
+
+            async def answer(self):
+                return None
+
+            async def edit_message_media(self, **kwargs):
+                self.media = kwargs
+
+        query = FakeQuery()
+        update = SimpleNamespace(
+            callback_query=query,
+            effective_user=SimpleNamespace(
+                id="main-menu-user",
+                first_name="Sam",
+                last_name="User",
+                username="sam_user",
+            ),
+        )
+
+        with patch(
+            "app.bot.callbacks.build_menu_message",
+            new=AsyncMock(return_value="Start menu"),
+        ) as build_menu, patch(
+            "app.bot.callbacks.auth_service.get_valid_access_token",
+            return_value=None,
+        ):
+            asyncio.run(dispatch_callback(update, None))
+
+        build_menu.assert_awaited_once_with(
+            "main-menu-user",
+            display_name="Sam",
+            last_name="User",
+            username="sam_user",
+        )
+        self.assertEqual(query.media["media"].caption, "Start menu")
+        self.assertEqual(
+            [[button.text for button in row] for row in query.media["reply_markup"].inline_keyboard],
+            [
+                ["🔐 Connect Deriv"],
+                ["ℹ️ How Yields Works"],
+            ],
+        )
 
     def test_start_info_button_edits_photo_caption(self):
         class FakeQuery:
@@ -1414,6 +1466,105 @@ class MarketDataTests(unittest.TestCase):
                 for button in row
             ],
         )
+
+    def test_scan_error_replaces_old_photo_with_plain_text(self):
+        class FakeMessage:
+            photo = ["previous-low-token-warning-photo"]
+
+            def __init__(self):
+                self.replies = []
+                self.deleted = False
+
+            async def reply_text(self, text, **kwargs):
+                self.replies.append((text, kwargs))
+
+            async def delete(self):
+                self.deleted = True
+
+        class FakeQuery:
+            def __init__(self):
+                self.message = FakeMessage()
+
+            async def answer(self, *_args, **_kwargs):
+                return None
+
+            async def edit_message_text(self, *_args, **_kwargs):
+                raise AssertionError("photo messages should be replaced, not edited")
+
+        query = FakeQuery()
+        update = SimpleNamespace(
+            effective_user=SimpleNamespace(id="scan-error-user"),
+            callback_query=query,
+        )
+
+        with patch(
+            "app.bot.callbacks.auth_service.get_valid_access_token",
+            return_value="access-token",
+        ), patch(
+            "app.bot.callbacks.build_auto_trade_setup",
+            side_effect=ValueError("Deriv history unavailable"),
+        ):
+            asyncio.run(_show_auto_trade_setup(update, query))
+
+        self.assertEqual(len(query.message.replies), 1)
+        text, _kwargs = query.message.replies[0]
+        self.assertIn("Live Deriv market data is temporarily unavailable", text)
+        self.assertNotIn("LOW TOKENS", text)
+        self.assertTrue(query.message.deleted)
+
+    def test_no_trade_result_does_not_reuse_low_token_photo(self):
+        class FakeMessage:
+            photo = ["previous-low-token-warning-photo"]
+
+            def __init__(self):
+                self.replies = []
+                self.deleted = False
+
+            async def reply_text(self, text, **kwargs):
+                self.replies.append((text, kwargs))
+
+            async def delete(self):
+                self.deleted = True
+
+        class FakeQuery:
+            def __init__(self):
+                self.message = FakeMessage()
+
+            async def answer(self, *_args, **_kwargs):
+                return None
+
+            async def edit_message_text(self, *_args, **_kwargs):
+                raise AssertionError("photo messages should be replaced, not edited")
+
+        query = FakeQuery()
+        update = SimpleNamespace(
+            effective_user=SimpleNamespace(id="no-result-user"),
+            callback_query=query,
+        )
+        setup = {
+            "symbol": "NO_SETUP",
+            "display_name": "Step Index 100",
+            "direction": "NO_TRADE",
+            "indicators": {
+                "signal_reason": "No market met the entry filters.",
+            },
+            "reasoning": "No market met the entry filters.",
+        }
+
+        with patch(
+            "app.bot.callbacks.auth_service.get_valid_access_token",
+            return_value="access-token",
+        ), patch(
+            "app.bot.callbacks.build_auto_trade_setup",
+            return_value=setup,
+        ):
+            asyncio.run(_show_auto_trade_setup(update, query))
+
+        self.assertEqual(len(query.message.replies), 1)
+        text, _kwargs = query.message.replies[0]
+        self.assertIn("No trade:", text)
+        self.assertNotIn("LOW TOKENS", text)
+        self.assertTrue(query.message.deleted)
 
     def test_stake_callback_falls_back_to_caption_edit_when_message_is_media(self):
         class FakeQuery:
@@ -2386,6 +2537,33 @@ class MarketDataTests(unittest.TestCase):
         self.assertEqual(
             [snapshot.symbol for snapshot in snapshots],
             list(settings.auto_trade_markets),
+        )
+
+    def test_one_failed_market_does_not_abort_other_market_scans(self):
+        scanner = YieldsScanner()
+
+        class PartiallyUnavailableMarketData:
+            def __init__(self):
+                self.requested_counts = []
+
+            def get_historical_ticks(self, symbol, count):
+                self.requested_counts.append(count)
+                if symbol == "step_100":
+                    raise TimeoutError("Deriv request timed out")
+                return _sample_deriv_ticks()
+
+        market_data = PartiallyUnavailableMarketData()
+        snapshots = scanner.collect_step_market_snapshots(market_data)
+
+        self.assertEqual(len(snapshots), len(settings.auto_trade_markets))
+        self.assertEqual(market_data.requested_counts, [5000] * len(snapshots))
+        self.assertEqual(snapshots[0].data_quality, "unavailable")
+        self.assertIn(
+            "Step 100",
+            snapshots[0].indicators["signal_reason"],
+        )
+        self.assertTrue(
+            all(snapshot.data_quality == "good" for snapshot in snapshots[1:])
         )
 
     def test_fixed_expiry_is_always_thirty_seconds(self):

@@ -18,6 +18,7 @@ from app.bot.handlers import (
     auto_trade_service,
     build_auto_trade_setup,
     build_connect_prompt,
+    build_menu_message,
     build_start_message,
     handle_account_mode_settings,
     handle_auto_trade_start,
@@ -184,6 +185,30 @@ async def _send_low_token_message(query, text: str, **kwargs) -> None:
     await _safe_edit_message(query, text, **kwargs)
 
 
+async def _send_scan_message(query, text: str, **kwargs) -> None:
+    message = getattr(query, "message", None)
+    has_photo = bool(getattr(message, "photo", None))
+    reply_text = getattr(message, "reply_text", None)
+
+    if has_photo and reply_text is not None:
+        try:
+            await reply_text(text, **kwargs)
+        except Exception:
+            logger.exception("Could not send plain-text Auto Trade scan result")
+            await _safe_edit_message(query, text, **kwargs)
+            return
+
+        try:
+            await message.delete()
+        except Exception:
+            logger.exception(
+                "Could not remove the previous Auto Trade scan photo"
+            )
+        return
+
+    await _safe_edit_message(query, text, **kwargs)
+
+
 async def _get_trade_token_balance(update, query, account_mode: str) -> int | None:
     user = update.effective_user
     try:
@@ -237,7 +262,7 @@ async def _show_auto_trade_setup(update, query) -> None:
         setup = await asyncio.to_thread(build_auto_trade_setup, user_id)
     except Exception:
         logger.exception("Could not retrieve Deriv data for the Auto Trade scan")
-        await _safe_edit_message(
+        await _send_scan_message(
             query,
             "⚠️ Live Deriv market data is temporarily unavailable. "
             "No trade has been placed. Please try scanning again shortly.",
@@ -265,9 +290,9 @@ async def _show_auto_trade_setup(update, query) -> None:
             )
             return
         except Exception:
-            pass
+            logger.exception("Could not update the Auto Trade setup image")
 
-    await _safe_edit_message(
+    await _send_scan_message(
         query,
         text,
         reply_markup=reply_markup,
@@ -804,16 +829,21 @@ async def dispatch_callback(update, context) -> None:
             last_name=getattr(update.effective_user, "last_name", None),
             username=getattr(update.effective_user, "username", None),
         )
+        keyboard = (
+            TelegramKeyboard.menu_keyboard(settings.community_url)
+            if auth_service.get_valid_access_token(user_key)
+            else TelegramKeyboard.start_keyboard()
+        )
         try:
             await query.edit_message_media(
                 media=InputMediaPhoto(media=settings.menu_image_url, caption=text),
-                reply_markup=TelegramKeyboard.menu_keyboard(settings.community_url),
+                reply_markup=keyboard,
             )
         except Exception:
             await _safe_edit_message(
                 query,
                 text,
-                reply_markup=TelegramKeyboard.menu_keyboard(settings.community_url),
+                reply_markup=keyboard,
             )
         return
 

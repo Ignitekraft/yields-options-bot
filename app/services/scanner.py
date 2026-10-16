@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 import math
 from statistics import median
 import time
@@ -21,6 +22,7 @@ MOMENTUM_MIN_ATR_RATIO = 0.15
 RSI_PERIOD = 7
 RSI_LOWER_VETO = 20.0
 RSI_UPPER_VETO = 80.0
+logger = logging.getLogger(__name__)
 
 
 def _ema_series(values: list[float], period: int) -> list[float | None]:
@@ -371,10 +373,38 @@ class YieldsScanner:
         snapshots: list[MarketSnapshot] = []
         for symbol in settings.auto_trade_markets:
             display_name = symbol.replace("step_", "Step ").replace("_", " ").title()
-            history = market_data_service.get_historical_ticks(symbol, count=5000)
-            snapshots.append(
-                self.normalize_step_market(symbol, display_name, history)
-            )
+            try:
+                history = market_data_service.get_historical_ticks(
+                    symbol,
+                    count=5000,
+                )
+                snapshots.append(
+                    self.normalize_step_market(
+                        symbol,
+                        display_name,
+                        history,
+                    )
+                )
+            except Exception:
+                logger.exception(
+                    "Could not scan Deriv market %s",
+                    symbol,
+                )
+                snapshots.append(
+                    MarketSnapshot(
+                        symbol=symbol,
+                        display_name=display_name,
+                        current_price=0.0,
+                        trend="neutral",
+                        indicators={
+                            "signal_reason": (
+                                f"Live market data for {display_name} "
+                                "was unavailable."
+                            )
+                        },
+                        data_quality="unavailable",
+                    )
+                )
         return snapshots
 
     def analyze_history(

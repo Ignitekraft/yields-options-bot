@@ -111,7 +111,7 @@ class TelegramKeyboard:
         return InlineKeyboardMarkup(
             [
                 [InlineKeyboardButton("🔐 Open Deriv", url=url or "https://deriv.com")],
-                [InlineKeyboardButton("🏠 Main Menu", callback_data="START_DASHBOARD")],
+                [InlineKeyboardButton("🏠 Main Menu", callback_data="MENU_MAIN")],
             ]
         )
 
