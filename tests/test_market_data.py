@@ -592,20 +592,20 @@ class MarketDataTests(unittest.TestCase):
             ],
         )
 
-    def test_relative_stakes_use_half_up_whole_number_rounding(self):
+    def test_relative_stakes_preserve_cents(self):
         self.assertEqual(calculate_relative_stake(5000, "0_1"), 5)
         self.assertEqual(calculate_relative_stake(5000, "0_5"), 25)
         self.assertEqual(calculate_relative_stake(5000, "1"), 50)
-        self.assertEqual(calculate_relative_stake(250.5, "0_5"), 1)
+        self.assertEqual(calculate_relative_stake(250.5, "0_5"), 1.25)
         stake = calculate_relative_stake(220_800, "0_1")
-        self.assertEqual(stake, 221)
+        self.assertEqual(stake, 220.8)
         proposal = TradeExecutionService.build_proposal_payload(
             "step_100",
             "BULLISH",
             stake,
         )
-        self.assertEqual(proposal["amount"], 221)
-        self.assertEqual(calculate_relative_stake(400, "0_1"), 0)
+        self.assertEqual(proposal["amount"], 220.8)
+        self.assertEqual(calculate_relative_stake(400, "0_1"), 0.4)
 
     def test_state_dir_falls_back_when_render_path_is_not_writable(self):
         import app.services.auth_service as auth_service
@@ -2407,16 +2407,16 @@ class MarketDataTests(unittest.TestCase):
         self.assertIn("TRADE CONFIRMATION", query.caption_text)
         self.assertIn("Market: Step Index 100", query.caption_text)
         self.assertIn(
-            "Initial stake: 221 USD (0.1% of 220,800.00 USD balance)",
+            "Initial stake: 220.80 USD (0.1% of 220,800.00 USD balance)",
             query.caption_text,
         )
         build_setup.assert_not_called()
         start_run.assert_called_once()
         self.assertEqual(start_run.call_args.kwargs["symbol"], "step_100")
         self.assertEqual(start_run.call_args.kwargs["direction"], "BULLISH")
-        self.assertEqual(start_run.call_args.kwargs["base_stake"], 221)
+        self.assertEqual(start_run.call_args.kwargs["base_stake"], 220.8)
 
-    def test_confirm_refreshes_relative_stake_as_whole_units(self):
+    def test_confirm_refreshes_relative_stake_without_whole_number_rounding(self):
         class FakeQuery:
             data = "AUTO_TRADE_CONFIRM"
 
@@ -2474,8 +2474,8 @@ class MarketDataTests(unittest.TestCase):
         ) as run_auto_trade:
             asyncio.run(dispatch_callback(update, None))
 
-        self.assertEqual(state.base_stake, 221.0)
-        self.assertEqual(state.current_stake, 221.0)
+        self.assertEqual(state.base_stake, 220.8)
+        self.assertEqual(state.current_stake, 220.8)
         run_auto_trade.assert_awaited_once_with(update, state)
 
     def test_confirm_start_callback_falls_back_to_caption_edit_when_message_is_media(self):

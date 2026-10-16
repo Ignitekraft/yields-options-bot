@@ -61,7 +61,7 @@ RELATIVE_STAKES = {
 }
 
 
-def calculate_relative_stake(account_balance: object, percentage_key: str) -> int:
+def calculate_relative_stake(account_balance: object, percentage_key: str) -> float:
     percentage = RELATIVE_STAKES.get(percentage_key)
     if percentage is None:
         raise ValueError("UNSUPPORTED_STAKE_PERCENTAGE")
@@ -71,7 +71,12 @@ def calculate_relative_stake(account_balance: object, percentage_key: str) -> in
         raise ValueError("INVALID_ACCOUNT_BALANCE") from exc
     if not balance.is_finite() or balance <= 0:
         raise ValueError("INVALID_ACCOUNT_BALANCE")
-    return int((balance * percentage).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+    return float(
+        (balance * percentage).quantize(
+            Decimal("0.01"),
+            rounding=ROUND_HALF_UP,
+        )
+    )
 
 
 def _stake_selection_from_callback(
@@ -1225,10 +1230,10 @@ async def dispatch_callback(update, context) -> None:
                     selected_account.get("balance"),
                     state.stake_percentage_key,
                 )
-                if refreshed_stake < 1:
+                if refreshed_stake <= 0:
                     await _safe_edit_message(
                         query,
-                        "⚠️ This percentage rounds to 0 in your current account "
+                        "⚠️ This percentage is below $0.01 for your current account "
                         "balance, so no trade can be placed. Increase your balance "
                         "or choose a higher percentage.",
                     )
@@ -1346,10 +1351,10 @@ async def dispatch_callback(update, context) -> None:
             )
             return
 
-        if stake_value < 1:
+        if stake_value <= 0:
             await _safe_edit_message(
                 query,
-                "⚠️ This percentage rounds to 0 in your current account balance, "
+                "⚠️ This percentage is below $0.01 in your current account balance, "
                 "so no trade can be placed. Increase your balance or choose a "
                 "higher percentage.",
             )
@@ -1419,7 +1424,7 @@ async def dispatch_callback(update, context) -> None:
             f"Market: {setup.get('display_name', setup['symbol'])}\n"
             f"Direction: {setup['direction']}\n"
             f"Account mode: {mode.upper()}\n"
-            f"Initial stake: {stake_value:,} {currency} "
+            f"Initial stake: {stake_value:,.2f} {currency} "
             f"({float(RELATIVE_STAKES[percentage_key] * 100):g}% of "
             f"{float(account_balance):,.2f} {currency} balance)\n"
             f"Available tokens: {token_balance}\n"
