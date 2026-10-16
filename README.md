@@ -50,7 +50,7 @@ stop the scan instead of producing a signal from sample data.
 2. Install dependencies:
    `pip install -r requirements.txt`
 3. Copy `.env.example` to `.env` and add the Telegram and Deriv values. Set `SUPABASE_URL` and the backend-only `SUPABASE_SERVICE_ROLE_KEY` for trade history, Auto Trade, and encrypted OAuth credential storage.
-4. For the current Deriv OAuth flow, the App ID is used as the OAuth `client_id` value. The project does not require a separate Deriv client secret for the PKCE authorization-code flow described in Deriv's current OAuth documentation.
+4. Register a Deriv App ID for OAuth. Public market data connects to `wss://api.derivws.com/trading/v1/options/ws/public` without sending the App ID. The project does not require a separate Deriv client secret for the PKCE authorization-code flow.
 5. Generate a Fernet key with `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` and set it as the backend-only `DERIV_TOKEN_ENCRYPTION_KEY` environment variable. Keep the same key across deploys and do not rotate it unless stored credentials are re-encrypted.
 6. Apply the Supabase migrations with `supabase db push --linked`.
 7. Start the FastAPI backend:

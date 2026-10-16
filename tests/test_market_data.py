@@ -80,6 +80,24 @@ def _sample_deriv_ticks(direction: int = 1, count: int = 800) -> list[dict]:
     return ticks
 
 
+def _sample_one_minute_candles(count: int = 60) -> list[dict]:
+    current_epoch = int(time.time())
+    start_epoch = current_epoch - current_epoch % 60 - (count - 1) * 60
+    candles = []
+    for index in range(count):
+        close = 100 + index * 0.01
+        candles.append(
+            {
+                "epoch": start_epoch + index * 60,
+                "open": close - 0.005,
+                "high": close + 0.01,
+                "low": close - 0.01,
+                "close": close,
+            }
+        )
+    return candles
+
+
 class MarketDataTests(unittest.TestCase):
     def test_market_data_normalizes_tick_payload(self):
         service = MarketDataService()
@@ -218,12 +236,11 @@ class MarketDataTests(unittest.TestCase):
             return_value=socket,
         ) as connect_mock:
             history = MarketDataService(
-                "wss://ws.derivws.com/websockets/v3",
-                app_id="test-app",
+                "wss://api.derivws.com/trading/v1/options/ws/public",
             ).get_historical_ticks("step_100", count=5000)
 
         connect_mock.assert_called_once_with(
-            "wss://ws.derivws.com/websockets/v3?app_id=test-app",
+            "wss://api.derivws.com/trading/v1/options/ws/public",
             open_timeout=10,
             close_timeout=2,
         )
@@ -232,16 +249,109 @@ class MarketDataTests(unittest.TestCase):
         self.assertEqual(socket.sent[0]["ticks_history"], "STPRNG")
         self.assertEqual(socket.sent[0]["count"], 5000)
         self.assertEqual(socket.sent[0]["style"], "ticks")
+        self.assertEqual(socket.sent[0]["end"], "latest")
 
-    def test_legacy_binary_ws_endpoint_is_upgraded_to_deriv_ws(self):
+    def test_legacy_market_data_endpoint_is_upgraded_to_public_gateway(self):
         service = MarketDataService(
-            "wss://ws.binaryws.com/websockets/v3",
-            app_id="test-app",
+            "wss://ws.binaryws.com/websockets/v3?app_id=old-app-id",
         )
 
         self.assertEqual(
             service._connection_url(),
-            "wss://ws.derivws.com/websockets/v3?app_id=test-app",
+            "wss://api.derivws.com/trading/v1/options/ws/public",
+        )
+
+    def test_historical_candles_use_documented_granularity_request(self):
+        now = int(time.time())
+
+        class FakeSocket:
+            def __init__(self):
+                self.sent = []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def send(self, payload):
+                self.sent.append(json.loads(payload))
+
+            def recv(self, timeout=None):
+                return json.dumps(
+                    {
+                        "candles": [
+                            {
+                                "epoch": now - 60,
+                                "open": "100.0",
+                                "high": "101.0",
+                                "low": "99.0",
+                                "close": "100.5",
+                            }
+                        ]
+                    }
+                )
+
+        socket = FakeSocket()
+        with patch(
+            "app.services.deriv.market_data.websocket_client.connect",
+            return_value=socket,
+        ) as connect_mock:
+            candles = MarketDataService().get_historical_candles(
+                "step_100",
+                count=60,
+                granularity=60,
+            )
+
+        connect_mock.assert_called_once_with(
+            "wss://api.derivws.com/trading/v1/options/ws/public",
+            open_timeout=10,
+            close_timeout=2,
+        )
+        self.assertEqual(
+            socket.sent[0],
+            {
+                "ticks_history": "STPRNG",
+                "count": 60,
+                "end": "latest",
+                "style": "candles",
+                "granularity": 60,
+                "req_id": 1,
+            },
+        )
+        self.assertEqual(candles[0]["close"], 100.5)
+
+    def test_active_symbols_uses_current_underlying_symbol_fields(self):
+        service = MarketDataService()
+        with patch.object(
+            service,
+            "_request_public",
+            return_value={
+                "active_symbols": [
+                    {
+                        "underlying_symbol": "STPRNG",
+                        "underlying_symbol_name": "Step Index 100",
+                    },
+                    {"underlying_symbol": "STPRNG2"},
+                    {"display_name": "Missing symbol"},
+                ]
+            },
+        ) as request_public:
+            symbols = service.get_active_symbols()
+
+        request_public.assert_called_once_with({"active_symbols": "brief"})
+        self.assertEqual(
+            symbols,
+            [
+                {
+                    "symbol": "STPRNG",
+                    "display_name": "Step Index 100",
+                },
+                {
+                    "symbol": "STPRNG2",
+                    "display_name": "STPRNG2",
+                },
+            ],
         )
 
     def test_monitor_contract_uses_numeric_contract_id(self):
@@ -644,6 +754,7 @@ class MarketDataTests(unittest.TestCase):
         self.assertEqual(
             [[button.text for button in row] for row in rows],
             [
+                ["📈 Scan Market"],
                 ["🔐 Connect Deriv"],
                 ["ℹ️ How Yields Works"],
             ],
@@ -811,6 +922,32 @@ class MarketDataTests(unittest.TestCase):
 
         self.assertIn("<pre>", text)
         self.assertIn("Select trade amount 👇", text)
+
+    def test_auto_trade_setup_requires_authentication_before_public_scan(self):
+        snapshot = MarketSnapshot(
+            symbol="step_300",
+            display_name="Step Index 300",
+            current_price=13500.0,
+            trend="bullish",
+            indicators={
+                "signal_strength": 0.9,
+                "signal_reason": "Trend and momentum align.",
+            },
+            data_quality="good",
+        )
+        with patch(
+            "app.bot.handlers.auth_service.get_valid_access_token",
+            return_value=None,
+        ), patch(
+            "app.bot.handlers.YieldsScanner.collect_step_market_snapshots",
+            return_value=[snapshot],
+        ) as collect_snapshots:
+            setup = build_auto_trade_setup("public-scan-user")
+
+        self.assertEqual(setup["symbol"], "NO_SETUP")
+        self.assertEqual(setup["direction"], "NO_TRADE")
+        self.assertEqual(setup["reasoning"], "Account not connected.")
+        collect_snapshots.assert_not_called()
 
     def test_auto_trade_setup_ranks_markets_from_indicators_deterministically(self):
         auth = AuthService()
@@ -1093,34 +1230,31 @@ class MarketDataTests(unittest.TestCase):
             "https://t.me/samueludoh_ng",
         )
 
-    def test_unauthenticated_auto_trade_entry_offers_oauth_connect_button(self):
-        class FakeQuery:
-            def __init__(self):
-                self.edited = None
-                self.reply_markup = None
-
-            async def edit_message_text(self, text, **kwargs):
-                self.edited = text
-                self.reply_markup = kwargs.get("reply_markup")
-
-        class FakeUpdate:
-            effective_user = SimpleNamespace(id="unauthenticated-user", first_name="Sam")
-
-        query = FakeQuery()
-        update = FakeUpdate()
+    def test_unauthenticated_auto_trade_entry_prompts_to_connect(self):
+        update = SimpleNamespace(
+            effective_user=SimpleNamespace(
+                id="unauthenticated-user",
+                first_name="Sam",
+            )
+        )
+        query = SimpleNamespace()
         with patch(
             "app.bot.callbacks.auth_service.get_valid_access_token",
             return_value=None,
         ), patch(
             "app.bot.callbacks.trade_history_service.ensure_user",
         ) as ensure_user:
-            asyncio.run(_handle_auto_trade_entry(update, query))
+            with patch(
+                "app.bot.callbacks._show_auto_trade_setup",
+                new=AsyncMock(),
+            ) as show_setup, patch(
+                "app.bot.callbacks._prompt_connect",
+                new=AsyncMock(),
+            ) as prompt_connect:
+                asyncio.run(_handle_auto_trade_entry(update, query))
 
-        self.assertIn("Connect your Deriv account", query.edited)
-        self.assertEqual(
-            query.reply_markup.inline_keyboard[0][0].callback_data,
-            "START_CONNECT",
-        )
+        prompt_connect.assert_awaited_once_with(update, query)
+        show_setup.assert_not_awaited()
         ensure_user.assert_not_called()
 
     def test_start_menu_offers_connect_button_for_unauthenticated_user(self):
@@ -1238,6 +1372,7 @@ class MarketDataTests(unittest.TestCase):
         self.assertEqual(
             [[button.text for button in row] for row in query.media["reply_markup"].inline_keyboard],
             [
+                ["📈 Scan Market"],
                 ["🔐 Connect Deriv"],
                 ["ℹ️ How Yields Works"],
             ],
@@ -1426,6 +1561,53 @@ class MarketDataTests(unittest.TestCase):
         build_setup.assert_called_once_with("single-scan-user")
         self.assertIn("Trading pair: Step Index 100", update.callback_query.edited)
         self.assertIn("<pre>", update.callback_query.edited)
+
+    def test_unauthenticated_user_is_prompted_to_connect_before_scanning(self):
+        class FakeQuery:
+            def __init__(self):
+                self.edited = None
+                self.reply_markup = None
+
+            async def edit_message_text(self, text, **kwargs):
+                self.edited = text
+                self.reply_markup = kwargs.get("reply_markup")
+
+        update = SimpleNamespace(
+            effective_user=SimpleNamespace(id="public-scan-user"),
+            callback_query=FakeQuery(),
+        )
+        with patch(
+            "app.bot.callbacks.auth_service.get_valid_access_token",
+            return_value=None,
+        ), patch(
+            "app.bot.callbacks.build_auto_trade_setup",
+        ) as build_setup:
+            asyncio.run(
+                _show_auto_trade_setup(update, update.callback_query)
+            )
+
+        build_setup.assert_not_called()
+        self.assertIn("Connect your Deriv account", update.callback_query.edited)
+        self.assertEqual(
+            update.callback_query.reply_markup.inline_keyboard[0][0].text,
+            "🔐 Connect Deriv",
+        )
+
+    def test_auto_trade_entry_requires_authentication_before_scanning(self):
+        update = SimpleNamespace(
+            effective_user=SimpleNamespace(id="public-entry-user")
+        )
+        query = SimpleNamespace()
+        with patch(
+            "app.bot.callbacks.auth_service.get_valid_access_token",
+            return_value=None,
+        ), patch(
+            "app.bot.callbacks._show_auto_trade_setup",
+            new=AsyncMock(),
+        ) as show_setup:
+            asyncio.run(_handle_auto_trade_entry(update, query))
+
+        show_setup.assert_not_awaited()
 
     def test_no_trade_setup_hides_stake_buttons_and_explains_filter(self):
         class FakeQuery:
@@ -2541,6 +2723,10 @@ class MarketDataTests(unittest.TestCase):
             MarketDataService,
             "get_historical_ticks",
             return_value=_sample_deriv_ticks(),
+        ), patch.object(
+            MarketDataService,
+            "get_historical_candles",
+            return_value=_sample_one_minute_candles(),
         ):
             snapshots = scanner.collect_step_market_snapshots(MarketDataService())
 
@@ -2563,14 +2749,17 @@ class MarketDataTests(unittest.TestCase):
                     raise TimeoutError("Deriv request timed out")
                 return _sample_deriv_ticks()
 
+            def get_historical_candles(self, symbol, count, granularity):
+                return _sample_one_minute_candles(count)
+
         market_data = PartiallyUnavailableMarketData()
         snapshots = scanner.collect_step_market_snapshots(market_data)
 
         self.assertEqual(len(snapshots), len(settings.auto_trade_markets))
-        self.assertEqual(market_data.requested_counts, [5000] * len(snapshots))
+        self.assertEqual(market_data.requested_counts, [1000] * len(snapshots))
         self.assertEqual(snapshots[0].data_quality, "unavailable")
         self.assertIn(
-            "Step 100",
+            "Market data request failed",
             snapshots[0].indicators["signal_reason"],
         )
         self.assertTrue(
@@ -2587,8 +2776,8 @@ class MarketDataTests(unittest.TestCase):
                 trend="neutral",
                 indicators={
                     "signal_reason": "Market data request failed: "
-                    "InvalidStatus (HTTP 520)",
-                    "data_error": "InvalidStatus (HTTP 520)",
+                    "WebSocket handshake rejected (HTTP 520)",
+                    "data_error": "WebSocket handshake rejected (HTTP 520)",
                 },
                 data_quality="unavailable",
             )
@@ -2616,7 +2805,9 @@ class MarketDataTests(unittest.TestCase):
         self.assertIn("any of the 5 configured markets", message)
         self.assertIn("Step 100", message)
         self.assertIn("Step 500", message)
-        self.assertIn("HTTP 520", message)
+        self.assertIn("WebSocket handshake rejected (HTTP 520)", message)
+        self.assertIn("Shared failure", message)
+        self.assertNotIn("Step 100: Step 100", message)
         self.assertNotIn("RSI(7): unavailable", message)
 
     def test_partial_market_failures_are_disclosed_with_available_count(self):

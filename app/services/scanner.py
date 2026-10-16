@@ -28,6 +28,8 @@ RSI_UPPER_VETO = 80.0
 def _market_data_error_summary(error: Exception) -> str:
     http_status = re.search(r"\bHTTP\s+\d{3}\b", str(error))
     if http_status:
+        if type(error).__name__ == "InvalidStatus":
+            return f"WebSocket handshake rejected ({http_status.group(0)})"
         return f"{type(error).__name__} ({http_status.group(0)})"
     return type(error).__name__
 logger = logging.getLogger(__name__)
@@ -184,6 +186,7 @@ class YieldsScanner:
         symbol: str,
         display_name: str,
         history: list[dict[str, Any]],
+        one_minute_bars: list[dict[str, Any]] | None = None,
     ) -> MarketSnapshot:
         if not history:
             return _empty_snapshot(
@@ -207,10 +210,14 @@ class YieldsScanner:
         latest_epoch = int(ticks[-1]["epoch"])
         current_price = float(ticks[-1]["quote"])
         five_second_bars = _aggregate_ticks(ticks, BAR_SECONDS)
-        one_minute_bars = _aggregate_ticks(ticks, 60)
+        context_bars = (
+            one_minute_bars
+            if one_minute_bars is not None
+            else _aggregate_ticks(ticks, 60)
+        )
         if (
             len(five_second_bars) < MIN_FIVE_SECOND_BARS
-            or len(one_minute_bars) < MIN_ONE_MINUTE_BARS
+            or len(context_bars) < MIN_ONE_MINUTE_BARS
         ):
             return _empty_snapshot(
                 symbol,
@@ -236,7 +243,7 @@ class YieldsScanner:
             )
 
         five_second_closes = [float(bar["close"]) for bar in five_second_bars]
-        one_minute_closes = [float(bar["close"]) for bar in one_minute_bars]
+        one_minute_closes = [float(bar["close"]) for bar in context_bars]
         ema8 = _ema_series(five_second_closes, 8)
         ema21 = _ema_series(five_second_closes, 21)
         ema20_1m = _ema_series(one_minute_closes, 20)
@@ -356,7 +363,7 @@ class YieldsScanner:
             "signal_strength": round(signal_strength, 4),
             "signal_reason": signal_reason,
             "bars_5s": len(five_second_bars),
-            "bars_1m": len(one_minute_bars),
+            "bars_1m": len(context_bars),
         }
 
         return MarketSnapshot(
@@ -384,13 +391,19 @@ class YieldsScanner:
             try:
                 history = market_data_service.get_historical_ticks(
                     symbol,
-                    count=5000,
+                    count=1000,
+                )
+                one_minute_bars = market_data_service.get_historical_candles(
+                    symbol,
+                    count=MIN_ONE_MINUTE_BARS,
+                    granularity=60,
                 )
                 snapshots.append(
                     self.normalize_step_market(
                         symbol,
                         display_name,
                         history,
+                        one_minute_bars=one_minute_bars,
                     )
                 )
             except Exception as exc:
@@ -407,8 +420,7 @@ class YieldsScanner:
                         trend="neutral",
                         indicators={
                             "signal_reason": (
-                                f"{display_name}: market data request failed: "
-                                f"{error_summary}"
+                                f"Market data request failed: {error_summary}"
                             ),
                             "data_error": error_summary,
                         },

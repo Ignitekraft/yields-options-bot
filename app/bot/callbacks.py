@@ -254,7 +254,8 @@ async def _prompt_connect(update, query) -> None:
 
 async def _show_auto_trade_setup(update, query) -> None:
     user_id = update.effective_user.id
-    if not auth_service.get_valid_access_token(str(user_id)):
+    connected = bool(auth_service.get_valid_access_token(str(user_id)))
+    if not connected:
         await _prompt_connect(update, query)
         return
 
@@ -266,7 +267,11 @@ async def _show_auto_trade_setup(update, query) -> None:
             query,
             "⚠️ Live Deriv market data is temporarily unavailable. "
             "No trade has been placed. Please try scanning again shortly.",
-            reply_markup=TelegramKeyboard.dashboard_keyboard(),
+            reply_markup=(
+                TelegramKeyboard.dashboard_keyboard()
+                if connected
+                else TelegramKeyboard.start_keyboard()
+            ),
         )
         return
 
@@ -274,8 +279,12 @@ async def _show_auto_trade_setup(update, query) -> None:
     photo_url = _setup_photo_url(setup.get("direction"))
     reply_markup = (
         TelegramKeyboard.stake_keyboard()
-        if setup.get("direction") in {"BULLISH", "BEARISH"}
-        else TelegramKeyboard.dashboard_keyboard()
+        if setup.get("direction") in {"BULLISH", "BEARISH"} and connected
+        else (
+            TelegramKeyboard.dashboard_keyboard()
+            if connected
+            else TelegramKeyboard.start_keyboard()
+        )
     )
 
     if InputMediaPhoto is not None and photo_url:

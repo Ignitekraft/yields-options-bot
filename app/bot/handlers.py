@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+from typing import Any
 
 from app.config import settings
 from app.services.account_service import AccountService
@@ -220,7 +221,10 @@ async def build_menu_message(
         "👀 Try Auto Trade on your Deriv Demo account.\n"
         "Choose 🚀 Auto Trade to view the current setup."
         if connected
-        else "🔐 Connect your Deriv account to unlock Auto Trade."
+        else (
+            "📈 View the public market setup with Auto Trade.\n"
+            "🔐 Connect Deriv when you’re ready to place trades."
+        )
     )
     return (
         f"Hi {name},\n\n"
@@ -259,7 +263,6 @@ def build_auto_trade_setup(
     telegram_user_id: str | int,
 ) -> dict:
     user_key = str(telegram_user_id)
-
     if not auth_service.get_valid_access_token(user_key):
         return {
             "symbol": "NO_SETUP",
@@ -309,10 +312,22 @@ def build_auto_trade_setup(
     )
 
     if winner is None:
-        issue_details = "; ".join(
-            f"{item['display_name']}: {item['reason']}"
-            for item in market_issues
-        )
+        distinct_reasons = {
+            item["reason"] for item in market_issues
+        }
+        if len(distinct_reasons) == 1:
+            shared_reason = next(iter(distinct_reasons))
+            affected_markets = ", ".join(
+                item["display_name"] for item in market_issues
+            )
+            issue_details = (
+                f"{shared_reason} Affected markets: {affected_markets}."
+            )
+        else:
+            issue_details = "; ".join(
+                f"{item['display_name']}: {item['reason']}"
+                for item in market_issues
+            )
         reasoning = (
             "No usable live market data was available."
             + (f" {issue_details}" if issue_details else "")
@@ -610,18 +625,32 @@ def handle_auto_trade_start(
     if setup_data.get("scan_status") == "unavailable":
         markets_scanned = int(setup_data.get("markets_scanned") or 0)
         issues = setup_data.get("market_issues") or []
-        issue_lines = [
-            f"• {html.escape(str(item['display_name']))}: "
-            f"{html.escape(str(item['reason']))}"
-            for item in issues
-        ]
-        details = "\n".join(issue_lines)
+        distinct_reasons = {
+            str(item["reason"]) for item in issues
+        }
+        if len(distinct_reasons) == 1:
+            shared_reason = html.escape(next(iter(distinct_reasons)))
+            affected_markets = ", ".join(
+                html.escape(str(item["display_name"]))
+                for item in issues
+            )
+            details = (
+                f"Shared failure: {shared_reason}\n"
+                f"Affected markets: {affected_markets}"
+            )
+        else:
+            issue_lines = [
+                f"• {html.escape(str(item['display_name']))}: "
+                f"{html.escape(str(item['reason']))}"
+                for item in issues
+            ]
+            details = "\n".join(issue_lines)
         return (
             "⚠️ LIVE MARKET DATA UNAVAILABLE\n\n"
             f"Could not retrieve usable live data for any of the "
             f"{markets_scanned} configured markets.\n"
             "No signal was generated and no trade was placed."
-            + (f"\n\nMarket errors:\n{details}" if details else "")
+            + (f"\n\n{details}" if details else "")
         )
 
     direction = setup_data.get("direction", "NO_TRADE")
@@ -707,10 +736,10 @@ def handle_auto_trade_start(
         ]
     )
 
-    next_step = (
-        "Select trade amount 👇"
-        if direction in {"BULLISH", "BEARISH"}
-        else (
+    if direction in {"BULLISH", "BEARISH"}:
+        next_step = "Select trade amount 👇"
+    else:
+        next_step = (
             "No trade: "
             + html.escape(
                 str(
@@ -720,7 +749,6 @@ def handle_auto_trade_start(
                 )
             )
         )
-    )
     markets_scanned = int(setup_data.get("markets_scanned") or 0)
     markets_available = int(setup_data.get("markets_available") or 0)
     market_issues = setup_data.get("market_issues") or []

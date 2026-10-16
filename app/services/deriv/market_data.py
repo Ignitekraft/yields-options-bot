@@ -4,7 +4,7 @@ import datetime as dt
 import json
 import math
 from typing import Any
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import urlsplit
 
 try:
     from websockets.sync import client as websocket_client
@@ -17,6 +17,9 @@ from app.config import settings
 class MarketDataService:
     """Public market-data access through Deriv's WebSocket API."""
 
+    PUBLIC_WS_URL = "wss://api.derivws.com/trading/v1/options/ws/public"
+    LEGACY_WS_HOSTS = {"ws.derivws.com", "ws.binaryws.com"}
+
     STEP_SYMBOLS = {
         "step_100": "STPRNG",
         "step_200": "STPRNG2",
@@ -25,36 +28,18 @@ class MarketDataService:
         "step_500": "STPRNG5",
     }
 
-    def __init__(
-        self,
-        ws_url: str | None = None,
-        app_id: str | None = None,
-    ) -> None:
+    def __init__(self, ws_url: str | None = None) -> None:
         self.ws_url = ws_url or settings.deriv_public_ws_url
-        self.app_id = (
-            settings.deriv_app_id
-            if app_id is None
-            else str(app_id)
-        )
 
     def _connection_url(self) -> str:
         parts = urlsplit(self.ws_url)
         hostname = (parts.hostname or "").lower()
-        netloc = parts.netloc
-        if hostname == "ws.binaryws.com":
-            netloc = netloc.replace(hostname, "ws.derivws.com", 1)
-        query = dict(parse_qsl(parts.query, keep_blank_values=True))
-        if self.app_id and not query.get("app_id"):
-            query["app_id"] = self.app_id
-        return urlunsplit(
-            (
-                parts.scheme,
-                netloc,
-                parts.path,
-                urlencode(query),
-                parts.fragment,
-            )
-        )
+        if (
+            hostname in self.LEGACY_WS_HOSTS
+            and parts.path == "/websockets/v3"
+        ):
+            return self.PUBLIC_WS_URL
+        return self.ws_url
 
     def _request_public(self, payload: dict[str, Any]) -> dict[str, Any]:
         if websocket_client is None:
@@ -95,15 +80,19 @@ class MarketDataService:
 
         return [
             {
-                "symbol": str(item["symbol"]),
+                "symbol": str(
+                    item.get("underlying_symbol") or item.get("symbol")
+                ),
                 "display_name": str(
-                    item.get("display_name")
+                    item.get("underlying_symbol_name")
+                    or item.get("display_name")
                     or item.get("underlying_symbol")
-                    or item["symbol"]
+                    or item.get("symbol")
                 ),
             }
             for item in symbols
-            if isinstance(item, dict) and item.get("symbol")
+            if isinstance(item, dict)
+            and (item.get("underlying_symbol") or item.get("symbol"))
         ]
 
     def get_historical_ticks(
@@ -157,6 +146,59 @@ class MarketDataService:
 
         return ticks
 
+    def get_historical_candles(
+        self,
+        symbol: str,
+        count: int = 60,
+        granularity: int = 60,
+        end: str = "latest",
+    ) -> list[dict[str, float | int]]:
+        if not symbol:
+            raise ValueError("DERIV_CANDLE_HISTORY_SYMBOL_REQUIRED")
+        if not 1 <= int(count) <= 5000:
+            raise ValueError("DERIV_CANDLE_HISTORY_COUNT_OUT_OF_RANGE")
+        if int(granularity) not in {
+            60, 120, 180, 300, 600, 900, 1800,
+            3600, 7200, 14400, 28800, 86400,
+        }:
+            raise ValueError("DERIV_CANDLE_GRANULARITY_UNSUPPORTED")
+
+        response = self._request_public(
+            self.build_public_websocket_payload(
+                "ticks_history",
+                self._api_symbol(symbol),
+                count=count,
+                end=end,
+                style="candles",
+                granularity=granularity,
+            )
+        )
+        candles = response.get("candles")
+        if not isinstance(candles, list):
+            raise ValueError("DERIV_CANDLE_HISTORY_MISSING")
+
+        normalized: list[dict[str, float | int]] = []
+        for candle in candles:
+            if not isinstance(candle, dict):
+                raise ValueError("DERIV_CANDLE_HISTORY_INVALID")
+            epoch = int(candle.get("epoch", 0))
+            values = {
+                name: float(candle.get(name, 0.0))
+                for name in ("open", "high", "low", "close")
+            }
+            if (
+                epoch <= 0
+                or any(
+                    not math.isfinite(value) or value <= 0
+                    for value in values.values()
+                )
+                or values["low"] > values["high"]
+            ):
+                raise ValueError("DERIV_CANDLE_HISTORY_INVALID_CANDLE")
+            normalized.append({"epoch": epoch, **values})
+
+        return normalized
+
     def subscribe_ticks(self, symbol: str) -> dict[str, Any]:
         if not symbol:
             raise ValueError("DERIV_TICK_SYMBOL_REQUIRED")
@@ -201,12 +243,13 @@ class MarketDataService:
         payload: dict[str, Any] = {}
         if action == "active_symbols":
             payload["active_symbols"] = "brief"
-            payload["product_type"] = "basic"
         elif action == "ticks_history":
             payload["ticks_history"] = symbol
             payload["count"] = int(kwargs.get("count", 5000))
             payload["end"] = kwargs.get("end", "latest")
             payload["style"] = kwargs.get("style", "ticks")
+            if kwargs.get("granularity") is not None:
+                payload["granularity"] = int(kwargs["granularity"])
         elif action == "ticks":
             payload["ticks"] = symbol
             if int(kwargs.get("subscribe", 0)):
