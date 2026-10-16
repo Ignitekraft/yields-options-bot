@@ -559,6 +559,71 @@ class MarketDataTests(unittest.TestCase):
         self.assertEqual(result["entry_tick"], 100.25)
         self.assertEqual(result["exit_tick"], 100.75)
 
+    def test_monitor_contract_continues_after_live_tick_subscription_error(self):
+        service = TradeExecutionService()
+
+        class FakeWebSocket:
+            def __init__(self):
+                self.sent = []
+                self.responses = None
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return None
+
+            async def send(self, payload):
+                self.sent.append(json.loads(payload))
+                if len(self.sent) == 2:
+                    contract_req_id = self.sent[0]["req_id"]
+                    tick_req_id = self.sent[1]["req_id"]
+                    self.responses = iter(
+                        [
+                            json.dumps(
+                                {
+                                    "echo_req": {"req_id": tick_req_id},
+                                    "error": {
+                                        "code": "AuthorizationRequired",
+                                        "message": "Ticks are not available here",
+                                    },
+                                }
+                            ),
+                            json.dumps(
+                                {
+                                    "echo_req": {"req_id": contract_req_id},
+                                    "proposal_open_contract": {
+                                        "contract_id": 123456789,
+                                        "is_sold": True,
+                                        "profit": 1.0,
+                                        "entry_tick": 100.25,
+                                        "exit_tick": 100.75,
+                                    },
+                                }
+                            ),
+                        ]
+                    )
+
+            async def recv(self):
+                return next(self.responses)
+
+        with patch(
+            "app.services.trade_execution_service.websockets.connect",
+            return_value=FakeWebSocket(),
+        ):
+            result = asyncio.run(
+                service.monitor_contract(
+                    "123456789",
+                    "wss://example.com",
+                    timeout_seconds=1,
+                    market_symbol="STPRNG",
+                )
+            )
+
+        self.assertEqual(result["status"], "settled")
+        self.assertEqual(result["entry_tick"], 100.25)
+        self.assertEqual(result["exit_tick"], 100.75)
+
     def test_execute_trade_retries_invalid_asset_candidates(self):
         class FakeWebSocket:
             def __init__(self):
@@ -1020,6 +1085,87 @@ class MarketDataTests(unittest.TestCase):
         self.assertEqual(
             update.callback_query.message.replies[-1],
             "🏆 Victory! Session completed.",
+        )
+
+    def test_settlement_failure_updates_pending_report_and_ends_run(self):
+        service = AutoTradeService()
+        state = service.start_run(
+            "failed-settlement-report-user",
+            "step_300",
+            "BULLISH",
+            10.0,
+            account_mode="demo",
+        )
+        service.confirm_run("failed-settlement-report-user")
+
+        class FakeCycleMessage:
+            def __init__(self, text):
+                self.text = text
+
+            async def edit_text(self, text):
+                self.text = text
+
+        class FakeMessage:
+            def __init__(self):
+                self.replies = []
+
+            async def reply_text(self, text, **_kwargs):
+                if text.startswith("⚡ Cycle"):
+                    message = FakeCycleMessage(text)
+                    self.replies.append(message)
+                    return message
+                self.replies.append(text)
+                return None
+
+        class FakeQuery:
+            def __init__(self):
+                self.message = FakeMessage()
+
+            async def edit_message_text(self, _text, **_kwargs):
+                return None
+
+        update = SimpleNamespace(
+            callback_query=FakeQuery(),
+            effective_user=SimpleNamespace(id="failed-settlement-report-user"),
+        )
+
+        async def fake_execute_trade(_user_id, trade_state):
+            trade_state.contract_id = "unverified-contract"
+            trade_state.market_symbol = "STPRNG3"
+            trade_state.status = "monitoring"
+            return {"status": "accepted"}
+
+        with patch(
+            "app.bot.callbacks.auto_trade_service",
+            service,
+        ), patch(
+            "app.bot.callbacks.account_mode_service.get_mode",
+            return_value="demo",
+        ), patch(
+            "app.bot.callbacks.execute_trade",
+            new=AsyncMock(side_effect=fake_execute_trade),
+        ), patch(
+            "app.bot.callbacks._monitor_settlement",
+            new=AsyncMock(side_effect=TimeoutError("CONTRACT_MONITOR_TIMEOUT")),
+        ), patch(
+            "app.bot.callbacks._save_session_summary",
+            new=AsyncMock(),
+        ), patch(
+            "app.bot.callbacks._session_end_message",
+            new=AsyncMock(return_value="Settlement could not be verified."),
+        ), patch(
+            "app.bot.callbacks._safe_edit_message",
+            new=AsyncMock(),
+        ):
+            asyncio.run(_run_auto_trade(update, state))
+
+        self.assertEqual(state.status, "monitoring_error")
+        report = update.callback_query.message.replies[0]
+        self.assertIn("Contract settlement could not be verified", report.text)
+        self.assertNotIn("Waiting for the 30-second contract to settle", report.text)
+        self.assertEqual(
+            update.callback_query.message.replies[-1],
+            "Settlement could not be verified.",
         )
 
     def test_auto_trade_starts_next_cycle_without_delay_after_settlement(self):

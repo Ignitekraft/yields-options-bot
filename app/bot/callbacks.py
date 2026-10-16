@@ -532,7 +532,7 @@ async def execute_trade(user_id: str | int, state=None) -> dict:
                 user_id,
                 state.session_id,
             )
-        except Exception as exc:
+        except Exception:
             state.status = "rejected"
             logger.exception("Could not reserve a Yields Token before purchase")
             return {"status": "token_service_error", "reason": str(exc)}
@@ -745,16 +745,28 @@ async def _run_auto_trade(update, state) -> None:
         if current.status == "monitoring":
             try:
                 settlement = await _monitor_settlement(user_id, current)
-            except Exception as exc:
+            except Exception:
+                logger.exception(
+                    "Could not verify settlement for contract %s",
+                    current.contract_id,
+                )
                 current = auto_trade_service.finish_run(user_id, "monitoring_error") or current
+                if report_cycle == current.cycle:
+                    cycle_steps.append(
+                        "⚠️ Contract settlement could not be verified. "
+                        "No further trade was placed."
+                    )
+                    cycle_report_message = await _update_cycle_report(
+                        query,
+                        _cycle_report_text(current.cycle, cycle_steps),
+                        cycle_report_message,
+                    )
                 await _save_session_summary(current, "failed")
-                await _safe_edit_message(
+                await _send_session_end_message(
                     query,
-                    await _session_end_message(
-                        user_id,
-                        current,
-                        "Settlement could not be verified. No further trade was placed.",
-                    ),
+                    user_id,
+                    current,
+                    "Settlement could not be verified. No further trade was placed.",
                 )
                 return
 

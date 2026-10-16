@@ -3,12 +3,15 @@ from __future__ import annotations
 import asyncio
 import itertools
 import json
+import logging
 import math
 from typing import Any
 
 import websockets
 
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 class UnknownBuyOutcome(RuntimeError):
@@ -713,15 +716,23 @@ class TradeExecutionService:
                 json.dumps(payload)
             )
             if market_symbol and tick_req_id is not None:
-                await websocket.send(
-                    json.dumps(
-                        {
-                            "ticks": self.normalize_step_symbol(market_symbol),
-                            "subscribe": 1,
-                            "req_id": tick_req_id,
-                        }
+                try:
+                    await websocket.send(
+                        json.dumps(
+                            {
+                                "ticks": self.normalize_step_symbol(market_symbol),
+                                "subscribe": 1,
+                                "req_id": tick_req_id,
+                            }
+                        )
                     )
-                )
+                except Exception:
+                    logger.exception(
+                        "Could not subscribe to live ticks while monitoring "
+                        "contract %s; continuing settlement monitoring",
+                        contract_id,
+                    )
+                    tick_req_id = None
 
             deadline = (
                 asyncio.get_running_loop().time()
@@ -770,10 +781,18 @@ class TradeExecutionService:
                         response_req_id == tick_req_id
                         and "error" in response
                     ):
-                        raise DerivRequestError(
-                            self._error_message(response)
+                        logger.warning(
+                            "Deriv live tick subscription failed while monitoring "
+                            "contract %s: %s; continuing settlement monitoring",
+                            contract_id,
+                            self._error_message(response),
                         )
-                    if response_req_id == tick_req_id:
+                        tick_req_id = None
+                        continue
+                    if (
+                        tick_req_id is not None
+                        and response_req_id == tick_req_id
+                    ):
                         if isinstance(tick, dict):
                             try:
                                 quote = float(tick.get("quote"))
