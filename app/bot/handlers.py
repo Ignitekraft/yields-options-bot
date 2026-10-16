@@ -276,16 +276,15 @@ def build_auto_trade_setup(
     service = MarketDataService()
     scanner = YieldsScanner()
     snapshots = scanner.collect_step_market_snapshots(service)
-    tradable = [
-        snapshot
-        for snapshot in snapshots
-        if snapshot.data_quality == "good"
-        and snapshot.trend in {"bullish", "bearish"}
-    ]
     candidates = [
         snapshot
         for snapshot in snapshots
         if snapshot.data_quality == "good"
+    ]
+    directional_candidates = [
+        snapshot
+        for snapshot in candidates
+        if snapshot.trend in {"bullish", "bearish"}
     ]
     market_issues = [
         {
@@ -304,9 +303,17 @@ def build_auto_trade_setup(
         "market_issues": market_issues,
     }
     winner = max(
-        tradable or candidates,
-        key=lambda snapshot: float(
-            snapshot.indicators.get("signal_strength", 0.0)
+        directional_candidates or candidates,
+        key=lambda snapshot: (
+            abs(
+                float(
+                    snapshot.indicators.get(
+                        "directional_score",
+                        snapshot.indicators.get("signal_strength", 0.0),
+                    )
+                )
+            ),
+            float(snapshot.indicators.get("signal_strength", 0.0)),
         ),
         default=None,
     )
@@ -344,7 +351,6 @@ def build_auto_trade_setup(
             **scan_summary,
         }
 
-    is_tradable = winner in tradable
     direction = (
         "BULLISH" if winner.trend == "bullish"
         else "BEARISH" if winner.trend == "bearish"
@@ -353,6 +359,7 @@ def build_auto_trade_setup(
     signal_strength = float(
         winner.indicators.get("signal_strength", 0.0)
     )
+    is_directional = direction in {"BULLISH", "BEARISH"}
     reasoning = str(
         winner.indicators.get(
             "signal_reason",
@@ -361,14 +368,14 @@ def build_auto_trade_setup(
     )
 
     return {
-        "symbol": winner.symbol if is_tradable else "NO_SETUP",
+        "symbol": winner.symbol if is_directional else "NO_SETUP",
         "display_name": winner.display_name,
         "direction": direction,
         "indicators": winner.indicators,
         "current_price": winner.current_price,
-        "signal_strength": signal_strength if is_tradable else 0.0,
+        "signal_strength": signal_strength,
         "reasoning": reasoning,
-        "scan_status": "ready" if is_tradable else "no_setup",
+        "scan_status": "ready" if is_directional else "no_setup",
         **scan_summary,
     }
 
@@ -717,12 +724,18 @@ def handle_auto_trade_start(
         else "DOWN 🔴" if direction == "BEARISH"
         else "NO TRADE ⚪"
     )
+    directional_score = indicators.get("directional_score")
+    directional_score_text = (
+        f"{float(directional_score):+.1f}/100"
+        if directional_score is not None
+        else "unavailable"
+    )
     setup_title = (
-        "🟢 Strong Bullish Setup Detected"
+        "🟢 UP SETUP"
         if direction == "BULLISH"
-        else "🔴 Strong Bearish Setup Detected"
+        else "🔴 DOWN SETUP"
         if direction == "BEARISH"
-        else "⚪ No Strong Setup Detected"
+        else "⚪ No Directional Setup"
     )
     indicator_report = "\n".join(
         [
@@ -732,7 +745,8 @@ def handle_auto_trade_start(
             f"3-bar momentum: {momentum_text}",
             f"5s ATR(14): {volatility_text}",
             f"1m EMA(20/50): {context_trend_text}",
-            f"Direction: {direction_text}",
+            f"Indicator direction score: {directional_score_text}",
+            f"Direction: {direction_text} (directional bias, not a guarantee)",
         ]
     )
 

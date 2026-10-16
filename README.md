@@ -29,20 +29,23 @@ Implemented:
 
 ## Auto Trade market analysis
 
-Auto Trade reads up to 5,000 real ticks per configured Step Index from Deriv's
-public `ticks_history` WebSocket endpoint. The scanner aggregates those ticks
-into 5-second bars and 1-minute context bars; it does not synthesize or fall
-back to generated prices. A scan is rejected when its history is too short,
-the latest tick is stale, or the current volatility is outside its adaptive
-range.
+Auto Trade reads recent real ticks and 60 one-minute candles per configured
+Step Index from Deriv's public `ticks_history` WebSocket endpoint. The scanner
+uses the ticks for 5-second EMA, slope, momentum, ATR, and RSI, and the candles
+for 1-minute EMA context. It does not synthesize or fall back to generated
+prices. A market is excluded when its history is too short or its latest tick
+is stale.
 
-A direction is eligible only when the 5-second EMA(8/21), EMA(21) slope, and
-3-bar momentum agree with price and the 1-minute EMA(20/50) trend. ATR(14) on
-5-second bars is used as a relative volatility filter, and RSI(7) vetoes
-stretched entries at 20/80. These conditions are entry filters, not a
-guarantee or probability of a profitable 30-second contract. The public market
-WebSocket uses the configured Deriv App ID when one is set; live data errors
-stop the scan instead of producing a signal from sample data.
+The scanner computes a weighted directional score from EMA alignment, EMA
+slope, 3-bar momentum, price relative to the short- and higher-timeframe EMAs,
+and RSI. It presents the available market with the strongest non-neutral
+directional score, rather than requiring every indicator to agree. ATR and
+momentum are included as context instead of hard vetoes. The score is an
+indicator balance, not a probability or guarantee of a profitable 30-second
+contract. Live data errors stop a market scan instead of producing a signal
+from sample data. Public market data uses Deriv's unauthenticated public
+WebSocket; the Auto Trade product flow still requires the user to connect an
+account before scanning or trading.
 
 ## Setup
 

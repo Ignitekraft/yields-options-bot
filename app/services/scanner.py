@@ -13,7 +13,7 @@ from app.models.market import MarketSnapshot
 
 BAR_SECONDS = 5
 FRESH_TICK_SECONDS = 10
-MIN_FIVE_SECOND_BARS = 100
+MIN_FIVE_SECOND_BARS = 60
 MIN_ONE_MINUTE_BARS = 60
 ATR_PERIOD = 14
 ATR_BASELINE_BARS = 60
@@ -23,6 +23,12 @@ MOMENTUM_MIN_ATR_RATIO = 0.15
 RSI_PERIOD = 7
 RSI_LOWER_VETO = 20.0
 RSI_UPPER_VETO = 80.0
+
+
+def _direction_component(value: float, scale: float) -> float:
+    if scale <= 0:
+        return 0.0
+    return math.tanh(value / scale)
 
 
 def _market_data_error_summary(error: Exception) -> str:
@@ -296,54 +302,55 @@ class YieldsScanner:
         momentum_ok = momentum_atr_ratio >= MOMENTUM_MIN_ATR_RATIO
         ema21_slope = slow_ema - slow_ema_prior
         volatility_ok = ATR_MIN_RATIO <= atr_ratio <= ATR_MAX_RATIO
-        long_conditions = (
-            fast_ema > slow_ema,
-            ema21_slope > 0,
-            roc3 > 0 and momentum_ok,
-            current_price > slow_ema and current_price > trend_ema,
-            trend_ema > context_ema,
-            rsi < RSI_UPPER_VETO,
+        score_weights = {
+            "ema_alignment": 0.20,
+            "ema_slope": 0.15,
+            "momentum": 0.20,
+            "price_vs_short_ema": 0.10,
+            "price_vs_context_ema": 0.15,
+            "higher_timeframe": 0.15,
+            "rsi": 0.05,
+        }
+        score_components = {
+            "ema_alignment": _direction_component(
+                fast_ema - slow_ema,
+                atr,
+            ),
+            "ema_slope": _direction_component(ema21_slope, atr),
+            "momentum": max(-1.0, min(1.0, momentum_move / atr)),
+            "price_vs_short_ema": _direction_component(
+                current_price - slow_ema,
+                atr,
+            ),
+            "price_vs_context_ema": _direction_component(
+                current_price - trend_ema,
+                atr,
+            ),
+            "higher_timeframe": _direction_component(
+                trend_ema - context_ema,
+                atr,
+            ),
+            "rsi": max(-1.0, min(1.0, (rsi - 50.0) / 30.0)),
+        }
+        directional_score = sum(
+            score_components[name] * weight
+            for name, weight in score_weights.items()
         )
-        short_conditions = (
-            fast_ema < slow_ema,
-            ema21_slope < 0,
-            roc3 < 0 and momentum_ok,
-            current_price < slow_ema and current_price < trend_ema,
-            trend_ema < context_ema,
-            rsi > RSI_LOWER_VETO,
+        direction = (
+            "bullish" if directional_score > 0.01
+            else "bearish" if directional_score < -0.01
+            else "neutral"
         )
-
-        direction = "neutral"
-        signal_reason = "Short-term trend and momentum are not aligned."
-        if not volatility_ok:
-            signal_reason = (
-                "Current volatility is outside the normal range "
-                f"({atr_ratio:.2f}x its recent baseline)."
+        directional_confidence = abs(directional_score) * 100.0
+        signal_reason = (
+            "Indicator balance does not show a reliable directional lean."
+            if direction == "neutral"
+            else (
+                "Indicator balance leans "
+                f"{direction.upper()} ({directional_confidence:.0f}/100); "
+                "this is a directional bias, not a guarantee."
             )
-        elif not momentum_ok:
-            signal_reason = (
-                "3-bar momentum is too small relative to recent volatility."
-            )
-        elif all(long_conditions):
-            direction = "bullish"
-            signal_reason = "5-second trend and momentum align with 1-minute context."
-        elif all(short_conditions):
-            direction = "bearish"
-            signal_reason = "5-second trend and momentum align with 1-minute context."
-        elif (
-            fast_ema > slow_ema
-            and ema21_slope > 0
-            and roc3 > 0
-            and rsi >= RSI_UPPER_VETO
-        ):
-            signal_reason = "Upward move is stretched; RSI vetoed a new entry."
-        elif (
-            fast_ema < slow_ema
-            and ema21_slope < 0
-            and roc3 < 0
-            and rsi <= RSI_LOWER_VETO
-        ):
-            signal_reason = "Downward move is stretched; RSI vetoed a new entry."
+        )
 
         signal_strength = (
             abs(fast_ema - slow_ema) + abs(roc3) / 100.0 * current_price
@@ -361,6 +368,14 @@ class YieldsScanner:
             "ema20_1m": round(trend_ema, 6),
             "ema50_1m": round(context_ema, 6),
             "signal_strength": round(signal_strength, 4),
+            "directional_score": round(directional_score * 100.0, 1),
+            "directional_confidence": round(directional_confidence, 1),
+            "score_components": {
+                name: round(value, 3)
+                for name, value in score_components.items()
+            },
+            "volatility_in_range": volatility_ok,
+            "momentum_confirmed": momentum_ok,
             "signal_reason": signal_reason,
             "bars_5s": len(five_second_bars),
             "bars_1m": len(context_bars),

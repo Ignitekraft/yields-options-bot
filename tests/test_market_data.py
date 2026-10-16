@@ -159,7 +159,9 @@ class MarketDataTests(unittest.TestCase):
         self.assertGreater(bullish.indicators["bars_1m"], 60)
         self.assertGreater(bullish.indicators["atr_ratio"], 0.5)
         self.assertLess(bullish.indicators["atr_ratio"], 2.5)
-        self.assertIn("1-minute context", bullish.indicators["signal_reason"])
+        self.assertGreater(bullish.indicators["directional_score"], 0)
+        self.assertLess(bearish.indicators["directional_score"], 0)
+        self.assertIn("directional bias", bullish.indicators["signal_reason"])
 
     def test_scanner_refuses_short_or_stale_deriv_history(self):
         scanner = YieldsScanner()
@@ -831,14 +833,15 @@ class MarketDataTests(unittest.TestCase):
 
         self.assertEqual(
             text,
-            "🟢 Strong Bullish Setup Detected\n\n"
+            "🟢 UP SETUP\n\n"
             "<pre>Trading pair: Step Index 100\n"
             "RSI(7): 25.00 (within range)\n"
             "5s EMA(8/21): bullish (121.00000/120.00000)\n"
             "3-bar momentum: +0.120% (0.80x ATR)\n"
             "5s ATR(14): 0.03500 (1.10x baseline)\n"
             "1m EMA(20/50): bullish (119.00000/118.00000)\n"
-            "Direction: UP 🟢</pre>\n\n"
+            "Indicator direction score: unavailable\n"
+            "Direction: UP 🟢 (directional bias, not a guarantee)</pre>\n\n"
             "Select trade amount 👇",
         )
 
@@ -878,7 +881,7 @@ class MarketDataTests(unittest.TestCase):
         ):
             text = handle_auto_trade_start("readable-user")
 
-        self.assertIn("Strong Bullish Setup Detected", text)
+        self.assertIn("UP SETUP", text)
         self.assertIn("Trading pair: Step 400", text)
         self.assertIn("Direction: UP 🟢", text)
         self.assertIn("<pre>", text)
@@ -1009,6 +1012,67 @@ class MarketDataTests(unittest.TestCase):
         self.assertEqual(setup, repeated_setup)
         self.assertIn("5-second trend", setup["reasoning"])
         self.assertGreater(setup["signal_strength"], 0)
+
+    def test_auto_trade_setup_selects_strongest_directional_score(self):
+        auth = AuthService()
+        auth.connect_user(
+            "direction-score-user",
+            {
+                "access_token": "direction-score-token",
+                "refresh_token": "direction-score-refresh",
+                "expires_in": 3600,
+                "token_type": "Bearer",
+            },
+        )
+        snapshots = [
+            MarketSnapshot(
+                symbol="step_100",
+                display_name="Step 100",
+                current_price=100.0,
+                trend="bullish",
+                indicators={
+                    "directional_score": 31.0,
+                    "signal_strength": 4.0,
+                    "signal_reason": "Indicator balance leans BULLISH.",
+                },
+                data_quality="good",
+            ),
+            MarketSnapshot(
+                symbol="step_200",
+                display_name="Step 200",
+                current_price=200.0,
+                trend="bearish",
+                indicators={
+                    "directional_score": -68.0,
+                    "signal_strength": 1.0,
+                    "signal_reason": "Indicator balance leans BEARISH.",
+                },
+                data_quality="good",
+            ),
+            MarketSnapshot(
+                symbol="step_300",
+                display_name="Step 300",
+                current_price=300.0,
+                trend="neutral",
+                indicators={
+                    "directional_score": 3.0,
+                    "signal_strength": 12.0,
+                    "signal_reason": "Indicators are balanced.",
+                },
+                data_quality="good",
+            ),
+        ]
+
+        with patch(
+            "app.bot.handlers.YieldsScanner.collect_step_market_snapshots",
+            return_value=snapshots,
+        ):
+            setup = build_auto_trade_setup("direction-score-user")
+
+        self.assertEqual(setup["symbol"], "step_200")
+        self.assertEqual(setup["direction"], "BEARISH")
+        self.assertEqual(setup["scan_status"], "ready")
+        self.assertEqual(setup["indicators"]["directional_score"], -68.0)
 
     def test_auto_trade_setup_rejects_conflicting_indicator_votes(self):
         auth = AuthService()
