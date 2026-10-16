@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
 
 from fastapi import FastAPI, Query
@@ -9,10 +11,13 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from app.bot.telegram_bot import create_application
 from app.config import settings
 from app.services.auth_service import AuthService
+from app.services.trade_history_service import TradeHistoryService
 
 app = FastAPI(title="Yields", version="0.1.0")
 
 auth_service = AuthService()
+trade_history_service = TradeHistoryService()
+logger = logging.getLogger(__name__)
 bot_application = None
 
 
@@ -110,6 +115,22 @@ async def deriv_oauth_callback(
     except Exception as exc:
         return f"<h3>OAuth exchange failed: {exc}</h3>"
 
+    welcome_tokens = None
+    try:
+        await asyncio.to_thread(
+            trade_history_service.ensure_user,
+            telegram_user_id,
+        )
+        welcome_tokens = await asyncio.to_thread(
+            trade_history_service.grant_first_auth_tokens,
+            telegram_user_id,
+        )
+    except Exception:
+        logger.exception(
+            "Could not apply first-auth token grant for Telegram user %s",
+            telegram_user_id,
+        )
+
     application = get_bot_application()
     if application is not None:
         try:
@@ -127,12 +148,34 @@ async def deriv_oauth_callback(
                 text=(
                     "✅ Deriv account connected successfully!\n\n"
                     "Your account is active and ready.\n\n"
-                    "Tap below to return to the main menu."
+                    + (
+                        "🎁 150 welcome Yields Tokens have been added to "
+                        "your account.\n\n"
+                        if welcome_tokens and welcome_tokens.get("granted")
+                        else (
+                            "Your first-time token grant could not be verified. "
+                            "Please reconnect or contact Sammie for help.\n\n"
+                            if welcome_tokens is None
+                            else ""
+                        )
+                    )
+                    + "Tap below to return to the main menu."
                 ),
                 reply_markup=main_menu_button,
             )
         except Exception as e:
-            print(f"Failed to send Telegram notification: {e}")
+            logger.exception("Failed to send Telegram OAuth success notification")
+
+    if welcome_tokens is None:
+        return """
+        <html>
+            <body style="font-family: Arial, sans-serif; text-align: center; padding-top: 50px; background: #0f1a24; color: #f5f7fa;">
+                <h2>Deriv Account Connected</h2>
+                <p>Your account is active, but the first-time token grant could not be verified.</p>
+                <p>Please reconnect from Telegram or contact Sammie for help.</p>
+            </body>
+        </html>
+        """
 
     return """
     <html>

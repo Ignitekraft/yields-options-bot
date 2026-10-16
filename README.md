@@ -26,6 +26,7 @@ Implemented:
 - Supabase stores Telegram user profiles, read-only Deriv balance snapshots, per-contract trade history, and end-of-session summaries.
 - `/stats` reports the last 10 finalized Auto Trade sessions; session win rate is based on positive session PnL, while direction accuracy is calculated from settled contract ticks.
 - One Yields Token is reserved for each contract purchase. Explicitly rejected purchases are refunded; an uncertain purchase outcome is not refunded to prevent an uncharged possible trade.
+- New users receive 150 Yields Tokens after their first successful Deriv OAuth connection. The grant is recorded against the persistent Supabase user profile, so reconnecting after disconnect does not grant another bonus.
 - The dashboard's Get Tokens button and `/tokens` command show Whop packages for 50, 100, 200, and 500 tokens. The package selection screen links to each checkout and returns to the `/start` menu.
 
 ## Auto Trade market analysis

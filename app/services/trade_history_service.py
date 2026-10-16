@@ -96,6 +96,23 @@ class TradeHistoryService:
             return rows[0]
         return self.get_user(telegram_user_id)
 
+    def grant_first_auth_tokens(
+        self,
+        telegram_user_id: str | int,
+    ) -> dict[str, Any]:
+        result = self._request(
+            "POST",
+            "rpc/grant_first_auth_tokens",
+            payload={"p_telegram_user_id": str(telegram_user_id)},
+        ).json()
+        if (
+            not isinstance(result, dict)
+            or not isinstance(result.get("granted"), bool)
+            or not isinstance(result.get("token_balance"), int)
+        ):
+            raise RuntimeError("SUPABASE_WELCOME_TOKEN_RESPONSE_INVALID")
+        return result
+
     def get_user(self, telegram_user_id: str | int) -> dict[str, Any]:
         response = self._request(
             "GET",

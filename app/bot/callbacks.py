@@ -45,6 +45,11 @@ trade_execution_service = TradeExecutionService()
 trade_history_service = TradeHistoryService()
 logger = logging.getLogger(__name__)
 LOW_TOKEN_WARNING_THRESHOLD = 50
+TOKEN_EXHAUSTED_MESSAGE = (
+    "💎 You’re out of Yields Tokens, so Auto Trade can’t start. "
+    "No trade has been placed. Please tap on the \"💎 Get Tokens\" button "
+    "or contact Sammie @samueludoh_ng to top up."
+)
 LOW_TOKEN_WARNING_IMAGE_URL = (
     "https://hvvwkijquaoqsbzhpyim.supabase.co/storage/v1/object/public/"
     "Bot%20images/Low%20Tokens%20Warning%20Alert.png"
@@ -397,8 +402,8 @@ async def _handle_auto_trade_entry(update, query, *, allow_low_balance: bool = F
     if token_balance <= 0:
         await _send_low_token_message(
             query,
-            "💎 You’re out of Yields Tokens, so Auto Trade can’t start. "
-            "No trade has been placed. Please contact support to top up.",
+            TOKEN_EXHAUSTED_MESSAGE,
+            reply_markup=TelegramKeyboard.exhausted_token_keyboard(),
         )
         return
 
@@ -789,7 +794,7 @@ async def _run_auto_trade(update, state) -> None:
             current = auto_trade_service.get_run(user_id) or current
             status_reason = {
                 "insufficient_tokens": (
-                    "You’re out of Yields Tokens. No token was charged for this attempt."
+                    TOKEN_EXHAUSTED_MESSAGE
                 ),
                 "token_service_error": (
                     "Your token balance could not be verified. No trade was attempted."
@@ -806,9 +811,17 @@ async def _run_auto_trade(update, state) -> None:
                 current,
                 "failed" if status in {"unknown_buy_outcome", "token_service_error"} else "stopped",
             )
-            session_message = await _session_end_message(user_id, current, status_reason)
+            session_message = (
+                TOKEN_EXHAUSTED_MESSAGE
+                if status == "insufficient_tokens"
+                else await _session_end_message(user_id, current, status_reason)
+            )
             if status == "insufficient_tokens":
-                await _send_low_token_message(query, session_message)
+                await _send_low_token_message(
+                    query,
+                    session_message,
+                    reply_markup=TelegramKeyboard.exhausted_token_keyboard(),
+                )
             else:
                 await _safe_edit_message(query, session_message)
             return
@@ -1137,8 +1150,8 @@ async def dispatch_callback(update, context) -> None:
             if token_balance <= 0:
                 await _send_low_token_message(
                     query,
-                    "💎 You’re out of Yields Tokens, so Auto Trade can’t start. "
-                    "No trade has been placed. Please contact support to top up.",
+                    TOKEN_EXHAUSTED_MESSAGE,
+                    reply_markup=TelegramKeyboard.exhausted_token_keyboard(),
                 )
                 return
 
@@ -1213,8 +1226,8 @@ async def dispatch_callback(update, context) -> None:
         if token_balance <= 0:
             await _send_low_token_message(
                 query,
-                "💎 You’re out of Yields Tokens, so Auto Trade can’t start. "
-                "No trade has been placed. Please contact support to top up.",
+                TOKEN_EXHAUSTED_MESSAGE,
+                reply_markup=TelegramKeyboard.exhausted_token_keyboard(),
             )
             return
 

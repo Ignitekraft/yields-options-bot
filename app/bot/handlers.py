@@ -181,7 +181,7 @@ async def build_start_message(
             user_key,
             balances,
         )
-        tokens = int(profile.get("token_balance", 50))
+        tokens = int(profile.get("token_balance", 0))
     except Exception:
         logger.exception("Could not sync dashboard profile with Supabase")
         tokens = 0
@@ -217,7 +217,7 @@ async def build_menu_message(
             username=username,
             account_mode=mode,
         )
-        tokens_text = str(int(profile.get("token_balance", 50)))
+        tokens_text = str(int(profile.get("token_balance", 0)))
     except Exception:
         logger.exception("Could not load menu profile from Supabase")
 

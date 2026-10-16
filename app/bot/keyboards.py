@@ -132,6 +132,15 @@ class TelegramKeyboard:
         )
 
     @staticmethod
+    def exhausted_token_keyboard() -> object:
+        return TelegramKeyboard._keyboard(
+            [
+                [("💎 Get Tokens", "MENU_GET_TOKENS")],
+                [("🏠 Main Menu", "MENU_MAIN")],
+            ]
+        )
+
+    @staticmethod
     def connect_keyboard(url: str | None = None) -> object:
         if InlineKeyboardMarkup is None:
             return [["🔐 Open Deriv", "🏠 Main Menu"]]

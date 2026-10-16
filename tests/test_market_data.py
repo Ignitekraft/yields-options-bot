@@ -1565,8 +1565,25 @@ class MarketDataTests(unittest.TestCase):
         self.assertIn("out of Yields Tokens", update.callback_query.photo["caption"])
         self.assertIn("No trade has been placed", update.callback_query.photo["caption"])
         self.assertIn("Low%20Tokens%20Warning%20Alert.png", update.callback_query.photo["photo"])
+        self.assertEqual(
+            [
+                [button.text for button in row]
+                for row in update.callback_query.photo["reply_markup"].inline_keyboard
+            ],
+            [["💎 Get Tokens"], ["🏠 Main Menu"]],
+        )
         create_session.assert_not_called()
         run_auto_trade_mock.assert_not_awaited()
+
+    def test_exhausted_token_message_matches_requested_copy(self):
+        from app.bot.callbacks import TOKEN_EXHAUSTED_MESSAGE
+
+        self.assertEqual(
+            TOKEN_EXHAUSTED_MESSAGE,
+            "💎 You’re out of Yields Tokens, so Auto Trade can’t start. "
+            "No trade has been placed. Please tap on the \"💎 Get Tokens\" "
+            "button or contact Sammie @samueludoh_ng to top up.",
+        )
 
     def test_auto_trade_warns_at_fifty_tokens_before_scanning(self):
         class FakeQuery:
@@ -2006,6 +2023,35 @@ class MarketDataTests(unittest.TestCase):
             asyncio.run(_handle_auto_trade_entry(update, query))
 
         show_setup.assert_not_awaited()
+
+    def test_auto_trade_entry_exhaustion_shows_get_tokens_and_main_menu(self):
+        update = SimpleNamespace(
+            effective_user=SimpleNamespace(id="exhausted-entry-user")
+        )
+        query = SimpleNamespace()
+
+        with patch(
+            "app.bot.callbacks.auth_service.get_valid_access_token",
+            return_value="access-token",
+        ), patch(
+            "app.bot.callbacks._get_trade_token_balance",
+            new=AsyncMock(return_value=0),
+        ), patch(
+            "app.bot.callbacks._send_low_token_message",
+            new=AsyncMock(),
+        ) as send_low_token:
+            asyncio.run(_handle_auto_trade_entry(update, query))
+
+        args, kwargs = send_low_token.await_args
+        from app.bot.callbacks import TOKEN_EXHAUSTED_MESSAGE
+
+        self.assertIs(args[0], query)
+        self.assertEqual(args[1], TOKEN_EXHAUSTED_MESSAGE)
+        rows = kwargs["reply_markup"].inline_keyboard
+        self.assertEqual(
+            [[button.text for button in row] for row in rows],
+            [["💎 Get Tokens"], ["🏠 Main Menu"]],
+        )
 
     def test_no_trade_setup_hides_stake_buttons_and_explains_filter(self):
         class FakeQuery:
@@ -2631,6 +2677,49 @@ class MarketDataTests(unittest.TestCase):
             {"p_telegram_user_id": "12345"},
         )
 
+    def test_first_auth_token_grant_calls_idempotent_supabase_rpc(self):
+        requests = []
+        rpc_responses = iter(
+            [
+                {"granted": True, "tokens_granted": 150, "token_balance": 150},
+                {"granted": False, "tokens_granted": 0, "token_balance": 150},
+            ]
+        )
+
+        def respond(request):
+            requests.append(request)
+            return httpx.Response(
+                200,
+                json=next(rpc_responses),
+                request=request,
+            )
+
+        service = TradeHistoryService(
+            supabase_url="https://project.supabase.co",
+            service_role_key="test-service-role-key",
+            transport=httpx.MockTransport(respond),
+        )
+
+        first_grant = service.grant_first_auth_tokens("telegram-user-150")
+        reconnect = service.grant_first_auth_tokens("telegram-user-150")
+
+        self.assertTrue(first_grant["granted"])
+        self.assertEqual(first_grant["tokens_granted"], 150)
+        self.assertEqual(first_grant["token_balance"], 150)
+        self.assertFalse(reconnect["granted"])
+        self.assertEqual(reconnect["token_balance"], 150)
+        self.assertEqual(len(requests), 2)
+        self.assertTrue(
+            all(
+                request.url.path.endswith("/rpc/grant_first_auth_tokens")
+                for request in requests
+            )
+        )
+        self.assertEqual(
+            json.loads(requests[0].content),
+            {"p_telegram_user_id": "telegram-user-150"},
+        )
+
     def test_stats_message_renders_recent_trades_and_account_summaries(self):
         from app.bot.handlers import handle_stats
 
@@ -2740,6 +2829,18 @@ class MarketDataTests(unittest.TestCase):
         with patch("app.main.auth_service.validate_state", return_value=True), \
              patch("app.main.auth_service.get_pending_user_for_state", return_value="telegram-user-42"), \
              patch("app.main.auth_service.exchange_oauth_code", return_value={"access_token": "token"}), \
+             patch(
+                 "app.main.trade_history_service.ensure_user",
+                 return_value={"telegram_user_id": "telegram-user-42"},
+             ) as ensure_user, \
+             patch(
+                 "app.main.trade_history_service.grant_first_auth_tokens",
+                 return_value={
+                     "granted": True,
+                     "tokens_granted": 150,
+                     "token_balance": 150,
+                 },
+             ) as grant_tokens, \
              patch("app.main.get_bot_application", return_value=fake_app):
             response = asyncio.run(
                 deriv_oauth_callback(
@@ -2751,9 +2852,12 @@ class MarketDataTests(unittest.TestCase):
 
         self.assertIn("Deriv Account Connected Successfully", response)
         self.assertIn("Open Dashboard", response)
+        ensure_user.assert_called_once_with("telegram-user-42")
+        grant_tokens.assert_called_once_with("telegram-user-42")
 
         sent_message = fake_app.bot.sent[0]
         self.assertIn("reply_markup", sent_message)
+        self.assertIn("150 welcome Yields Tokens", sent_message["text"])
         self.assertIsNotNone(sent_message["reply_markup"])
 
     def test_user_messages_avoid_slash_commands_and_expose_faq_stats(self):
