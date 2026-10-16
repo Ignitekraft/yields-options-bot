@@ -593,6 +593,46 @@ async def execute_trade(user_id: str | int, state=None) -> dict:
         auto_trade_service.clear_execution_lock(user_id)
 
 
+def _format_trade_tick(value) -> str:
+    try:
+        return f"{float(value):.4f}"
+    except (TypeError, ValueError):
+        return "Unavailable"
+
+
+def _cycle_report_text(
+    cycle: int,
+    completed_steps: list[str],
+    pending_step: str | None = None,
+) -> str:
+    sections = [f"⚡ Cycle {cycle}", *completed_steps]
+    if pending_step:
+        sections.append(pending_step)
+    return "\n\n".join(sections)
+
+
+async def _update_cycle_report(query, text: str, message=None):
+    if message is not None:
+        edit_text = getattr(message, "edit_text", None)
+        if edit_text is not None:
+            try:
+                await edit_text(text)
+                return message
+            except Exception:
+                logger.exception("Could not update Auto Trade cycle report")
+
+    parent_message = getattr(query, "message", None)
+    reply_text = getattr(parent_message, "reply_text", None)
+    if reply_text is not None:
+        try:
+            return await reply_text(text)
+        except Exception:
+            logger.exception("Could not send Auto Trade cycle report")
+
+    await _safe_edit_message(query, text)
+    return None
+
+
 async def _monitor_settlement(user_id: str | int, state) -> dict:
     user_key = str(user_id)
     access_token = auth_service.get_valid_access_token(user_key)
@@ -624,6 +664,10 @@ async def _run_auto_trade(update, state) -> None:
     query = update.callback_query
     user_id = update.effective_user.id
     settled_contracts: list[dict] = []
+    report_cycle: int | None = None
+    cycle_report_message = None
+    cycle_steps: list[str] = []
+    session_status_message_updated = False
 
     while True:
         current = auto_trade_service.get_run(user_id)
@@ -645,6 +689,20 @@ async def _run_auto_trade(update, state) -> None:
             await _safe_edit_message(
                 query,
                 await _session_end_message(user_id, current),
+            )
+            return
+
+        if current.status == "loss_limit":
+            await _save_session_summary(current, "stopped")
+            await _safe_edit_message(
+                query,
+                await _session_end_message(
+                    user_id,
+                    current,
+                    "Auto Trade stopped after "
+                    f"{auto_trade_service.MAX_CONSECUTIVE_LOSSES} consecutive losses "
+                    "to limit further exposure.",
+                ),
             )
             return
 
@@ -726,6 +784,9 @@ async def _run_auto_trade(update, state) -> None:
             except Exception:
                 logger.exception("Could not save settled trade to Supabase trade history")
 
+            trade_cycle = current.cycle
+            trade_step = current.martingale_step
+            trade_stake = current.current_stake
             settled_contracts.append(settlement)
             current = auto_trade_service.advance_after_result(
                 user_id,
@@ -734,31 +795,51 @@ async def _run_auto_trade(update, state) -> None:
             )
             await _save_session_summary(
                 current,
-                "completed" if current.status == "completed" else "running",
+                (
+                    "completed"
+                    if current.status == "completed"
+                    else "stopped"
+                    if current.status == "loss_limit"
+                    else "running"
+                ),
             )
 
-            market_label = friendly_market_name(current.market_symbol or current.symbol)
-            history_warning = (
-                "⚠️ This settled trade could not be saved to Stats.\n\n"
-                if not history_saved
-                else ""
+            if report_cycle != trade_cycle:
+                report_cycle = trade_cycle
+                cycle_report_message = None
+                cycle_steps = []
+
+            result_emoji = "🟢" if won else "🔴"
+            profit_text = (
+                f"+${profit:.2f}" if profit > 0 else f"-${abs(profit):.2f}"
             )
-            await _safe_edit_message(
+            result_text = (
+                f"⚡ Step {trade_step}\n"
+                f"{result_emoji} Invest: ${trade_stake:.2f} → {profit_text}\n"
+                f"📊 Price: {_format_trade_tick(entry_tick)} → "
+                f"{_format_trade_tick(exit_tick)}"
+            )
+            if not won and current.status == "running":
+                result_text += (
+                    "\n\n🔄 Smart Scaling activated."
+                    f"Next stake: ${current.current_stake:.2f}"
+                )
+            elif current.status == "loss_limit":
+                result_text += (
+                    "\n\n⛔ Auto Trade stopped after "
+                    f"{auto_trade_service.MAX_CONSECUTIVE_LOSSES} consecutive losses "
+                    "to limit further exposure."
+                )
+            elif won:
+                result_text += f"\n\n✅ Cycle {trade_cycle} completed."
+
+            if not history_saved:
+                result_text += "\n\n⚠️ This settled trade could not be saved to Stats."
+            cycle_steps.append(result_text)
+            cycle_report_message = await _update_cycle_report(
                 query,
-                "🤖 AUTO TRADE RUNNING\n\n"
-                f"Account mode: {current.account_mode.upper()}\n"
-                f"Market: {market_label}\n"
-                f"Direction: {current.direction}\n"
-                f"Last result: {'WIN' if won else 'LOSS'}\n"
-                f"Last contract P/L: ${profit:.2f}\n\n"
-                f"Winning cycles: {current.wins}/{current.max_cycles}\n"
-                f"Current cycle: {current.cycle}/{current.max_cycles}\n"
-                f"Next stake: ${current.current_stake:.2f}\n"
-                f"Settled contracts: {current.trade_count}\n"
-                f"Total staked: ${current.total_staked:.2f}\n"
-                f"Net profit/loss: ${current.total_profit_loss:.2f}\n\n"
-                f"{history_warning}"
-                "The selected market and direction remain fixed."
+                _cycle_report_text(trade_cycle, cycle_steps),
+                cycle_report_message,
             )
 
             if current.status != "running":
@@ -827,16 +908,32 @@ async def _run_auto_trade(update, state) -> None:
             return
 
         market_label = friendly_market_name(current.market_symbol or current.symbol)
-        await _safe_edit_message(
+        if not session_status_message_updated:
+            await _safe_edit_message(
+                query,
+                "🤖 AUTO TRADE RUNNING\n\n"
+                f"Account mode: {current.account_mode.upper()}\n"
+                f"Market: {market_label}\n"
+                f"Direction: {current.direction}\n"
+                f"Target: {current.max_cycles} winning cycles\n"
+                f"Safety stop: {auto_trade_service.MAX_CONSECUTIVE_LOSSES} "
+                "consecutive losses.",
+            )
+            session_status_message_updated = True
+
+        if report_cycle != current.cycle:
+            report_cycle = current.cycle
+            cycle_report_message = None
+            cycle_steps = []
+        pending_step = (
+            f"⏳ Step {current.martingale_step} purchased for "
+            f"${current.current_stake:.2f}. Waiting for the 30-second "
+            "contract to settle."
+        )
+        cycle_report_message = await _update_cycle_report(
             query,
-            "⏳ CONTRACT PURCHASED\n\n"
-            f"Account mode: {current.account_mode.upper()}\n"
-            f"Market: {market_label}\n"
-            f"Direction: {current.direction}\n"
-            f"Stake: ${current.current_stake:.2f}\n"
-            f"Contract ID: {current.contract_id}\n\n"
-            f"Waiting for the 30-second contract to settle.\n"
-            f"Winning cycles: {current.wins}/{current.max_cycles}"
+            _cycle_report_text(current.cycle, cycle_steps, pending_step),
+            cycle_report_message,
         )
 
 
@@ -869,8 +966,10 @@ async def dispatch_callback(update, context) -> None:
             "• AI ranks the 5 fixed Step Indices\n"
             "• You choose the stake\n"
             "• Auto Trade executes the selected Rise/Fall setup\n"
-            "• Contract results are monitored before the next trade\n"
-            "• The run stops after five winning cycles or a safety stop"
+            "• Each cycle reports its trade steps and results\n"
+            "• Smart Scaling increases the next stake after a loss\n"
+            "• The run stops after five winning cycles or "
+            f"{auto_trade_service.MAX_CONSECUTIVE_LOSSES} consecutive losses"
         )
         return
 
@@ -1325,9 +1424,11 @@ async def dispatch_callback(update, context) -> None:
             f"{float(account_balance):,.2f} {currency} balance)\n"
             f"Available tokens: {token_balance}\n"
             "Expiry: 30 seconds\n"
-            "Target: 5 winning cycles\n\n"
+            "Target: 5 winning cycles\n"
+            f"Safety stop: {auto_trade_service.MAX_CONSECUTIVE_LOSSES} "
+            "consecutive losses\n\n"
             "A loss stays in the current cycle and increases the next stake "
-            "according to the configured martingale progression. "
+            "through Smart Scaling to help recover. "
             "A settled win advances the cycle and resets the stake.\n\n"
             "Confirm to begin.",
             reply_markup=TelegramKeyboard.confirmation_keyboard(),

@@ -39,6 +39,7 @@ class TradeRunState:
     trade_count: int = 0
     wins: int = 0
     losses: int = 0
+    consecutive_losses: int = 0
     proposal_id: str | None = None
     contract_id: str | None = None
     market_symbol: str | None = None
@@ -49,6 +50,8 @@ class TradeRunState:
 
 class AutoTradeService:
     """Thread-safe in-memory Auto Trade state registry."""
+
+    MAX_CONSECUTIVE_LOSSES = 3
 
     ACTIVE_STATUSES = {
         "pending",
@@ -214,6 +217,7 @@ class AutoTradeService:
 
             if won:
                 state.wins += 1
+                state.consecutive_losses = 0
                 state.martingale_step = 1
                 state.current_stake = state.base_stake
 
@@ -229,6 +233,13 @@ class AutoTradeService:
                 return state
 
             state.losses += 1
+            state.consecutive_losses += 1
+            if state.consecutive_losses >= self.MAX_CONSECUTIVE_LOSSES:
+                state.status = "loss_limit"
+                state.completed_at = _now()
+                self._executing.discard(key)
+                return state
+
             state.martingale_step += 1
 
             multiplier = float(getattr(settings, "martingale_multiplier", 2.3))

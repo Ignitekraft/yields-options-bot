@@ -545,6 +545,26 @@ class MarketDataTests(unittest.TestCase):
         self.assertIn(result["symbol"], {"STPRNG", "STPRNG2", "STPRNG3", "STPRNG4", "STPRNG5"})
         self.assertIn("contract_id", result)
 
+    def test_contract_buy_validation_error_is_human_readable(self):
+        message = TradeExecutionService._error_message(
+            {
+                "error": {
+                    "code": "ContractBuyValidationError",
+                    "message": (
+                        "Minimum stake of 0.35 and maximum payout of 10000.00. "
+                        "Current payout is 12994.55."
+                    ),
+                }
+            }
+        )
+
+        self.assertEqual(
+            message,
+            "The proposed payout exceeds Deriv's maximum. Minimum stake of "
+            "0.35 and maximum payout of 10000.00. Current payout is 12994.55.",
+        )
+        self.assertNotIn("ContractBuyValidationError", message)
+
     def test_stake_keyboard_excludes_blocked_values(self):
         keyboard = TelegramKeyboard.stake_keyboard()
         rows = keyboard.inline_keyboard
@@ -643,7 +663,7 @@ class MarketDataTests(unittest.TestCase):
         self.assertEqual(replacement.symbol, "step_300")
         self.assertEqual(replacement.status, "awaiting_confirmation")
 
-    def test_auto_trade_keeps_martingale_without_safety_limit(self):
+    def test_auto_trade_stops_after_three_consecutive_losses(self):
         service = AutoTradeService()
         state = service.start_run(
             "martingale-user",
@@ -657,13 +677,18 @@ class MarketDataTests(unittest.TestCase):
         self.assertEqual(state.status, "running")
         self.assertEqual(state.current_stake, 4.6)
         self.assertEqual(state.martingale_step, 2)
+        self.assertEqual(state.consecutive_losses, 1)
 
-        for _ in range(9):
-            state = service.advance_after_result("martingale-user", won=False, profit=-2.0)
-
+        state = service.advance_after_result("martingale-user", won=False, profit=-4.6)
         self.assertEqual(state.status, "running")
-        self.assertGreater(state.current_stake, 2.0)
-        self.assertEqual(state.martingale_step, 11)
+        self.assertEqual(state.current_stake, 10.58)
+        self.assertEqual(state.consecutive_losses, 2)
+
+        state = service.advance_after_result("martingale-user", won=False, profit=-10.58)
+        self.assertEqual(state.status, "loss_limit")
+        self.assertEqual(state.current_stake, 10.58)
+        self.assertEqual(state.losses, 3)
+        self.assertEqual(state.consecutive_losses, 3)
 
     def test_auto_trade_multiplies_each_losing_stake_and_resets_after_win(self):
         service = AutoTradeService()
@@ -735,8 +760,118 @@ class MarketDataTests(unittest.TestCase):
         self.assertEqual(executed_stakes, [10.0, 23.0, 52.9])
         self.assertEqual(state.losses, 2)
         self.assertEqual(state.wins, 1)
+        self.assertEqual(state.consecutive_losses, 0)
         self.assertEqual(state.current_stake, 10.0)
         self.assertEqual(state.status, "completed")
+
+    def test_auto_trade_keeps_cycle_reports_and_stops_after_three_consecutive_losses(self):
+        service = AutoTradeService()
+        state = service.start_run(
+            "three-loss-report-user",
+            "step_100",
+            "BEARISH",
+            10.0,
+            account_mode="demo",
+        )
+        service.confirm_run("three-loss-report-user")
+        executed_stakes = []
+        cycle_reports = []
+
+        class FakeCycleMessage:
+            def __init__(self, text):
+                self.text = text
+                self.edits = [text]
+
+            async def edit_text(self, text):
+                self.text = text
+                self.edits.append(text)
+
+        class FakeMessage:
+            async def reply_text(self, text, **_kwargs):
+                report = FakeCycleMessage(text)
+                cycle_reports.append(report)
+                return report
+
+        class FakeQuery:
+            def __init__(self):
+                self.message = FakeMessage()
+
+            async def edit_message_text(self, _text, **_kwargs):
+                return None
+
+        update = SimpleNamespace(
+            callback_query=FakeQuery(),
+            effective_user=SimpleNamespace(id="three-loss-report-user"),
+        )
+
+        async def fake_execute_trade(_user_id, trade_state):
+            executed_stakes.append(trade_state.current_stake)
+            service.record_trade_stake(
+                trade_state.user_id,
+                trade_state.current_stake,
+            )
+            trade_state.contract_id = f"contract-{len(executed_stakes)}"
+            trade_state.market_symbol = "STPRNG"
+            trade_state.status = "monitoring"
+            return {"status": "accepted"}
+
+        settlements = iter(
+            [
+                {"status": "settled", "profit": -10.0, "entry_tick": 100.0, "exit_tick": 99.0},
+                {"status": "settled", "profit": -23.0, "entry_tick": 100.0, "exit_tick": 99.0},
+                {"status": "settled", "profit": 5.0, "entry_tick": 99.0, "exit_tick": 100.0},
+                {"status": "settled", "profit": -10.0, "entry_tick": 100.0, "exit_tick": 99.0},
+                {"status": "settled", "profit": -23.0, "entry_tick": 100.0, "exit_tick": 99.0},
+                {"status": "settled", "profit": -52.9, "entry_tick": 100.0, "exit_tick": 99.0},
+            ]
+        )
+
+        with patch(
+            "app.bot.callbacks.auto_trade_service",
+            service,
+        ), patch(
+            "app.bot.callbacks.account_mode_service.get_mode",
+            return_value="demo",
+        ), patch(
+            "app.bot.callbacks.execute_trade",
+            new=AsyncMock(side_effect=fake_execute_trade),
+        ), patch(
+            "app.bot.callbacks._monitor_settlement",
+            new=AsyncMock(side_effect=lambda *_args: next(settlements)),
+        ), patch(
+            "app.bot.callbacks.trade_history_service",
+            SimpleNamespace(record_settled_trade=lambda *_args: None),
+        ), patch(
+            "app.bot.callbacks._save_session_summary",
+            new=AsyncMock(),
+        ), patch(
+            "app.bot.callbacks._session_end_message",
+            new=AsyncMock(return_value="Session stopped after three losses."),
+        ), patch(
+            "app.bot.callbacks._safe_edit_message",
+            new=AsyncMock(),
+        ):
+            asyncio.run(_run_auto_trade(update, state))
+
+        self.assertEqual(executed_stakes, [10.0, 23.0, 52.9, 10.0, 23.0, 52.9])
+        self.assertEqual(len(cycle_reports), 2)
+        self.assertIn("Cycle 1", cycle_reports[0].text)
+        self.assertEqual(cycle_reports[0].text.count("Step "), 3)
+        self.assertEqual(
+            cycle_reports[0].text.count("Smart Scaling activated"),
+            2,
+        )
+        self.assertIn("Cycle 2", cycle_reports[1].text)
+        self.assertEqual(cycle_reports[1].text.count("Step "), 3)
+        self.assertEqual(
+            cycle_reports[1].text.count("Smart Scaling activated"),
+            2,
+        )
+        self.assertIn(
+            "stopped after 3 consecutive losses",
+            cycle_reports[1].text,
+        )
+        self.assertEqual(state.status, "loss_limit")
 
     def test_auto_trade_starts_next_cycle_without_delay_after_settlement(self):
         service = AutoTradeService()

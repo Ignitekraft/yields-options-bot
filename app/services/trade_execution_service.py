@@ -201,6 +201,13 @@ class TradeExecutionService:
             code = error.get("code")
             message = error.get("message")
 
+            if (
+                code == "ContractBuyValidationError"
+                and isinstance(message, str)
+                and "maximum payout" in message.lower()
+            ):
+                return f"The proposed payout exceeds Deriv's maximum. {message}"
+
             if code and message:
                 return f"{code}:{message}"
 
