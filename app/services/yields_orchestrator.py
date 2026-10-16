@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from app.config import settings
 from app.services.deriv.market_data import MarketDataService
 from app.services.scanner import YieldsScanner
 from app.services.trading_service import TradingService
@@ -24,24 +25,15 @@ class YieldsOrchestrator:
         self,
         symbol: str | None = None,
     ) -> dict[str, object]:
-        active_symbols = (
-            self.market_data_service.get_active_symbols()
-        )
-
-        if not active_symbols:
-            raise RuntimeError(
-                "NO_ACTIVE_DERIV_SYMBOLS"
-            )
-
         target_symbol = (
             symbol
-            or active_symbols[0]["symbol"]
+            or settings.auto_trade_markets[0]
         )
 
         history = (
             self.market_data_service.get_historical_ticks(
                 target_symbol,
-                count=25,
+                count=5000,
             )
         )
 
@@ -60,7 +52,7 @@ class YieldsOrchestrator:
         return {
             "symbol": target_symbol,
             "signal": signal.signal,
-            "confidence": signal.confidence,
+            "signal_strength": signal.signal_strength,
             "message": signal.message,
             "direction": signal.direction,
         }
@@ -72,12 +64,14 @@ class YieldsOrchestrator:
     ) -> dict[str, object]:
         signal = self.scan_symbol(symbol)
 
-        # Yields is Rise/Fall only.
-        contract_type = (
-            "PUT"
-            if signal["signal"] == "SELL"
-            else "CALL"
-        )
+        if signal["signal"] not in {"BUY", "SELL"}:
+            return {
+                "signal": signal,
+                "proposal": None,
+                "action": "hold",
+            }
+
+        contract_type = "PUT" if signal["signal"] == "SELL" else "CALL"
 
         proposal = self.trading_service.create_proposal(
             symbol=symbol,

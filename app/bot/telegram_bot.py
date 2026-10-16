@@ -56,6 +56,11 @@ async def _send_menu_message(update: Update) -> None:
         await update.message.reply_text(text, reply_markup=keyboard)
 
 
+async def _send_stats_message(update: Update) -> None:
+    text = await handle_stats(update.effective_user.id)
+    await update.message.reply_text(text)
+
+
 def create_application():
     """Create the Telegram bot application if the library and token are available."""
     if Application is None:
@@ -88,15 +93,25 @@ def create_application():
         await update.message.reply_text(handle_faq(), reply_markup=TelegramKeyboard.dashboard_keyboard())
 
     async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        user_id = update.effective_user.id
-        await update.message.reply_text(await handle_stats(user_id), reply_markup=TelegramKeyboard.dashboard_keyboard())
+        await _send_stats_message(update)
 
     async def logout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = update.effective_user.id
         await update.message.reply_text(handle_logout(user_id), reply_markup=TelegramKeyboard.start_keyboard())
 
     async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await update.message.reply_text(handle_scan(), reply_markup=TelegramKeyboard.dashboard_keyboard())
+        try:
+            result = await asyncio.to_thread(handle_scan)
+        except Exception:
+            logger.exception("Could not retrieve live Deriv data for /scan")
+            result = (
+                "⚠️ Live Deriv market data is temporarily unavailable. "
+                "No trade signal was generated. Please try again shortly."
+            )
+        await update.message.reply_text(
+            result,
+            reply_markup=TelegramKeyboard.dashboard_keyboard(),
+        )
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("connect", connect))

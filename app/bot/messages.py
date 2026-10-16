@@ -1,4 +1,4 @@
-START_MESSAGE = """🤖 YIELDS
+START_MESSAGE = """🤖 YIELDS OPTIONS BOT
 
 AI-powered trading intelligence for Deriv.
 

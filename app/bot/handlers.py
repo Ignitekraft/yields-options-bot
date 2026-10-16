@@ -65,7 +65,7 @@ def _dashboard_text(
 ) -> str:
     name = _display_name(display_name)
     return (
-        "🤖 YIELDS\n\n"
+        "🤖 YIELDS OPTIONS BOT\n\n"
         f"Welcome back, {name}.\n\n"
         "Your Deriv account is connected.\n\n"
         f"Account Mode: {_mode_label(mode)}\n\n"
@@ -73,12 +73,7 @@ def _dashboard_text(
         "💰 ACCOUNT\n\n"
         f"Real: {_format_currency(real_balance)}\n"
         f"Demo: {_format_currency(demo_balance)}\n\n"
-        f"💎 Yields Tokens: {tokens}\n"
-        "━━━━━━━━━━━━━━━━━━\n\n"
-        "🤖 AUTO TRADE\n\n"
-        "AI scans 5 Step Indices and selects the strongest current setup.\n\n"
-        "Expiry: 30 seconds\n"
-        "Cycles: 5"
+        f"💎 Yields Tokens: {tokens}"
     )
 
 
@@ -93,7 +88,7 @@ def handle_start(
     name = _display_name(display_name)
     if not auth_service.get_valid_access_token(user_key):
         return (
-            "🤖 YIELDS\n\n"
+            "🤖 YIELDS OPTIONS BOT\n\n"
             f"Hi {name},\n\n"
             "AI-powered trading intelligence for Deriv.\n\n"
             "Connect your Deriv account to unlock:\n"
@@ -271,101 +266,81 @@ def build_auto_trade_setup(
             "direction": "NO_TRADE",
             "indicators": {},
             "current_price": 0.0,
-            "confidence": 0.0,
-            "setup_quality": 0.0,
+            "signal_strength": 0.0,
             "reasoning": "Account not connected.",
         }
 
     service = MarketDataService()
     scanner = YieldsScanner()
     snapshots = scanner.collect_step_market_snapshots(service)
-    scored = []
-
-    for snapshot in snapshots:
-        indicators = snapshot.indicators or {}
-        rsi = float(indicators.get("rsi", 50.0))
-        macd = float(indicators.get("macd", 0.0))
-        macd_signal = float(indicators.get("macd_signal", 0.0))
-        ma50 = float(indicators.get("ma50", snapshot.current_price))
-        ma200 = float(indicators.get("ma200", snapshot.current_price))
-
-        votes = (
-            1 if macd > macd_signal else -1 if macd < macd_signal else 0,
-            1 if rsi > 55.0 else -1 if rsi < 45.0 else 0,
-            1 if snapshot.current_price > ma50 else -1 if snapshot.current_price < ma50 else 0,
-            1 if snapshot.current_price > ma200 else -1 if snapshot.current_price < ma200 else 0,
-        )
-        directional_score = sum(votes)
-        direction = (
-            "BULLISH"
-            if directional_score > 0
-            else "BEARISH"
-            if directional_score < 0
-            else "NO_TRADE"
-        )
-        confidence = abs(directional_score) / len(votes)
-        aligned_votes = sum(
-            vote > 0 if direction == "BULLISH" else vote < 0
-            for vote in votes
-        ) if direction != "NO_TRADE" else 0
-        setup_quality = aligned_votes / len(votes)
-
-        if (
-            snapshot.data_quality != "good"
-            or confidence < settings.min_indicator_confidence
-            or setup_quality < settings.min_setup_quality
-        ):
-            direction = "NO_TRADE"
-
-        scored.append(
-            {
-                "symbol": snapshot.symbol,
-                "display_name": snapshot.display_name,
-                "direction": direction,
-                "indicators": {
-                    "rsi": rsi,
-                    "macd": macd,
-                    "macd_signal": macd_signal,
-                    "ma50": ma50,
-                    "ma200": ma200,
-                },
-                "current_price": snapshot.current_price,
-                "confidence": confidence,
-                "setup_quality": setup_quality,
-                "reasoning": (
-                    f"Indicator alignment: MACD {macd:.4f} vs signal "
-                    f"{macd_signal:.4f}, RSI {rsi:.1f}, current price "
-                    f"{snapshot.current_price:.4f}, MA50 {ma50:.4f}, "
-                    f"MA200 {ma200:.4f}."
-                ),
-            }
-        )
-
-    valid_setups = [item for item in scored if item["direction"] != "NO_TRADE"]
+    tradable = [
+        snapshot
+        for snapshot in snapshots
+        if snapshot.data_quality == "good"
+        and snapshot.trend in {"bullish", "bearish"}
+    ]
+    candidates = [
+        snapshot
+        for snapshot in snapshots
+        if snapshot.data_quality == "good"
+    ]
     winner = max(
-        valid_setups,
-        key=lambda item: (item["confidence"], item["setup_quality"]),
-        default={
+        tradable or candidates,
+        key=lambda snapshot: float(
+            snapshot.indicators.get("signal_strength", 0.0)
+        ),
+        default=None,
+    )
+
+    if winner is None:
+        diagnostic = snapshots[0] if snapshots else None
+        reasoning = str(
+            (diagnostic.indicators or {}).get("signal_reason")
+            if diagnostic is not None
+            else ""
+        ) or "No usable live Deriv tick history was available."
+        return {
             "symbol": "NO_SETUP",
+            "display_name": (
+                diagnostic.display_name
+                if diagnostic is not None
+                else "No Setup"
+            ),
             "direction": "NO_TRADE",
-            "indicators": {},
+            "indicators": (
+                diagnostic.indicators
+                if diagnostic is not None
+                else {"signal_reason": reasoning}
+            ),
             "current_price": 0.0,
-            "confidence": 0.0,
-            "setup_quality": 0.0,
-            "reasoning": "No market met the minimum indicator-alignment thresholds.",
-            "display_name": "No Setup",
-        },
+            "signal_strength": 0.0,
+            "reasoning": reasoning,
+        }
+
+    is_tradable = winner in tradable
+    direction = (
+        "BULLISH" if winner.trend == "bullish"
+        else "BEARISH" if winner.trend == "bearish"
+        else "NO_TRADE"
+    )
+    signal_strength = float(
+        winner.indicators.get("signal_strength", 0.0)
+    )
+    reasoning = str(
+        winner.indicators.get(
+            "signal_reason",
+            "The entry filters are not aligned.",
+        )
     )
 
     return {
-        "symbol": winner["symbol"],
-        "display_name": winner["display_name"],
-        "direction": winner["direction"],
-        "indicators": winner["indicators"],
-        "current_price": winner["current_price"],
-        "confidence": float(winner["confidence"]),
-        "setup_quality": float(winner["setup_quality"]),
-        "reasoning": winner["reasoning"],
+        "symbol": winner.symbol if is_tradable else "NO_SETUP",
+        "display_name": winner.display_name,
+        "direction": direction,
+        "indicators": winner.indicators,
+        "current_price": winner.current_price,
+        "signal_strength": signal_strength if is_tradable else 0.0,
+        "reasoning": reasoning,
     }
 
 
@@ -390,7 +365,8 @@ def handle_faq() -> str:
     return (
         "❓ YIELDS FAQ\n\n"
         "• How does the AI rank the markets?\n"
-        "  It scores the 5 Step Indices using trend, momentum, RSI, MACD, MA50, and MA200.\n\n"
+        "  It checks 5-second EMA(8/21), EMA(21) slope, 3-bar momentum, "
+        "ATR(14), RSI(7), and 1-minute EMA(20/50) alignment.\n\n"
         "• Which markets are used?\n"
         "  Only the fixed Step Index family: 100, 200, 300, 400, and 500.\n\n"
         "• What is Auto Trade?\n"
@@ -487,7 +463,7 @@ async def handle_stats(telegram_user_id: str | int) -> str:
         "📊 YIELDS STATS | LAST 10 SESSIONS\n\n"
         f"{recent_section}\n\n"
         f"💎 Token balance: {int(stats.get('token_balance', profile.get('token_balance', 0)) or 0)}\n\n"
-        "━━━━━━━━━━━━━━━━━━\n"
+        "----\n\n"
         f"{_stats_mode_text('Real', '💰', stats.get('real') or {})}\n\n"
         f"{_stats_mode_text('Demo', '🎮', stats.get('demo') or {})}"
         f"{HELP_FOOTER}"
@@ -588,9 +564,8 @@ def handle_scan() -> str:
     market_service = MarketDataService()
     scanner = YieldsScanner()
 
-    symbol_list = market_service.get_active_symbols()
-    symbol = symbol_list[0]["symbol"] if symbol_list else "STPRNG"
-    history = market_service.get_historical_ticks(symbol, count=25)
+    symbol = settings.auto_trade_markets[0]
+    history = market_service.get_historical_ticks(symbol, count=5000)
     live_tick = market_service.subscribe_ticks(symbol)
 
     result = scanner.analyze_live_tick(history, live_tick, symbol=symbol)
@@ -600,7 +575,7 @@ def handle_scan() -> str:
             SCAN_MESSAGE,
             f"Symbol: {result.symbol}",
             f"Signal: {result.signal}",
-            f"Confidence: {result.confidence:.2f}",
+            f"Signal strength: {result.signal_strength:.2f}",
             f"Message: {result.message}",
         ]
     )
@@ -613,36 +588,69 @@ def handle_auto_trade_start(
     if not auth_service.get_valid_access_token(str(telegram_user_id)):
         return AUTO_TRADE_UNAVAILABLE_MESSAGE
 
-    setup_data = setup if setup is not None else build_auto_trade_setup(telegram_user_id)
+    setup_data = (
+        setup
+        if setup is not None
+        else build_auto_trade_setup(telegram_user_id)
+    )
     direction = setup_data.get("direction", "NO_TRADE")
 
     indicators = setup_data.get("indicators") or {}
-    current_price = setup_data.get("current_price")
-    rsi = indicators.get("rsi")
-    macd = indicators.get("macd")
-    macd_signal = indicators.get("macd_signal")
-    ma50 = indicators.get("ma50")
-    ma200 = indicators.get("ma200")
+    rsi = indicators.get("rsi7")
+    roc3 = indicators.get("roc3_pct")
+    momentum_atr_ratio = indicators.get("momentum_atr_ratio")
+    atr = indicators.get("atr14_5s")
+    atr_ratio = indicators.get("atr_ratio")
+    ema8 = indicators.get("ema8_5s")
+    ema21 = indicators.get("ema21_5s")
+    ema20_1m = indicators.get("ema20_1m")
+    ema50_1m = indicators.get("ema50_1m")
 
     rsi_state = (
-        "oversold" if rsi <= 30
-        else "overbought" if rsi >= 70
-        else "neutral"
+        "stretched high" if rsi >= 80
+        else "stretched low" if rsi <= 20
+        else "within range"
     ) if rsi is not None else "unavailable"
-    macd_state = (
-        "bullish" if macd > macd_signal
-        else "bearish" if macd < macd_signal
+    short_trend = (
+        "bullish" if ema8 > ema21
+        else "bearish" if ema8 < ema21
         else "flat"
-    ) if macd is not None and macd_signal is not None else "unavailable"
-
-    def moving_average_state(value: float | None) -> str:
-        if current_price is None or value is None:
-            return "unavailable"
-        return (
-            "price above" if current_price > value
-            else "price below" if current_price < value
-            else "at price"
+    ) if ema8 is not None and ema21 is not None else "unavailable"
+    context_trend = (
+        "bullish" if ema20_1m > ema50_1m
+        else "bearish" if ema20_1m < ema50_1m
+        else "flat"
+    ) if ema20_1m is not None and ema50_1m is not None else "unavailable"
+    momentum_text = (
+        (
+            f"{roc3:+.3f}% ({momentum_atr_ratio:.2f}x ATR)"
+            if momentum_atr_ratio is not None
+            else f"{roc3:+.3f}%"
         )
+        if roc3 is not None
+        else "unavailable"
+    )
+    volatility_text = (
+        f"{atr:.5f} "
+        f"({atr_ratio:.2f}x baseline)"
+        if atr is not None and atr_ratio is not None
+        else "unavailable"
+    )
+    rsi_text = (
+        f"{rsi:.2f} ({rsi_state})"
+        if rsi is not None
+        else "unavailable"
+    )
+    short_trend_text = (
+        f"{short_trend} ({ema8:.5f}/{ema21:.5f})"
+        if ema8 is not None and ema21 is not None
+        else "unavailable"
+    )
+    context_trend_text = (
+        f"{context_trend} ({ema20_1m:.5f}/{ema50_1m:.5f})"
+        if ema20_1m is not None and ema50_1m is not None
+        else "unavailable"
+    )
 
     direction_text = (
         "UP 🟢" if direction == "BULLISH"
@@ -659,18 +667,33 @@ def handle_auto_trade_start(
     indicator_report = "\n".join(
         [
             f"Trading pair: {setup_data.get('display_name', 'Current market')}",
-            f"RSI: {rsi_state}",
-            f"MACD: {macd_state}",
-            f"MA50: {moving_average_state(ma50)}",
-            f"MA200: {moving_average_state(ma200)}",
+            f"RSI(7): {rsi_text}",
+            f"5s EMA(8/21): {short_trend_text}",
+            f"3-bar momentum: {momentum_text}",
+            f"5s ATR(14): {volatility_text}",
+            f"1m EMA(20/50): {context_trend_text}",
             f"Direction: {direction_text}",
         ]
     )
 
+    next_step = (
+        "Select trade amount 👇"
+        if direction in {"BULLISH", "BEARISH"}
+        else (
+            "No trade: "
+            + html.escape(
+                str(
+                    setup_data.get("reasoning")
+                    or indicators.get("signal_reason")
+                    or "The entry filters are not aligned."
+                )
+            )
+        )
+    )
     return (
         f"{setup_title}\n\n"
         f"<pre>{html.escape(indicator_report)}</pre>\n\n"
-        "Select trade amount 👇"
+        f"{next_step}"
     )
 
 

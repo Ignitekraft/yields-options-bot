@@ -17,9 +17,11 @@ class Settings:
     deriv_redirect_uri: str = os.getenv("DERIV_REDIRECT_URI", "https://example.com/auth/deriv/callback")
     deriv_app_id: str = os.getenv("DERIV_APP_ID", os.getenv("DERIV_CLIENT_ID", ""))
     deriv_public_ws_url: str = os.getenv("DERIV_PUBLIC_WS_URL", "wss://ws.derivws.com/websockets/v3")
+    deriv_token_encryption_key: str = os.getenv("DERIV_TOKEN_ENCRYPTION_KEY", "")
     environment: str = os.getenv("APP_ENV", "development")
     supabase_url: str = os.getenv("SUPABASE_URL", "")
     supabase_service_role_key: str = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+    deriv_token_encryption_key: str = os.getenv("DERIV_TOKEN_ENCRYPTION_KEY", "")
     menu_image_url: str = "https://hvvwkijquaoqsbzhpyim.supabase.co/storage/v1/object/public/Bot%20images/Yields%20Options%20Bot%20Neon%20Branding.png"
     community_url: str = "https://t.me/+N58js2a8NF1mMzY0"
     support_contact_url: str = "https://t.me/samueludoh_ng"
@@ -35,9 +37,7 @@ class Settings:
     default_expiry_seconds: int = int(os.getenv("AUTO_TRADE_EXPIRY_SECONDS", "30"))
     auto_trade_cycles: int = int(os.getenv("AUTO_TRADE_CYCLES", "5"))
     auto_trade_multiplier: float = float(os.getenv("AUTO_TRADE_MULTIPLIER", "2.25"))
-    martingale_multiplier: float = float(os.getenv("MARTINGALE_MULTIPLIER", "2.25"))
-    min_indicator_confidence: float = float(os.getenv("MIN_INDICATOR_CONFIDENCE", "0.70"))
-    min_setup_quality: float = float(os.getenv("MIN_SETUP_QUALITY", "0.70"))
+    martingale_multiplier: float = float(os.getenv("MARTINGALE_MULTIPLIER", "2.3"))
 
 
 settings = Settings()

@@ -233,9 +233,25 @@ async def _show_auto_trade_setup(update, query) -> None:
         await _prompt_connect(update, query)
         return
 
-    setup = build_auto_trade_setup(user_id)
+    try:
+        setup = await asyncio.to_thread(build_auto_trade_setup, user_id)
+    except Exception:
+        logger.exception("Could not retrieve Deriv data for the Auto Trade scan")
+        await _safe_edit_message(
+            query,
+            "⚠️ Live Deriv market data is temporarily unavailable. "
+            "No trade has been placed. Please try scanning again shortly.",
+            reply_markup=TelegramKeyboard.dashboard_keyboard(),
+        )
+        return
+
     text = handle_auto_trade_start(user_id, setup=setup)
     photo_url = _setup_photo_url(setup.get("direction"))
+    reply_markup = (
+        TelegramKeyboard.stake_keyboard()
+        if setup.get("direction") in {"BULLISH", "BEARISH"}
+        else TelegramKeyboard.dashboard_keyboard()
+    )
 
     if InputMediaPhoto is not None and photo_url:
         try:
@@ -245,7 +261,7 @@ async def _show_auto_trade_setup(update, query) -> None:
                     caption=text,
                     parse_mode=ParseMode.HTML if ParseMode else "HTML",
                 ),
-                reply_markup=TelegramKeyboard.stake_keyboard(),
+                reply_markup=reply_markup,
             )
             return
         except Exception:
@@ -254,7 +270,7 @@ async def _show_auto_trade_setup(update, query) -> None:
     await _safe_edit_message(
         query,
         text,
-        reply_markup=TelegramKeyboard.stake_keyboard(),
+        reply_markup=reply_markup,
         parse_mode=ParseMode.HTML if ParseMode else "HTML",
     )
 
@@ -1105,7 +1121,16 @@ async def dispatch_callback(update, context) -> None:
             return
 
         currency = str(selected_account.get("currency") or "USD").upper()
-        setup = build_auto_trade_setup(user_id)
+        try:
+            setup = await asyncio.to_thread(build_auto_trade_setup, user_id)
+        except Exception:
+            logger.exception("Could not retrieve Deriv data for stake selection")
+            await _safe_edit_message(
+                query,
+                "⚠️ Live Deriv market data is temporarily unavailable. "
+                "No trade has been placed. Please try again shortly.",
+            )
+            return
 
         if (
             setup.get("symbol") == "NO_SETUP"

@@ -1,7 +1,9 @@
 import asyncio
 import importlib
 import json
+import math
 import os
+import time
 from types import SimpleNamespace
 import unittest
 from pathlib import Path
@@ -41,6 +43,41 @@ from app.services.scanner import SignalResult, YieldsScanner
 from app.services.trade_history_service import TradeHistoryService
 from app.services.trade_execution_service import TradeExecutionService
 from app.services.trading_service import TradingService
+from app.services.yields_orchestrator import YieldsOrchestrator
+
+
+def _sample_deriv_ticks(direction: int = 1, count: int = 800) -> list[dict]:
+    current_epoch = int(time.time())
+    base_index = count - 9
+    base_price = (
+        100
+        + direction
+        * (
+            0.008 * base_index
+            + 0.12 * math.sin(base_index * 0.39)
+        )
+    )
+    final_changes = [-0.08, -0.08, -0.08, -0.08, 0.10, 0.10, 0.10, 0.10]
+    ticks = []
+    for index in range(count):
+        if index < base_index + 1:
+            quote = 100 + direction * (
+                0.008 * index + 0.12 * math.sin(index * 0.39)
+            )
+        else:
+            change_count = index - base_index
+            quote = base_price + direction * sum(
+                final_changes[:change_count]
+            )
+        epoch = (current_epoch // 5 - count + 1 + index) * 5
+        ticks.append(
+            {
+                "symbol": "STPRNG",
+                "quote": quote,
+                "epoch": epoch,
+            }
+        )
+    return ticks
 
 
 class MarketDataTests(unittest.TestCase):
@@ -69,7 +106,8 @@ class MarketDataTests(unittest.TestCase):
 
         self.assertIsInstance(signal, SignalResult)
         self.assertEqual(signal.symbol, "STPRNG")
-        self.assertGreater(signal.confidence, 0)
+        self.assertEqual(signal.signal, "HOLD")
+        self.assertEqual(signal.signal_strength, 0)
 
     def test_step_index_symbols_use_deriv_step_market_mapping(self):
         expected = {
@@ -84,14 +122,116 @@ class MarketDataTests(unittest.TestCase):
             self.assertEqual(TradeExecutionService.normalize_step_symbol(key), value)
             self.assertEqual(TradeExecutionService.normalize_step_symbol(value), value)
 
-    def test_market_history_varies_by_symbol_to_avoid_duplicate_winners(self):
-        service = MarketDataService()
+    def test_scanner_confirms_short_term_momentum_with_higher_timeframe_trend(self):
+        scanner = YieldsScanner()
+        bullish = scanner.normalize_step_market(
+            "step_100",
+            "Step Index 100",
+            _sample_deriv_ticks(1),
+        )
+        bearish = scanner.normalize_step_market(
+            "step_200",
+            "Step Index 200",
+            _sample_deriv_ticks(-1),
+        )
 
-        history_100 = service.get_historical_ticks("step_100", count=12)
-        history_300 = service.get_historical_ticks("step_300", count=12)
+        self.assertEqual(bullish.trend, "bullish")
+        self.assertEqual(bearish.trend, "bearish")
+        self.assertEqual(bullish.data_quality, "good")
+        self.assertGreater(bullish.indicators["bars_1m"], 60)
+        self.assertGreater(bullish.indicators["atr_ratio"], 0.5)
+        self.assertLess(bullish.indicators["atr_ratio"], 2.5)
+        self.assertIn("1-minute context", bullish.indicators["signal_reason"])
 
-        self.assertNotEqual(history_100[0]["quote"], history_300[0]["quote"])
-        self.assertNotEqual(history_100[-1]["quote"], history_300[-1]["quote"])
+    def test_scanner_refuses_short_or_stale_deriv_history(self):
+        scanner = YieldsScanner()
+        insufficient = scanner.normalize_step_market(
+            "step_100",
+            "Step Index 100",
+            _sample_deriv_ticks(count=20),
+        )
+        stale_ticks = _sample_deriv_ticks()
+        for tick in stale_ticks:
+            tick["epoch"] -= 60
+        stale = scanner.normalize_step_market(
+            "step_100",
+            "Step Index 100",
+            stale_ticks,
+        )
+
+        self.assertEqual(insufficient.trend, "neutral")
+        self.assertEqual(insufficient.data_quality, "insufficient")
+        self.assertEqual(stale.trend, "neutral")
+        self.assertEqual(stale.data_quality, "stale")
+
+    def test_orchestrator_does_not_create_proposal_for_hold_signal(self):
+        orchestrator = YieldsOrchestrator()
+        hold_signal = {
+            "symbol": "step_100",
+            "signal": "HOLD",
+            "signal_strength": 0.0,
+            "direction": "neutral",
+        }
+        with patch.object(
+            orchestrator,
+            "scan_symbol",
+            return_value=hold_signal,
+        ), patch.object(
+            orchestrator.trading_service,
+            "create_proposal",
+        ) as create_proposal:
+            plan = orchestrator.build_trade_plan("step_100")
+
+        self.assertEqual(plan["action"], "hold")
+        self.assertIsNone(plan["proposal"])
+        create_proposal.assert_not_called()
+
+    def test_historical_ticks_are_read_from_deriv_and_step_symbols_are_mapped(self):
+        now = int(time.time())
+
+        class FakeSocket:
+            def __init__(self):
+                self.sent = []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def send(self, payload):
+                self.sent.append(json.loads(payload))
+
+            def recv(self, timeout=None):
+                return json.dumps(
+                    {
+                        "history": {
+                            "prices": ["100.1", "100.2"],
+                            "times": [now - 1, now],
+                        }
+                    }
+                )
+
+        socket = FakeSocket()
+        with patch(
+            "app.services.deriv.market_data.websocket_client.connect",
+            return_value=socket,
+        ) as connect_mock:
+            history = MarketDataService(
+                "wss://ws.derivws.com/websockets/v3",
+                app_id="test-app",
+            ).get_historical_ticks("step_100", count=5000)
+
+        connect_mock.assert_called_once_with(
+            "wss://ws.derivws.com/websockets/v3?app_id=test-app",
+            open_timeout=10,
+            close_timeout=2,
+        )
+        self.assertEqual([tick["quote"] for tick in history], [100.1, 100.2])
+        self.assertEqual([tick["epoch"] for tick in history], [now - 1, now])
+        self.assertEqual(socket.sent[0]["ticks_history"], "STPRNG")
+        self.assertEqual(socket.sent[0]["count"], 5000)
+        self.assertEqual(socket.sent[0]["style"], "ticks")
 
     def test_monitor_contract_uses_numeric_contract_id(self):
         service = TradeExecutionService()
@@ -299,7 +439,7 @@ class MarketDataTests(unittest.TestCase):
 
         state = service.advance_after_result("martingale-user", won=False, profit=-2.0)
         self.assertEqual(state.status, "running")
-        self.assertEqual(state.current_stake, 4.5)
+        self.assertEqual(state.current_stake, 4.6)
         self.assertEqual(state.martingale_step, 2)
 
         for _ in range(9):
@@ -401,7 +541,7 @@ class MarketDataTests(unittest.TestCase):
         self.assertIn("Welcome back, Sam.", text)
         self.assertIn("1,250.50 USD", text)
         self.assertIn("750.25 USD", text)
-        self.assertIn("AI", text)
+        self.assertNotIn("AUTO TRADE", text)
         self.assertNotIn("Gemini", text)
 
     def test_menu_message_shows_user_name_mode_balances_and_tokens(self):
@@ -478,6 +618,9 @@ class MarketDataTests(unittest.TestCase):
 
         update = FakeUpdate()
         with patch(
+            "app.bot.telegram_bot.auth_service.get_valid_access_token",
+            return_value=None,
+        ), patch(
             "app.bot.telegram_bot.build_menu_message",
             new=AsyncMock(return_value="Welcome to Yields"),
         ):
@@ -490,12 +633,33 @@ class MarketDataTests(unittest.TestCase):
         self.assertEqual(
             [[button.text for button in row] for row in rows],
             [
-                ["🚀 Auto Trade"],
-                ["💎 Get Tokens", "🌍 Community"],
-                ["❓ Faq"],
-                ["🎁 Invite"],
+                ["🔐 Connect Deriv"],
+                ["ℹ️ How Yields Works"],
             ],
         )
+
+    def test_stats_command_sends_message_without_buttons(self):
+        from app.bot.telegram_bot import _send_stats_message
+
+        class FakeMessage:
+            def __init__(self):
+                self.text = None
+
+            async def reply_text(self, text, **kwargs):
+                self.text = (text, kwargs)
+
+        update = SimpleNamespace(
+            effective_user=SimpleNamespace(id="stats-user"),
+            message=FakeMessage(),
+        )
+
+        with patch(
+            "app.bot.telegram_bot.handle_stats",
+            new=AsyncMock(return_value="Yields stats"),
+        ):
+            asyncio.run(_send_stats_message(update))
+
+        self.assertEqual(update.message.text, ("Yields stats", {}))
 
     def test_auto_trade_setup_images_use_supabase_urls_by_direction(self):
         self.assertEqual(
@@ -525,15 +689,18 @@ class MarketDataTests(unittest.TestCase):
                 "symbol": "STPRNG",
                 "display_name": "Step Index 100",
                 "direction": "BULLISH",
-                "confidence": 0.83,
-                "setup_quality": 0.88,
+                "signal_strength": 0.88,
                 "current_price": 120.0,
                 "indicators": {
-                    "rsi": 25.0,
-                    "macd": 2.0,
-                    "macd_signal": 1.0,
-                    "ma50": 110.0,
-                    "ma200": 100.0,
+                    "rsi7": 25.0,
+                    "ema8_5s": 121.0,
+                    "ema21_5s": 120.0,
+                    "roc3_pct": 0.12,
+                    "momentum_atr_ratio": 0.8,
+                    "atr14_5s": 0.035,
+                    "atr_ratio": 1.1,
+                    "ema20_1m": 119.0,
+                    "ema50_1m": 118.0,
                 },
                 "reasoning": "Strong upward trend and trend alignment.",
             },
@@ -544,10 +711,11 @@ class MarketDataTests(unittest.TestCase):
             text,
             "🟢 Strong Bullish Setup Detected\n\n"
             "<pre>Trading pair: Step Index 100\n"
-            "RSI: oversold\n"
-            "MACD: bullish\n"
-            "MA50: price above\n"
-            "MA200: price above\n"
+            "RSI(7): 25.00 (within range)\n"
+            "5s EMA(8/21): bullish (121.00000/120.00000)\n"
+            "3-bar momentum: +0.120% (0.80x ATR)\n"
+            "5s ATR(14): 0.03500 (1.10x baseline)\n"
+            "1m EMA(20/50): bullish (119.00000/118.00000)\n"
             "Direction: UP 🟢</pre>\n\n"
             "Select trade amount 👇",
         )
@@ -570,15 +738,18 @@ class MarketDataTests(unittest.TestCase):
                 "symbol": "STPRNG",
                 "display_name": "Step 400",
                 "direction": "BULLISH",
-                "confidence": 0.76,
-                "setup_quality": 0.76,
+                "signal_strength": 0.76,
                 "current_price": 120.0,
                 "indicators": {
-                    "rsi": 65.0,
-                    "macd": 2.0,
-                    "macd_signal": 1.0,
-                    "ma50": 110.0,
-                    "ma200": 100.0,
+                    "rsi7": 65.0,
+                    "ema8_5s": 121.0,
+                    "ema21_5s": 120.0,
+                    "roc3_pct": 0.12,
+                    "momentum_atr_ratio": 0.8,
+                    "atr14_5s": 0.035,
+                    "atr_ratio": 1.1,
+                    "ema20_1m": 119.0,
+                    "ema50_1m": 118.0,
                 },
                 "reasoning": "The Step 400 shows bullish pressure with MA50/MA200 alignment and RSI confirmation.",
             },
@@ -609,15 +780,18 @@ class MarketDataTests(unittest.TestCase):
                 "symbol": "STPRNG",
                 "display_name": "Step 400",
                 "direction": "BULLISH",
-                "confidence": 0.76,
-                "setup_quality": 0.76,
+                "signal_strength": 0.76,
                 "current_price": 120.0,
                 "indicators": {
-                    "rsi": 65.0,
-                    "macd": 2.0,
-                    "macd_signal": 1.0,
-                    "ma50": 110.0,
-                    "ma200": 100.0,
+                    "rsi7": 65.0,
+                    "ema8_5s": 121.0,
+                    "ema21_5s": 120.0,
+                    "roc3_pct": 0.12,
+                    "momentum_atr_ratio": 0.8,
+                    "atr14_5s": 0.035,
+                    "atr_ratio": 1.1,
+                    "ema20_1m": 119.0,
+                    "ema50_1m": 118.0,
                 },
                 "reasoning": "The Step 400 shows bullish pressure with MA50/MA200 alignment and RSI confirmation.",
             },
@@ -645,24 +819,22 @@ class MarketDataTests(unittest.TestCase):
                 symbol="step_300",
                 display_name="Step 300",
                 current_price=90.0,
+                trend="neutral",
                 indicators={
-                    "rsi": 50.0,
-                    "macd": -2.0,
-                    "macd_signal": -1.0,
-                    "ma50": 100.0,
-                    "ma200": 110.0,
+                    "rsi7": 50.0,
+                    "signal_strength": 0.1,
+                    "signal_reason": "Short-term trend and momentum are not aligned.",
                 },
             ),
             MarketSnapshot(
                 symbol="step_500",
                 display_name="Step 500",
                 current_price=120.0,
+                trend="bullish",
                 indicators={
-                    "rsi": 65.0,
-                    "macd": 2.0,
-                    "macd_signal": 1.0,
-                    "ma50": 110.0,
-                    "ma200": 100.0,
+                    "rsi7": 65.0,
+                    "signal_strength": 1.2,
+                    "signal_reason": "5-second trend and momentum align with 1-minute context.",
                 },
             ),
         ]
@@ -687,10 +859,8 @@ class MarketDataTests(unittest.TestCase):
         self.assertEqual(setup["symbol"], "step_500")
         self.assertEqual(setup["direction"], "BULLISH")
         self.assertEqual(setup, repeated_setup)
-        self.assertIn("MACD", setup["reasoning"])
-        self.assertIn("RSI", setup["reasoning"])
-        self.assertIn("MA50", setup["reasoning"])
-        self.assertIn("MA200", setup["reasoning"])
+        self.assertIn("5-second trend", setup["reasoning"])
+        self.assertGreater(setup["signal_strength"], 0)
 
     def test_auto_trade_setup_rejects_conflicting_indicator_votes(self):
         auth = AuthService()
@@ -708,12 +878,11 @@ class MarketDataTests(unittest.TestCase):
                 symbol="step_300",
                 display_name="Step 300",
                 current_price=90.0,
+                trend="neutral",
                 indicators={
-                    "rsi": 65.0,
-                    "macd": 2.0,
-                    "macd_signal": 1.0,
-                    "ma50": 100.0,
-                    "ma200": 110.0,
+                    "rsi7": 65.0,
+                    "signal_strength": 1.0,
+                    "signal_reason": "Short-term trend and momentum are not aligned.",
                 },
             ),
         ]
@@ -727,27 +896,45 @@ class MarketDataTests(unittest.TestCase):
         self.assertEqual(setup["symbol"], "NO_SETUP")
         self.assertEqual(setup["direction"], "NO_TRADE")
 
+    def test_auto_trade_setup_explains_stale_deriv_market_data(self):
+        auth = AuthService()
+        auth.connect_user(
+            "stale-data-user",
+            {
+                "access_token": "stale-data-token",
+                "refresh_token": "stale-data-refresh",
+                "expires_in": 3600,
+                "token_type": "Bearer",
+            },
+        )
+        stale_snapshot = MarketSnapshot(
+            symbol="step_100",
+            display_name="Step 100",
+            current_price=0.0,
+            data_quality="stale",
+            indicators={"signal_reason": "Latest Deriv tick is 42 seconds old."},
+        )
+
+        with patch(
+            "app.bot.handlers.YieldsScanner.collect_step_market_snapshots",
+            return_value=[stale_snapshot],
+        ):
+            setup = build_auto_trade_setup("stale-data-user")
+
+        self.assertEqual(setup["symbol"], "NO_SETUP")
+        self.assertIn("42 seconds old", setup["reasoning"])
+
     def test_confirmation_callback_executes_trade(self):
         class FakeQuery:
             def __init__(self):
                 self.data = "AUTO_TRADE_CONFIRM"
                 self.edited = None
-                self.photo = None
-                self.message = SimpleNamespace(reply_photo=self.reply_photo)
-                self.photo = None
-                self.message = SimpleNamespace(reply_photo=self.reply_photo)
 
             async def answer(self):
                 return None
 
             async def edit_message_text(self, text, **kwargs):
                 self.edited = text
-
-            async def reply_photo(self, **kwargs):
-                self.photo = kwargs
-
-            async def reply_photo(self, **kwargs):
-                self.photo = kwargs
 
         class FakeUpdate:
             def __init__(self):
@@ -769,6 +956,9 @@ class MarketDataTests(unittest.TestCase):
         with patch(
             "app.bot.callbacks.auto_trade_service",
             run_state,
+        ), patch(
+            "app.bot.callbacks.auth_service.get_valid_access_token",
+            return_value="access-token",
         ), patch(
             "app.bot.callbacks.trade_history_service",
             SimpleNamespace(
@@ -1145,11 +1335,15 @@ class MarketDataTests(unittest.TestCase):
             "direction": "BULLISH",
             "current_price": 120.0,
             "indicators": {
-                "rsi": 25.0,
-                "macd": 2.0,
-                "macd_signal": 1.0,
-                "ma50": 110.0,
-                "ma200": 100.0,
+                "rsi7": 25.0,
+                "ema8_5s": 121.0,
+                "ema21_5s": 120.0,
+                "roc3_pct": 0.12,
+                "momentum_atr_ratio": 0.8,
+                "atr14_5s": 0.035,
+                "atr_ratio": 1.1,
+                "ema20_1m": 119.0,
+                "ema50_1m": 118.0,
             },
         }
         update = FakeUpdate()
@@ -1169,6 +1363,57 @@ class MarketDataTests(unittest.TestCase):
         build_setup.assert_called_once_with("single-scan-user")
         self.assertIn("Trading pair: Step Index 100", update.callback_query.edited)
         self.assertIn("<pre>", update.callback_query.edited)
+
+    def test_no_trade_setup_hides_stake_buttons_and_explains_filter(self):
+        class FakeQuery:
+            def __init__(self):
+                self.edited = None
+                self.reply_markup = None
+
+            async def edit_message_text(self, text, **kwargs):
+                self.edited = text
+                self.reply_markup = kwargs.get("reply_markup")
+
+        update = SimpleNamespace(
+            effective_user=SimpleNamespace(id="no-trade-setup-user"),
+            callback_query=FakeQuery(),
+        )
+        setup = {
+            "symbol": "NO_SETUP",
+            "display_name": "Step Index 100",
+            "direction": "NO_TRADE",
+            "indicators": {
+                "signal_reason": "Current volatility is outside the normal range.",
+            },
+            "reasoning": "Current volatility is outside the normal range.",
+        }
+
+        with patch(
+            "app.bot.callbacks.auth_service.get_valid_access_token",
+            return_value="access-token",
+        ), patch(
+            "app.bot.callbacks.build_auto_trade_setup",
+            return_value=setup,
+        ), patch(
+            "app.bot.callbacks._setup_photo_url",
+            return_value=None,
+        ):
+            asyncio.run(_show_auto_trade_setup(update, update.callback_query))
+
+        self.assertIn("No trade:", update.callback_query.edited)
+        self.assertIn("volatility is outside", update.callback_query.edited)
+        self.assertEqual(
+            update.callback_query.reply_markup.inline_keyboard[0][0].text,
+            "🤖 Auto Trade",
+        )
+        self.assertNotIn(
+            "🟢 0.1%",
+            [
+                button.text
+                for row in update.callback_query.reply_markup.inline_keyboard
+                for button in row
+            ],
+        )
 
     def test_stake_callback_falls_back_to_caption_edit_when_message_is_media(self):
         class FakeQuery:
@@ -1201,8 +1446,7 @@ class MarketDataTests(unittest.TestCase):
                 "symbol": "step_500",
                 "display_name": "Step Index 500",
                 "direction": "BULLISH",
-                "confidence": 0.92,
-                "setup_quality": 0.83,
+                "signal_strength": 0.92,
             },
         ), patch(
             "app.bot.callbacks.account_mode_service.get_mode",
@@ -2106,7 +2350,7 @@ class MarketDataTests(unittest.TestCase):
     def test_unauthenticated_user_sees_onboarding_screen(self):
         message = handle_start("missing-user")
 
-        self.assertIn("🤖 YIELDS", message)
+        self.assertIn("🤖 YIELDS OPTIONS BOT", message)
         self.assertIn("Connect your Deriv account", message)
         self.assertIn("Connect securely through Deriv OAuth", message)
 
@@ -2125,14 +2369,18 @@ class MarketDataTests(unittest.TestCase):
         message = handle_start("dashboard-user")
 
         self.assertIn("Welcome back", message)
-        self.assertIn("AI scans 5 Step Indices", message)
-        self.assertIn("Expiry: 30 seconds", message)
+        self.assertNotIn("AI scans 5 Step Indices", message)
+        self.assertNotIn("Expiry: 30 seconds", message)
+        self.assertNotIn("AUTO TRADE", message)
 
     def test_exactly_five_step_markets_are_normalized(self):
         scanner = YieldsScanner()
-        snapshots = scanner.collect_step_market_snapshots(
-            MarketDataService()
-        )
+        with patch.object(
+            MarketDataService,
+            "get_historical_ticks",
+            return_value=_sample_deriv_ticks(),
+        ):
+            snapshots = scanner.collect_step_market_snapshots(MarketDataService())
 
         self.assertEqual(len(snapshots), 5)
         self.assertEqual(
@@ -2178,25 +2426,26 @@ class MarketDataTests(unittest.TestCase):
 
     def test_martingale_state_machine(self):
         service = AutoTradeService()
+        relative_stake = calculate_relative_stake(10_000, "0_1")
         run = service.start_run(
             "martingale-user",
             "step_300",
             "BULLISH",
-            10.0,
+            relative_stake,
         )
 
-        self.assertEqual(run.current_stake, 10.0)
+        self.assertEqual(run.current_stake, relative_stake)
 
         service.advance_after_result("martingale-user", False)
         self.assertEqual(
             service.get_run("martingale-user").current_stake,
-            22.5,
+            23.0,
         )
 
         service.advance_after_result("martingale-user", False)
         self.assertEqual(
             service.get_run("martingale-user").current_stake,
-            50.62,
+            52.9,
         )
 
         service.advance_after_result("martingale-user", True)
@@ -2206,7 +2455,7 @@ class MarketDataTests(unittest.TestCase):
         )
         self.assertEqual(
             service.get_run("martingale-user").current_stake,
-            10.0,
+            relative_stake,
         )
 
     def test_duplicate_auto_trade_start_is_rejected(self):

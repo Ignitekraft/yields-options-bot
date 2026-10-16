@@ -3,12 +3,17 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 import os
 import secrets
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 import httpx
+
+from app.config import settings
+from app.services.oauth_credential_store import SupabaseOAuthCredentialStore
 
 
 DERIV_OPTIONS_ACCOUNTS_URL = (
@@ -78,13 +83,128 @@ def _state_file(filename: str) -> str:
 STATE_FILE = _state_file("yields_oauth_states.json")
 TOKEN_FILE = _state_file("yields_token_store.json")
 TOKEN_COUNT_FILE = _state_file("yields_user_tokens.json")
+logger = logging.getLogger(__name__)
 
 
 class AuthService:
     """Manage Deriv OAuth, persisted tokens, and account metadata."""
 
-    def __init__(self) -> None:
-        pass
+    def __init__(
+        self,
+        credential_store: SupabaseOAuthCredentialStore | None = None,
+    ) -> None:
+        self.credential_store = (
+            credential_store or SupabaseOAuthCredentialStore()
+        )
+        if (
+            self.credential_store.is_supabase_configured
+            and not self.credential_store.is_enabled
+        ):
+            logger.warning(
+                "Encrypted Supabase OAuth credential persistence is unavailable; "
+                "set DERIV_TOKEN_ENCRYPTION_KEY to enable durable token storage."
+            )
+
+    @staticmethod
+    def _expiry_time(expires_in: Any) -> str | None:
+        try:
+            seconds = float(expires_in)
+        except (TypeError, ValueError):
+            return None
+        if seconds <= 0:
+            return None
+        return (
+            datetime.now(timezone.utc) + timedelta(seconds=seconds)
+        ).isoformat()
+
+    def _remove_local_token_record(self, user_key: str) -> None:
+        tokens = self._load_json(TOKEN_FILE)
+        if user_key in tokens:
+            del tokens[user_key]
+            self._save_json(TOKEN_FILE, tokens)
+            if user_key in self._load_json(TOKEN_FILE):
+                raise RuntimeError("LEGACY_TOKEN_CLEANUP_FAILED")
+
+    def _save_credentials(
+        self,
+        user_key: str,
+        credentials: Dict[str, Any],
+    ) -> None:
+        if self.credential_store.is_enabled:
+            self.credential_store.save(user_key, credentials)
+            self._remove_local_token_record(user_key)
+            return
+
+        tokens = self._load_json(TOKEN_FILE)
+        tokens[user_key] = credentials
+        self._save_json(TOKEN_FILE, tokens)
+
+    def _load_credentials(self, user_key: str) -> Dict[str, Any] | None:
+        if self.credential_store.is_enabled:
+            credentials = self.credential_store.load(user_key)
+            if credentials is not None:
+                return credentials
+
+            # Migrate credentials from older releases that stored them locally.
+            legacy_tokens = self._load_json(TOKEN_FILE)
+            legacy_record = legacy_tokens.get(user_key)
+            if isinstance(legacy_record, dict):
+                self.credential_store.save(user_key, legacy_record)
+                self._remove_local_token_record(user_key)
+                return legacy_record
+            return None
+
+        tokens = self._load_json(TOKEN_FILE)
+        record = tokens.get(user_key)
+        return record if isinstance(record, dict) else None
+
+    def _refresh_access_token(
+        self,
+        user_key: str,
+        credentials: Dict[str, Any],
+    ) -> Dict[str, Any] | None:
+        refresh_token = credentials.get("refresh_token")
+        client_id = settings.deriv_app_id or settings.deriv_client_id
+        if not isinstance(refresh_token, str) or not refresh_token or not client_id:
+            return None
+
+        request_data = {
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "client_id": client_id,
+        }
+        if settings.deriv_client_secret:
+            request_data["client_secret"] = settings.deriv_client_secret
+
+        try:
+            response = httpx.post(
+                "https://auth.deriv.com/oauth2/token",
+                data=request_data,
+                timeout=20.0,
+            )
+            response.raise_for_status()
+            refreshed_payload = response.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            raise RuntimeError("DERIV_TOKEN_REFRESH_FAILED") from exc
+
+        refreshed_access_token = (
+            refreshed_payload.get("access_token")
+            if isinstance(refreshed_payload, dict)
+            else None
+        )
+        if not isinstance(refreshed_access_token, str) or not refreshed_access_token:
+            raise RuntimeError("INVALID_DERIV_TOKEN_REFRESH_RESPONSE")
+
+        updated = dict(credentials)
+        updated.update(refreshed_payload)
+        updated["refresh_token"] = (
+            refreshed_payload.get("refresh_token") or refresh_token
+        )
+        updated["expires_at"] = self._expiry_time(
+            refreshed_payload.get("expires_in")
+        )
+        self._save_credentials(user_key, updated)
+        return updated
 
     def _load_json(self, path: str) -> dict:
         if not os.path.exists(path):
@@ -313,13 +433,13 @@ class AuthService:
         token_payload: Dict[str, Any],
     ) -> Dict[str, Any]:
         user_key = str(telegram_user_id)
-        tokens = self._load_json(TOKEN_FILE)
 
         token_data = {
             "access_token": token_payload.get("access_token"),
             "refresh_token": token_payload.get("refresh_token"),
             "expires_in": token_payload.get("expires_in"),
             "token_type": token_payload.get("token_type", "Bearer"),
+            "expires_at": self._expiry_time(token_payload.get("expires_in")),
         }
 
         # Preserve additional OAuth fields, if present.
@@ -337,8 +457,7 @@ class AuthService:
             token_data,
         ) or token_data
 
-        tokens[user_key] = token_data
-        self._save_json(TOKEN_FILE, tokens)
+        self._save_credentials(user_key, token_data)
 
         user_tokens = self._load_json(TOKEN_COUNT_FILE)
 
@@ -406,11 +525,25 @@ class AuthService:
         self,
         telegram_user_id: str | int,
     ) -> Optional[str]:
-        tokens = self._load_json(TOKEN_FILE)
-        record = tokens.get(str(telegram_user_id))
-
-        if not isinstance(record, dict):
+        user_key = str(telegram_user_id)
+        record = self._load_credentials(user_key)
+        if record is None:
             return None
+
+        expires_at = record.get("expires_at")
+        if isinstance(expires_at, str):
+            try:
+                expiry = datetime.fromisoformat(
+                    expires_at.replace("Z", "+00:00")
+                )
+            except ValueError:
+                expiry = None
+            if expiry is not None and expiry.tzinfo is None:
+                expiry = expiry.replace(tzinfo=timezone.utc)
+            if expiry is not None and expiry <= datetime.now(timezone.utc):
+                record = self._refresh_access_token(user_key, record)
+                if record is None:
+                    return None
 
         token = record.get("access_token")
         return token if isinstance(token, str) and token else None
@@ -428,10 +561,8 @@ class AuthService:
         by the live Deriv account-list endpoint before requesting OTP.
         """
         user_key = str(telegram_user_id)
-        tokens = self._load_json(TOKEN_FILE)
-        record = tokens.get(user_key)
-
-        if not isinstance(record, dict):
+        record = self._load_credentials(user_key)
+        if record is None:
             return None
 
         access_token = record.get("access_token")
@@ -445,8 +576,7 @@ class AuthService:
         )
 
         if refreshed is not None:
-            tokens[user_key] = refreshed
-            self._save_json(TOKEN_FILE, tokens)
+            self._save_credentials(user_key, refreshed)
             return refreshed
 
         return record
@@ -456,12 +586,8 @@ class AuthService:
         telegram_user_id: str | int,
     ) -> bool:
         user_key = str(telegram_user_id)
-        tokens = self._load_json(TOKEN_FILE)
-
-        if user_key in tokens:
-            del tokens[user_key]
-            self._save_json(TOKEN_FILE, tokens)
-
+        self.credential_store.delete(user_key)
+        self._remove_local_token_record(user_key)
         return True
 
     def get_user_tokens(
