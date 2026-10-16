@@ -45,15 +45,27 @@ class MarketDataService:
         if websocket_client is None:
             raise RuntimeError("DERIV_WEBSOCKETS_CLIENT_UNAVAILABLE")
 
-        request = {**payload, "req_id": 1}
         with websocket_client.connect(
             self._connection_url(),
             open_timeout=10,
             close_timeout=2,
         ) as connection:
-            connection.send(json.dumps(request))
-            response = json.loads(connection.recv(timeout=10))
+            response = self._request_on_connection(
+                connection,
+                payload,
+                req_id=1,
+            )
 
+        return response
+
+    @staticmethod
+    def _request_on_connection(
+        connection: Any,
+        payload: dict[str, Any],
+        req_id: int,
+    ) -> dict[str, Any]:
+        connection.send(json.dumps({**payload, "req_id": req_id}))
+        response = json.loads(connection.recv(timeout=10))
         if not isinstance(response, dict):
             raise ValueError("DERIV_MARKET_DATA_INVALID_RESPONSE")
 
@@ -64,6 +76,82 @@ class MarketDataService:
             raise ValueError(f"DERIV_MARKET_DATA_ERROR:{code}:{message}")
 
         return response
+
+    def get_step_market_data_batch(
+        self,
+        symbols: list[str],
+        tick_count: int = 1000,
+        candle_count: int = 60,
+        granularity: int = 60,
+    ) -> dict[
+        str,
+        tuple[list[dict[str, Any]], list[dict[str, float | int]]] | Exception,
+    ]:
+        if websocket_client is None:
+            raise RuntimeError("DERIV_WEBSOCKETS_CLIENT_UNAVAILABLE")
+        if not 1 <= int(tick_count) <= 5000:
+            raise ValueError("DERIV_TICK_HISTORY_COUNT_OUT_OF_RANGE")
+        if not 1 <= int(candle_count) <= 5000:
+            raise ValueError("DERIV_CANDLE_HISTORY_COUNT_OUT_OF_RANGE")
+        if int(granularity) not in {
+            60, 120, 180, 300, 600, 900, 1800,
+            3600, 7200, 14400, 28800, 86400,
+        }:
+            raise ValueError("DERIV_CANDLE_GRANULARITY_UNSUPPORTED")
+
+        results: dict[
+            str,
+            tuple[
+                list[dict[str, Any]],
+                list[dict[str, float | int]],
+            ] | Exception,
+        ] = {}
+        with websocket_client.connect(
+            self._connection_url(),
+            open_timeout=10,
+            close_timeout=2,
+        ) as connection:
+            request_id = 0
+            for symbol in symbols:
+                try:
+                    request_id += 1
+                    tick_response = self._request_on_connection(
+                        connection,
+                        self.build_public_websocket_payload(
+                            "ticks_history",
+                            self._api_symbol(symbol),
+                            count=tick_count,
+                            end="latest",
+                            style="ticks",
+                        ),
+                        req_id=request_id,
+                    )
+                    ticks = self._normalize_tick_history(
+                        tick_response,
+                        symbol,
+                    )
+
+                    request_id += 1
+                    candle_response = self._request_on_connection(
+                        connection,
+                        self.build_public_websocket_payload(
+                            "ticks_history",
+                            self._api_symbol(symbol),
+                            count=candle_count,
+                            end="latest",
+                            style="candles",
+                            granularity=granularity,
+                        ),
+                        req_id=request_id,
+                    )
+                    candles = self._normalize_candle_history(
+                        candle_response
+                    )
+                    results[symbol] = (ticks, candles)
+                except Exception as exc:
+                    results[symbol] = exc
+
+        return results
 
     @classmethod
     def _api_symbol(cls, symbol: str) -> str:
@@ -115,6 +203,13 @@ class MarketDataService:
                 style="ticks",
             )
         )
+        return self._normalize_tick_history(response, symbol)
+
+    @staticmethod
+    def _normalize_tick_history(
+        response: dict[str, Any],
+        symbol: str,
+    ) -> list[dict[str, Any]]:
         history = response.get("history")
         if not isinstance(history, dict):
             raise ValueError("DERIV_TICK_HISTORY_MISSING")
@@ -173,6 +268,12 @@ class MarketDataService:
                 granularity=granularity,
             )
         )
+        return self._normalize_candle_history(response)
+
+    @staticmethod
+    def _normalize_candle_history(
+        response: dict[str, Any],
+    ) -> list[dict[str, float | int]]:
         candles = response.get("candles")
         if not isinstance(candles, list):
             raise ValueError("DERIV_CANDLE_HISTORY_MISSING")

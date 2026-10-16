@@ -147,7 +147,14 @@ class TelegramKeyboard:
         )
 
     @staticmethod
-    def stake_keyboard() -> object:
+    def stake_keyboard(
+        symbol: str | None = None,
+        direction: str | None = None,
+    ) -> object:
+        selection_suffix = ""
+        if symbol and direction:
+            selection_suffix = f"_{symbol}_{direction.upper()}"
+
         if InlineKeyboardMarkup is None:
             return [["🟢 0.1%", "🟢 0.5%", "🟠 1%"]]
 
@@ -155,17 +162,17 @@ class TelegramKeyboard:
             [[
                 InlineKeyboardButton(
                     "🟢 0.1%",
-                    callback_data="AUTO_TRADE_STAKE_0_1",
+                    callback_data=f"AUTO_TRADE_STAKE_0_1{selection_suffix}",
                     style="success",
                 ),
                 InlineKeyboardButton(
                     "🟢 0.5%",
-                    callback_data="AUTO_TRADE_STAKE_0_5",
+                    callback_data=f"AUTO_TRADE_STAKE_0_5{selection_suffix}",
                     style="success",
                 ),
                 InlineKeyboardButton(
                     "🟠 1%",
-                    callback_data="AUTO_TRADE_STAKE_1",
+                    callback_data=f"AUTO_TRADE_STAKE_1{selection_suffix}",
                 ),
             ]]
         )

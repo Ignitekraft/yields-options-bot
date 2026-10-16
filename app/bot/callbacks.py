@@ -65,6 +65,29 @@ def calculate_relative_stake(account_balance: object, percentage_key: str) -> in
     return int((balance * percentage).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
 
 
+def _stake_selection_from_callback(
+    callback_data: str,
+) -> tuple[str | None, str | None, str | None]:
+    suffix = callback_data.removeprefix("AUTO_TRADE_STAKE_")
+    for percentage_key in RELATIVE_STAKES:
+        if suffix == percentage_key:
+            return percentage_key, None, None
+        prefix = f"{percentage_key}_"
+        if not suffix.startswith(prefix):
+            continue
+        selected_market_and_direction = suffix[len(prefix):]
+        if "_" not in selected_market_and_direction:
+            return percentage_key, None, None
+        market_symbol, direction = selected_market_and_direction.rsplit("_", 1)
+        if (
+            market_symbol in settings.auto_trade_markets
+            and direction in {"BULLISH", "BEARISH"}
+        ):
+            return percentage_key, market_symbol, direction
+        return percentage_key, None, None
+    return None, None, None
+
+
 def _session_payload(state, session_status: str) -> dict:
     return {
         "session_id": state.session_id,
@@ -278,7 +301,10 @@ async def _show_auto_trade_setup(update, query) -> None:
     text = handle_auto_trade_start(user_id, setup=setup)
     photo_url = _setup_photo_url(setup.get("direction"))
     reply_markup = (
-        TelegramKeyboard.stake_keyboard()
+        TelegramKeyboard.stake_keyboard(
+            setup.get("symbol"),
+            setup.get("direction"),
+        )
         if setup.get("direction") in {"BULLISH", "BEARISH"} and connected
         else (
             TelegramKeyboard.dashboard_keyboard()
@@ -1098,8 +1124,10 @@ async def dispatch_callback(update, context) -> None:
             await _prompt_connect(update, query)
             return
 
-        percentage_key = data.removeprefix("AUTO_TRADE_STAKE_")
-        if percentage_key not in RELATIVE_STAKES:
+        percentage_key, selected_symbol, selected_direction = (
+            _stake_selection_from_callback(data)
+        )
+        if percentage_key is None:
             await query.edit_message_text(
                 "⚠️ Invalid stake selection. Choose one of the available stake buttons."
             )
@@ -1160,26 +1188,38 @@ async def dispatch_callback(update, context) -> None:
             return
 
         currency = str(selected_account.get("currency") or "USD").upper()
-        try:
-            setup = await asyncio.to_thread(build_auto_trade_setup, user_id)
-        except Exception:
-            logger.exception("Could not retrieve Deriv data for stake selection")
-            await _safe_edit_message(
-                query,
-                "⚠️ Live Deriv market data is temporarily unavailable. "
-                "No trade has been placed. Please try again shortly.",
-            )
-            return
+        if selected_symbol and selected_direction:
+            setup = {
+                "symbol": selected_symbol,
+                "display_name": friendly_market_name(selected_symbol),
+                "direction": selected_direction,
+            }
+        else:
+            try:
+                setup = await asyncio.to_thread(
+                    build_auto_trade_setup,
+                    user_id,
+                )
+            except Exception:
+                logger.exception(
+                    "Could not retrieve Deriv data for stake selection"
+                )
+                await _safe_edit_message(
+                    query,
+                    "⚠️ Live Deriv market data is temporarily unavailable. "
+                    "No trade has been placed. Please try again shortly.",
+                )
+                return
 
-        if (
-            setup.get("symbol") == "NO_SETUP"
-            or setup.get("direction") not in {"BULLISH", "BEARISH"}
-        ):
-            await query.edit_message_text(
-                "⚠️ No tradable setup is currently available.\n\n"
-                "No trade has been placed."
-            )
-            return
+            if (
+                setup.get("symbol") == "NO_SETUP"
+                or setup.get("direction") not in {"BULLISH", "BEARISH"}
+            ):
+                await query.edit_message_text(
+                    "⚠️ No tradable setup is currently available.\n\n"
+                    "No trade has been placed."
+                )
+                return
 
         if auto_trade_service.is_running(user_id):
             await query.edit_message_text(

@@ -401,18 +401,50 @@ class YieldsScanner:
 
     def collect_step_market_snapshots(self, market_data_service) -> list[MarketSnapshot]:
         snapshots: list[MarketSnapshot] = []
-        for symbol in settings.auto_trade_markets:
-            display_name = symbol.replace("step_", "Step ").replace("_", " ").title()
+        symbols = list(settings.auto_trade_markets)
+        batch_data = None
+        batch_error: Exception | None = None
+        batch_fetcher = getattr(
+            market_data_service,
+            "get_step_market_data_batch",
+            None,
+        )
+        if callable(batch_fetcher):
             try:
-                history = market_data_service.get_historical_ticks(
-                    symbol,
-                    count=1000,
-                )
-                one_minute_bars = market_data_service.get_historical_candles(
-                    symbol,
-                    count=MIN_ONE_MINUTE_BARS,
+                batch_data = batch_fetcher(
+                    symbols,
+                    tick_count=1000,
+                    candle_count=MIN_ONE_MINUTE_BARS,
                     granularity=60,
                 )
+            except Exception as exc:
+                batch_error = exc
+                logger.exception("Could not fetch batch Deriv market data")
+
+        for symbol in symbols:
+            display_name = symbol.replace("step_", "Step ").replace("_", " ").title()
+            try:
+                if batch_error is not None:
+                    raise batch_error
+                if batch_data is not None:
+                    market_data = batch_data.get(symbol)
+                    if isinstance(market_data, Exception):
+                        raise market_data
+                    if market_data is None:
+                        raise ValueError(
+                            "DERIV_BATCH_MARKET_DATA_MISSING"
+                        )
+                    history, one_minute_bars = market_data
+                else:
+                    history = market_data_service.get_historical_ticks(
+                        symbol,
+                        count=1000,
+                    )
+                    one_minute_bars = market_data_service.get_historical_candles(
+                        symbol,
+                        count=MIN_ONE_MINUTE_BARS,
+                        granularity=60,
+                    )
                 snapshots.append(
                     self.normalize_step_market(
                         symbol,
