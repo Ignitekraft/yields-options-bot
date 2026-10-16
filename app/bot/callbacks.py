@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 import re
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
@@ -55,6 +56,16 @@ LOW_TOKEN_WARNING_IMAGE_URL = (
     "https://hvvwkijquaoqsbzhpyim.supabase.co/storage/v1/object/public/"
     "Bot%20images/Low%20Tokens%20Warning%20Alert.png"
 )
+VICTORY_SETUP_IMAGE_URLS = {
+    "BULLISH": (
+        "https://hvvwkijquaoqsbzhpyim.supabase.co/storage/v1/object/public/"
+        "Bot%20images/Bullish%20and%20Bearish%20Market%20Setups.jpg"
+    ),
+    "BEARISH": (
+        "https://hvvwkijquaoqsbzhpyim.supabase.co/storage/v1/object/public/"
+        "Bot%20images/Bullish%20and%20Bearish%20Market%20Setups%202.jpg"
+    ),
+}
 RELATIVE_STAKES = {
     "0_1": Decimal("0.001"),
     "0_5": Decimal("0.005"),
@@ -232,7 +243,20 @@ async def _send_session_end_message(
     reason: str | None = None,
 ) -> None:
     text = await _session_end_message(user_id, state, reason)
-    reply_text = getattr(getattr(query, "message", None), "reply_text", None)
+    message = getattr(query, "message", None)
+    if state.status == "completed":
+        reply_photo = getattr(message, "reply_photo", None)
+        photo_url = VICTORY_SETUP_IMAGE_URLS.get(
+            str(state.direction or "").upper()
+        )
+        if reply_photo is not None and photo_url is not None:
+            try:
+                await reply_photo(photo=photo_url, caption=text)
+                return
+            except Exception:
+                logger.exception("Could not send Auto Trade victory image")
+
+    reply_text = getattr(message, "reply_text", None)
     if reply_text is not None:
         try:
             await reply_text(text)
@@ -647,9 +671,9 @@ def _cycle_report_text(
     completed_steps: list[str],
     pending_step: str | None = None,
 ) -> str:
-    sections = [f"⚡ Cycle {cycle}", *completed_steps]
+    sections = list(completed_steps)
     if pending_step:
-        sections.append(pending_step)
+        sections.append(f"⚡ Cycle {cycle} {pending_step}")
     return "\n\n".join(sections)
 
 
@@ -658,7 +682,7 @@ async def _update_cycle_report(query, text: str, message=None):
         edit_text = getattr(message, "edit_text", None)
         if edit_text is not None:
             try:
-                await edit_text(text)
+                await edit_text(text, parse_mode="HTML")
                 return message
             except Exception:
                 logger.exception("Could not update Auto Trade cycle report")
@@ -667,11 +691,11 @@ async def _update_cycle_report(query, text: str, message=None):
     reply_text = getattr(parent_message, "reply_text", None)
     if reply_text is not None:
         try:
-            return await reply_text(text)
+            return await reply_text(text, parse_mode="HTML")
         except Exception:
             logger.exception("Could not send Auto Trade cycle report")
 
-    await _safe_edit_message(query, text)
+    await _safe_edit_message(query, text, parse_mode="HTML")
     return None
 
 
@@ -869,15 +893,18 @@ async def _run_auto_trade(update, state) -> None:
             profit_text = (
                 f"+${profit:.2f}" if profit > 0 else f"-${abs(profit):.2f}"
             )
-            result_text = (
-                f"⚡ Step {trade_step}\n"
+            step_details = (
                 f"{result_emoji} Invest: ${trade_stake:.2f} → {profit_text}\n"
                 f"📊 Price: {_format_trade_tick(entry_tick)} → "
                 f"{_format_trade_tick(exit_tick)}"
             )
+            result_text = (
+                f"⚡ Cycle {trade_cycle} Step {trade_step}\n"
+                f"<pre>{html.escape(step_details)}</pre>"
+            )
             if not won and current.status == "running":
                 result_text += (
-                    "\n\n🔄 Smart Scaling activated. "
+                    "\n\n🔄 Smart Scaling activated\n"
                     f"Next stake: ${current.current_stake:.2f}"
                 )
             elif current.status == "loss_limit":
@@ -887,7 +914,7 @@ async def _run_auto_trade(update, state) -> None:
                     "to limit further exposure."
                 )
             elif won:
-                result_text += f"\n\n✅ Cycle {trade_cycle} completed."
+                result_text += "\n\n✅ Cycle completed."
 
             if not history_saved:
                 result_text += "\n\n⚠️ This settled trade could not be saved to Stats."
@@ -982,7 +1009,7 @@ async def _run_auto_trade(update, state) -> None:
             cycle_report_message = None
             cycle_steps = []
         pending_step = (
-            f"⏳ Step {current.martingale_step} purchased for "
+            f"Step {current.martingale_step}\n⏳ Purchased for "
             f"${current.current_stake:.2f}. Waiting for the 30-second "
             "contract to settle."
         )

@@ -17,6 +17,7 @@ from app.bot.callbacks import (
     handle_custom_stake_input,
     parse_custom_stake,
     _send_low_token_message,
+    _send_session_end_message,
     _show_auto_trade_setup,
     _setup_photo_url,
     _session_end_message,
@@ -1101,17 +1102,19 @@ class MarketDataTests(unittest.TestCase):
         cycle_reports = []
 
         class FakeCycleMessage:
-            def __init__(self, text):
+            def __init__(self, text, parse_mode=None):
                 self.text = text
                 self.edits = [text]
+                self.parse_modes = [parse_mode]
 
-            async def edit_text(self, text):
+            async def edit_text(self, text, **kwargs):
                 self.text = text
                 self.edits.append(text)
+                self.parse_modes.append(kwargs.get("parse_mode"))
 
         class FakeMessage:
-            async def reply_text(self, text, **_kwargs):
-                report = FakeCycleMessage(text)
+            async def reply_text(self, text, **kwargs):
+                report = FakeCycleMessage(text, kwargs.get("parse_mode"))
                 cycle_reports.append(report)
                 return report
 
@@ -1178,12 +1181,22 @@ class MarketDataTests(unittest.TestCase):
 
         self.assertEqual(executed_stakes, [10.0, 23.0, 52.9, 10.0, 23.0, 52.9])
         self.assertEqual(len(cycle_reports), 2)
+        self.assertTrue(
+            all(parse_mode == "HTML" for report in cycle_reports for parse_mode in report.parse_modes)
+        )
         self.assertIn("Cycle 1", cycle_reports[0].text)
         self.assertEqual(cycle_reports[0].text.count("Step "), 3)
+        self.assertIn("⚡ Cycle 1 Step 1", cycle_reports[0].text)
+        self.assertIn(
+            "<pre>🔴 Invest: $10.00 → -$10.00\n"
+            "📊 Price: 100.0000 → 99.0000</pre>",
+            cycle_reports[0].text,
+        )
         self.assertEqual(
             cycle_reports[0].text.count("Smart Scaling activated"),
             2,
         )
+        self.assertNotIn("Smart Scaling activated</pre>", cycle_reports[0].text)
         self.assertIn("Cycle 2", cycle_reports[1].text)
         self.assertEqual(cycle_reports[1].text.count("Step "), 3)
         self.assertEqual(
@@ -1211,10 +1224,14 @@ class MarketDataTests(unittest.TestCase):
         class FakeMessage:
             def __init__(self):
                 self.replies = []
+                self.photos = []
 
             async def reply_text(self, text, **_kwargs):
                 self.replies.append(text)
                 return SimpleNamespace(edit_text=AsyncMock())
+
+            async def reply_photo(self, **kwargs):
+                self.photos.append(kwargs)
 
         class FakeQuery:
             def __init__(self):
@@ -1263,10 +1280,55 @@ class MarketDataTests(unittest.TestCase):
 
         self.assertEqual(state.status, "completed")
         self.assertIn("Cycle 1", update.callback_query.message.replies[0])
+        self.assertEqual(len(update.callback_query.message.replies), 1)
+        self.assertEqual(len(update.callback_query.message.photos), 1)
         self.assertEqual(
-            update.callback_query.message.replies[-1],
+            update.callback_query.message.photos[0]["photo"],
+            "https://hvvwkijquaoqsbzhpyim.supabase.co/storage/v1/object/public/"
+            "Bot%20images/Bullish%20and%20Bearish%20Market%20Setups%202.jpg",
+        )
+        self.assertEqual(
+            update.callback_query.message.photos[0]["caption"],
             "🏆 Victory! Session completed.",
         )
+
+    def test_victory_image_matches_direction_and_falls_back_to_text(self):
+        class FakeMessage:
+            def __init__(self, fail_photo=False):
+                self.photos = []
+                self.replies = []
+                self.fail_photo = fail_photo
+
+            async def reply_photo(self, **kwargs):
+                if self.fail_photo:
+                    raise RuntimeError("photo send failed")
+                self.photos.append(kwargs)
+
+            async def reply_text(self, text):
+                self.replies.append(text)
+
+        async def run_case(direction, fail_photo=False):
+            message = FakeMessage(fail_photo=fail_photo)
+            state = SimpleNamespace(status="completed", direction=direction)
+            query = SimpleNamespace(message=message)
+            with patch(
+                "app.bot.callbacks._session_end_message",
+                new=AsyncMock(return_value="Victory!"),
+            ), patch(
+                "app.bot.callbacks.logger.exception",
+            ):
+                await _send_session_end_message(query, "user", state)
+            return message
+
+        bullish = asyncio.run(run_case("BULLISH"))
+        self.assertEqual(
+            bullish.photos[0]["photo"],
+            "https://hvvwkijquaoqsbzhpyim.supabase.co/storage/v1/object/public/"
+            "Bot%20images/Bullish%20and%20Bearish%20Market%20Setups.jpg",
+        )
+
+        fallback = asyncio.run(run_case("BEARISH", fail_photo=True))
+        self.assertEqual(fallback.replies, ["Victory!"])
 
     def test_settlement_failure_updates_pending_report_and_ends_run(self):
         service = AutoTradeService()
