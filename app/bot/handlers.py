@@ -549,7 +549,7 @@ async def handle_balance(telegram_user_id: str | int) -> str:
     )
 
 
-def handle_connect(telegram_user_id: str | int) -> str:
+def build_connect_prompt(telegram_user_id: str | int) -> tuple[str, str]:
     session = auth_service.begin_oauth_session(str(telegram_user_id))
     client_id = settings.deriv_app_id or settings.deriv_client_id
 
@@ -561,12 +561,18 @@ def handle_connect(telegram_user_id: str | int) -> str:
         session["code_challenge"],
     )
 
-    return (
+    message = (
         "🔐 Secure Deriv connection\n\n"
         "Use the link below to continue safely and return to your dashboard.\n\n"
         f"{url}"
         f"{HELP_FOOTER}"
     )
+    return message, url
+
+
+def handle_connect(telegram_user_id: str | int) -> str:
+    message, _url = build_connect_prompt(telegram_user_id)
+    return message
 
 
 def handle_logout(telegram_user_id: str | int) -> str:

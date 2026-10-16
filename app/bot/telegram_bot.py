@@ -6,9 +6,9 @@ import logging
 from app.bot.callbacks import dispatch_callback
 from app.bot.handlers import (
     auth_service,
+    build_connect_prompt,
     build_menu_message,
     handle_balance,
-    handle_connect,
     handle_faq,
     handle_logout,
     handle_scan,
@@ -70,7 +70,11 @@ def create_application():
 
     async def connect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = update.effective_user.id
-        await update.message.reply_text(handle_connect(user_id), reply_markup=TelegramKeyboard.start_keyboard())
+        message, connect_url = build_connect_prompt(user_id)
+        await update.message.reply_text(
+            message,
+            reply_markup=TelegramKeyboard.connect_keyboard(connect_url),
+        )
 
     async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = update.effective_user.id

@@ -17,11 +17,11 @@ from app.bot.handlers import (
     auth_service,
     auto_trade_service,
     build_auto_trade_setup,
+    build_connect_prompt,
     build_start_message,
     handle_account_mode_settings,
     handle_auto_trade_start,
     handle_balance,
-    handle_connect,
     handle_faq,
     handle_logout,
     handle_start,
@@ -714,14 +714,17 @@ async def dispatch_callback(update, context) -> None:
     user_key = str(user_id)
 
     if data == "START_CONNECT":
-        await query.edit_message_text(
-            handle_connect(user_id),
-            reply_markup=TelegramKeyboard.connect_keyboard(),
+        message, connect_url = build_connect_prompt(user_id)
+        await _safe_edit_message(
+            query,
+            message,
+            reply_markup=TelegramKeyboard.connect_keyboard(connect_url),
         )
         return
 
     if data == "START_INFO":
-        await query.edit_message_text(
+        await _safe_edit_message(
+            query,
             "🤖 YIELDS\n\n"
             "AI-powered trading intelligence for Deriv.\n\n"
             "How it works:\n"

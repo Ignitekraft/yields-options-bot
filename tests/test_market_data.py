@@ -953,6 +953,69 @@ class MarketDataTests(unittest.TestCase):
             "START_CONNECT",
         )
 
+    def test_start_connect_button_edits_photo_caption_and_opens_oauth_url(self):
+        class FakeQuery:
+            data = "START_CONNECT"
+
+            def __init__(self):
+                self.caption = None
+                self.reply_markup = None
+
+            async def answer(self):
+                return None
+
+            async def edit_message_text(self, text, **kwargs):
+                raise RuntimeError("message has a caption")
+
+            async def edit_message_caption(self, caption, **kwargs):
+                self.caption = caption
+                self.reply_markup = kwargs.get("reply_markup")
+
+        query = FakeQuery()
+        update = SimpleNamespace(
+            callback_query=query,
+            effective_user=SimpleNamespace(id="connect-user"),
+        )
+        oauth_url = "https://oauth.deriv.com/oauth2/authorize?state=test-state"
+
+        with patch(
+            "app.bot.callbacks.build_connect_prompt",
+            return_value=("Secure connection instructions", oauth_url),
+        ):
+            asyncio.run(dispatch_callback(update, None))
+
+        self.assertEqual(query.caption, "Secure connection instructions")
+        self.assertEqual(
+            query.reply_markup.inline_keyboard[0][0].url,
+            oauth_url,
+        )
+
+    def test_start_info_button_edits_photo_caption(self):
+        class FakeQuery:
+            data = "START_INFO"
+
+            def __init__(self):
+                self.caption = None
+
+            async def answer(self):
+                return None
+
+            async def edit_message_text(self, text, **kwargs):
+                raise RuntimeError("message has a caption")
+
+            async def edit_message_caption(self, caption, **kwargs):
+                self.caption = caption
+
+        query = FakeQuery()
+        update = SimpleNamespace(
+            callback_query=query,
+            effective_user=SimpleNamespace(id="info-user"),
+        )
+        asyncio.run(dispatch_callback(update, None))
+
+        self.assertIn("How it works:", query.caption)
+        self.assertIn("AI ranks the 5 fixed Step Indices", query.caption)
+
     def test_trade_anyway_rechecks_balance_before_continuing(self):
         class FakeQuery:
             def __init__(self):
