@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import httpx
+from cryptography.fernet import Fernet, InvalidToken
 
 from app.config import settings
 
@@ -16,12 +17,16 @@ class TradeHistoryService:
         supabase_url: str | None = None,
         service_role_key: str | None = None,
         transport: httpx.BaseTransport | None = None,
+        encryption_key: str | None = None,
     ) -> None:
         self.supabase_url = (supabase_url or settings.supabase_url).rstrip("/")
         self.service_role_key = (
             service_role_key or settings.supabase_service_role_key
         )
         self.transport = transport
+        self.encryption_key = (
+            encryption_key or settings.deriv_token_encryption_key
+        )
 
     @property
     def is_configured(self) -> bool:
@@ -39,6 +44,27 @@ class TradeHistoryService:
         if prefer:
             headers["Prefer"] = prefer
         return headers
+
+    def _payout_cipher(self) -> Fernet:
+        if not self.encryption_key:
+            raise RuntimeError("PAYOUT_DETAILS_ENCRYPTION_KEY_NOT_CONFIGURED")
+        try:
+            return Fernet(self.encryption_key.encode("ascii"))
+        except (ValueError, UnicodeEncodeError) as exc:
+            raise RuntimeError("INVALID_PAYOUT_DETAILS_ENCRYPTION_KEY") from exc
+
+    def encrypt_payout_details(self, details: str) -> str:
+        return self._payout_cipher().encrypt(
+            details.encode("utf-8")
+        ).decode("ascii")
+
+    def decrypt_payout_details(self, encrypted: str) -> str:
+        try:
+            return self._payout_cipher().decrypt(
+                encrypted.encode("ascii")
+            ).decode("utf-8")
+        except (InvalidToken, ValueError, UnicodeEncodeError) as exc:
+            raise RuntimeError("PAYOUT_DETAILS_DECRYPTION_FAILED") from exc
 
     def _request(
         self,
@@ -68,6 +94,7 @@ class TradeHistoryService:
         last_name: str | None = None,
         username: str | None = None,
         account_mode: str = "demo",
+        sync_telegram_profile: bool = False,
     ) -> dict[str, Any]:
         mode = str(account_mode or "demo").lower()
         if mode not in {"demo", "real"}:
@@ -77,11 +104,11 @@ class TradeHistoryService:
             "current_account_mode": mode,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
-        if first_name is not None:
+        if sync_telegram_profile or first_name is not None:
             payload["telegram_first_name"] = first_name
-        if last_name is not None:
+        if sync_telegram_profile or last_name is not None:
             payload["telegram_last_name"] = last_name
-        if username is not None:
+        if sync_telegram_profile or username is not None:
             payload["telegram_username"] = username
 
         response = self._request(
@@ -113,6 +140,42 @@ class TradeHistoryService:
             raise RuntimeError("SUPABASE_WELCOME_TOKEN_RESPONSE_INVALID")
         return result
 
+    def claim_welcome_gift_200(
+        self,
+        telegram_user_id: str | int,
+    ) -> dict[str, Any]:
+        result = self._request(
+            "POST",
+            "rpc/claim_welcome_gift_200",
+            payload={"p_telegram_user_id": str(telegram_user_id)},
+        ).json()
+        if (
+            not isinstance(result, dict)
+            or not isinstance(result.get("granted"), bool)
+            or not isinstance(result.get("token_balance"), int)
+        ):
+            raise RuntimeError("SUPABASE_WELCOME_GIFT_RESPONSE_INVALID")
+        return result
+
+    def attach_referral(
+        self,
+        telegram_user_id: str | int,
+        referrer_telegram_user_id: str | int,
+    ) -> bool:
+        if str(telegram_user_id) == str(referrer_telegram_user_id):
+            return False
+        result = self._request(
+            "POST",
+            "rpc/attach_referral",
+            payload={
+                "p_telegram_user_id": str(telegram_user_id),
+                "p_referrer_telegram_user_id": str(referrer_telegram_user_id),
+            },
+        ).json()
+        if not isinstance(result, bool):
+            raise RuntimeError("SUPABASE_REFERRAL_LINK_RESPONSE_INVALID")
+        return result
+
     def get_user(self, telegram_user_id: str | int) -> dict[str, Any]:
         response = self._request(
             "GET",
@@ -120,7 +183,10 @@ class TradeHistoryService:
             params={
                 "select": "telegram_user_id,current_account_mode,token_balance,"
                 "telegram_first_name,telegram_last_name,telegram_username,"
-                "demo_balance,demo_currency,real_balance,real_currency",
+                "demo_balance,demo_currency,real_balance,real_currency,"
+                "welcome_gift_200_claimed,is_admin,referred_by_telegram_user_id,"
+                "referral_balance,payout_country,payout_details_encrypted,"
+                "payout_input_step",
                 "telegram_user_id": f"eq.{telegram_user_id}",
                 "limit": "1",
             },
@@ -129,6 +195,167 @@ class TradeHistoryService:
         if isinstance(rows, list) and rows and isinstance(rows[0], dict):
             return rows[0]
         raise RuntimeError("SUPABASE_USER_NOT_FOUND")
+
+    def set_payout_input_step(
+        self,
+        telegram_user_id: str | int,
+        step: str | None,
+    ) -> None:
+        if step not in {None, "country", "details"}:
+            raise ValueError("INVALID_PAYOUT_INPUT_STEP")
+        self._request(
+            "PATCH",
+            "users",
+            params={"telegram_user_id": f"eq.{telegram_user_id}"},
+            payload={
+                "payout_input_step": step,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            },
+            prefer="return=minimal",
+        )
+
+    def save_payout_country(
+        self,
+        telegram_user_id: str | int,
+        country: str,
+    ) -> None:
+        clean_country = " ".join(country.strip().split())
+        if not clean_country or len(clean_country) > 100:
+            raise ValueError("PAYOUT_COUNTRY_INVALID")
+        self._request(
+            "PATCH",
+            "users",
+            params={"telegram_user_id": f"eq.{telegram_user_id}"},
+            payload={
+                "payout_country": clean_country,
+                "payout_input_step": "details",
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            },
+            prefer="return=minimal",
+        )
+
+    def save_payout_details(
+        self,
+        telegram_user_id: str | int,
+        details: str,
+    ) -> None:
+        clean_details = details.strip()
+        if not clean_details or len(clean_details) > 2000:
+            raise ValueError("PAYOUT_DETAILS_INVALID")
+        self._request(
+            "PATCH",
+            "users",
+            params={"telegram_user_id": f"eq.{telegram_user_id}"},
+            payload={
+                "payout_details_encrypted": self.encrypt_payout_details(
+                    clean_details
+                ),
+                "payout_input_step": None,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            },
+            prefer="return=minimal",
+        )
+
+    def get_referral_summary(
+        self,
+        telegram_user_id: str | int,
+    ) -> dict[str, Any]:
+        result = self._request(
+            "POST",
+            "rpc/get_referral_summary",
+            payload={"p_telegram_user_id": str(telegram_user_id)},
+        ).json()
+        if not isinstance(result, dict):
+            raise RuntimeError("SUPABASE_REFERRAL_SUMMARY_RESPONSE_INVALID")
+        return result
+
+    def record_verified_token_purchase(
+        self,
+        *,
+        provider: str,
+        provider_purchase_id: str,
+        provider_event_id: str | None,
+        telegram_user_id: str | int,
+        tokens: int,
+        amount_paid: str | int | float,
+        currency: str = "USD",
+        verified_by_telegram_user_id: str | int | None = None,
+    ) -> dict[str, Any]:
+        result = self._request(
+            "POST",
+            "rpc/record_verified_token_purchase",
+            payload={
+                "p_provider": provider,
+                "p_provider_purchase_id": provider_purchase_id,
+                "p_provider_event_id": provider_event_id,
+                "p_telegram_user_id": str(telegram_user_id),
+                "p_tokens": int(tokens),
+                "p_amount_paid": str(amount_paid),
+                "p_currency": currency.upper(),
+                "p_verified_by_telegram_user_id": (
+                    str(verified_by_telegram_user_id)
+                    if verified_by_telegram_user_id is not None
+                    else None
+                ),
+            },
+        ).json()
+        if not isinstance(result, dict):
+            raise RuntimeError("SUPABASE_TOKEN_PURCHASE_RESPONSE_INVALID")
+        return result
+
+    def create_referral_withdrawal(
+        self,
+        telegram_user_id: str | int,
+        payout_details_encrypted: str,
+    ) -> dict[str, Any]:
+        result = self._request(
+            "POST",
+            "rpc/create_referral_withdrawal",
+            payload={
+                "p_telegram_user_id": str(telegram_user_id),
+                "p_payout_details_snapshot_encrypted": payout_details_encrypted,
+            },
+        ).json()
+        if not isinstance(result, dict) or not result.get("withdrawal_id"):
+            raise RuntimeError("SUPABASE_WITHDRAWAL_RESPONSE_INVALID")
+        return result
+
+    def get_pending_referral_withdrawals(
+        self,
+        admin_telegram_user_id: str | int,
+    ) -> list[dict[str, Any]]:
+        result = self._request(
+            "POST",
+            "rpc/get_pending_referral_withdrawals",
+            payload={"p_admin_telegram_user_id": str(admin_telegram_user_id)},
+        ).json()
+        if not isinstance(result, list) or any(
+            not isinstance(row, dict) for row in result
+        ):
+            raise RuntimeError("SUPABASE_WITHDRAWALS_RESPONSE_INVALID")
+        return result
+
+    def update_referral_withdrawal(
+        self,
+        *,
+        admin_telegram_user_id: str | int,
+        withdrawal_id: str,
+        status: str,
+        failure_reason: str | None = None,
+    ) -> dict[str, Any]:
+        result = self._request(
+            "POST",
+            "rpc/admin_update_referral_withdrawal",
+            payload={
+                "p_admin_telegram_user_id": str(admin_telegram_user_id),
+                "p_withdrawal_id": withdrawal_id,
+                "p_status": status,
+                "p_failure_reason": failure_reason,
+            },
+        ).json()
+        if not isinstance(result, dict):
+            raise RuntimeError("SUPABASE_WITHDRAWAL_UPDATE_RESPONSE_INVALID")
+        return result
 
     def update_user_mode(
         self,

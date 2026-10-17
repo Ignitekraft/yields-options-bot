@@ -9,6 +9,7 @@ import httpx
 import websockets
 
 from app.services.auth_service import AuthService
+from app.services.deriv.websocket_connection import connect_async_with_retry
 
 
 OPTIONS_ACCOUNTS_URL = "https://api.derivws.com/trading/v1/options/accounts"
@@ -299,12 +300,14 @@ class AccountService:
             account_id=account_id,
         )
 
-        async with websockets.connect(
+        connection = await connect_async_with_retry(
+            websockets.connect,
             ws_url,
             open_timeout=15,
             ping_timeout=20,
             ping_interval=20,
-        ) as websocket:
+        )
+        async with connection as websocket:
             await websocket.send(
                 json.dumps(
                     {

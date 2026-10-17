@@ -71,6 +71,22 @@ class TelegramKeyboard:
         )
 
     @staticmethod
+    def welcome_gift_keyboard() -> object:
+        return TelegramKeyboard._keyboard(
+            [[("🎁 Accept 200 Tokens", "WELCOME_GIFT_ACCEPT_200")]]
+        )
+
+    @staticmethod
+    def referral_keyboard() -> object:
+        return TelegramKeyboard._keyboard(
+            [
+                [("🏦 Set / Update Payout Details", "REFERRAL_PAYOUT_DETAILS")],
+                [("💸 Withdraw Available Earnings", "REFERRAL_WITHDRAW")],
+                [("🏠 Main Menu", "MENU_MAIN")],
+            ]
+        )
+
+    @staticmethod
     def token_store_keyboard() -> object:
         rows = [
             [("50 Tokens", "TOKEN_PACKAGE_50")],

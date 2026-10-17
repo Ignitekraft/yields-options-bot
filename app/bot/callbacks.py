@@ -672,6 +672,367 @@ def _format_trade_tick(value) -> str:
         return "Unavailable"
 
 
+async def _sync_profile(update) -> dict | None:
+    user = getattr(update, "effective_user", None)
+    if user is None:
+        return None
+    try:
+        return await asyncio.to_thread(
+            trade_history_service.ensure_user,
+            user.id,
+            first_name=getattr(user, "first_name", None),
+            last_name=getattr(user, "last_name", None),
+            username=getattr(user, "username", None),
+            account_mode=account_mode_service.get_mode(str(user.id)),
+            sync_telegram_profile=True,
+        )
+    except Exception:
+        logger.exception("Could not sync Telegram profile with Supabase")
+        return None
+
+
+def _user_message(update):
+    return (
+        getattr(update, "effective_message", None)
+        or getattr(update, "message", None)
+    )
+
+
+async def _start_payout_details(user_id, reply) -> None:
+    await asyncio.to_thread(
+        trade_history_service.set_payout_input_step,
+        user_id,
+        "country",
+    )
+    await reply(
+        "🏦 Payout details setup\n\n"
+        "First, send your country. Then send the bank or payout details that "
+        "work best for receiving money there. Type them carefully; your details "
+        "will be encrypted before storage. You can update them later."
+    )
+
+
+async def _send_referral_summary(update, *, edit_query=None) -> None:
+    user = update.effective_user
+    try:
+        summary = await asyncio.to_thread(
+            trade_history_service.get_referral_summary,
+            user.id,
+        )
+    except Exception:
+        logger.exception("Could not load referral summary")
+        text = "Referral information is temporarily unavailable. Please try again."
+        if edit_query is not None:
+            await _safe_edit_message(edit_query, text)
+        else:
+            await _user_message(update).reply_text(text)
+        return
+
+    bot_username = str(settings.telegram_bot_username or "").strip().lstrip("@")
+    referral_link = (
+        f"https://t.me/{bot_username}?start=ref_{user.id}"
+        if bot_username
+        else "Referral link unavailable until TELEGRAM_BOT_USERNAME is configured."
+    )
+    text = (
+        "🎁 YOUR REFERRALS\n\n"
+        f"People referred: {int(summary.get('referral_count') or 0)}\n"
+        f"Total earned: ${float(summary.get('total_earned') or 0):.2f} USD\n"
+        f"Available to withdraw: "
+        f"${float(summary.get('available_balance') or 0):.2f} USD\n\n"
+        "Earn 5% of each verified token purchase made by your referrals. "
+        "Withdrawals require at least $10 and are scheduled for the next "
+        "15th or month-end payout date (UTC).\n\n"
+        f"Your personal invite link:\n{referral_link}"
+    )
+    if edit_query is not None:
+        await _safe_edit_message(
+            edit_query,
+            text,
+            reply_markup=TelegramKeyboard.referral_keyboard(),
+        )
+    else:
+        await _user_message(update).reply_text(
+            text,
+            reply_markup=TelegramKeyboard.referral_keyboard(),
+        )
+
+
+async def handle_referrals_command(update, context=None) -> None:
+    del context
+    await _sync_profile(update)
+    await _send_referral_summary(update)
+
+
+async def handle_payout_details_command(update, context=None) -> None:
+    del context
+    user = update.effective_user
+    await _sync_profile(update)
+    await _start_payout_details(user.id, _user_message(update).reply_text)
+
+
+async def handle_withdraw_command(update, context=None) -> None:
+    del context
+    user = update.effective_user
+    await _sync_profile(update)
+    try:
+        profile = await asyncio.to_thread(trade_history_service.get_user, user.id)
+        if (
+            not profile.get("payout_country")
+            or not profile.get("payout_details_encrypted")
+        ):
+            await _start_payout_details(user.id, _user_message(update).reply_text)
+            return
+        withdrawal = await asyncio.to_thread(
+            trade_history_service.create_referral_withdrawal,
+            user.id,
+            profile["payout_details_encrypted"],
+        )
+    except Exception as exc:
+        reason = str(exc)
+        if "REFERRAL_MINIMUM_WITHDRAWAL_NOT_MET" in reason:
+            await _user_message(update).reply_text(
+                "Withdrawals require at least $10. Your referral balance remains "
+                "available until you reach the minimum."
+            )
+            return
+        if "REFERRAL_WITHDRAWAL_ALREADY_PENDING" in reason:
+            await _user_message(update).reply_text(
+                "You already have a pending withdrawal request."
+            )
+            return
+        logger.exception("Could not create referral withdrawal")
+        await _user_message(update).reply_text(
+            "The withdrawal request could not be created. Your earnings remain "
+            "safe; please try again later."
+        )
+        return
+
+    await _user_message(update).reply_text(
+        f"✅ Withdrawal request received for "
+        f"${float(withdrawal['amount']):.2f} USD.\n"
+        f"Scheduled payout date: {withdrawal['scheduled_for']} (UTC).\n"
+        "We’ll message you when it is paid or if any payout details need attention."
+    )
+
+
+async def _is_admin(user_id) -> bool:
+    try:
+        profile = await asyncio.to_thread(
+            trade_history_service.get_user,
+            user_id,
+        )
+        return bool(profile.get("is_admin"))
+    except Exception:
+        logger.exception("Could not verify referral admin access")
+        return False
+
+
+async def handle_admin_verify_purchase_command(update, context) -> None:
+    admin_id = update.effective_user.id
+    message = _user_message(update)
+    if not await _is_admin(admin_id):
+        await message.reply_text("This command is available to bot admins only.")
+        return
+    args = list(getattr(context, "args", []) or [])
+    if len(args) not in {4, 5}:
+        await message.reply_text(
+            "Usage: /admin_verify_purchase <buyer_telegram_id> "
+            "<whop_payment_id> <token_amount> <amount_usd> [currency]"
+        )
+        return
+    buyer_id, payment_id, token_text, amount_text = args[:4]
+    currency = args[4].upper() if len(args) == 5 else "USD"
+    try:
+        tokens = int(token_text)
+        amount = Decimal(amount_text).quantize(
+            Decimal("0.01"),
+            rounding=ROUND_HALF_UP,
+        )
+        if tokens <= 0 or amount <= 0 or currency != "USD":
+            raise ValueError
+    except (InvalidOperation, ValueError):
+        await message.reply_text(
+            "Purchase values must be positive; this referral ledger currently "
+            "accepts USD purchases only."
+        )
+        return
+
+    try:
+        result = await asyncio.to_thread(
+            trade_history_service.record_verified_token_purchase,
+            provider="manual",
+            provider_purchase_id=payment_id,
+            provider_event_id=None,
+            telegram_user_id=buyer_id,
+            tokens=tokens,
+            amount_paid=str(amount),
+            currency=currency,
+            verified_by_telegram_user_id=admin_id,
+        )
+    except Exception:
+        logger.exception("Admin could not verify token purchase")
+        await message.reply_text(
+            "Purchase verification failed. Check the buyer, order ID, and "
+            "database connection; no token credit was confirmed."
+        )
+        return
+    if result.get("duplicate"):
+        await message.reply_text(
+            "That payment/order ID was already processed; no duplicate credit was made."
+        )
+        return
+
+    await message.reply_text(
+        f"✅ Verified {tokens} tokens for Telegram user {buyer_id}. "
+        f"Referral commission credited: "
+        f"${float(result.get('commission') or 0):.2f} USD."
+    )
+    application = getattr(context, "application", None)
+    if application is not None:
+        try:
+            await application.bot.send_message(
+                chat_id=int(buyer_id),
+                text=f"✅ Your payment was verified. {tokens} Yields Tokens "
+                "have been added to your balance.",
+            )
+        except Exception:
+            logger.exception("Could not notify buyer of verified token purchase")
+        referrer_id = result.get("referrer_telegram_user_id")
+        commission = float(result.get("commission") or 0)
+        if referrer_id and commission > 0:
+            try:
+                await application.bot.send_message(
+                    chat_id=int(referrer_id),
+                    text=(
+                        "🎉 Your referral made a token purchase. "
+                        f"${commission:.2f} USD (5%) has been added to your "
+                        "referral earnings."
+                    ),
+                )
+            except Exception:
+                logger.exception("Could not notify referrer of manual commission")
+
+
+async def handle_admin_withdrawals_command(update, context) -> None:
+    admin_id = update.effective_user.id
+    message = _user_message(update)
+    if not await _is_admin(admin_id):
+        await message.reply_text("This command is available to bot admins only.")
+        return
+    try:
+        withdrawals = await asyncio.to_thread(
+            trade_history_service.get_pending_referral_withdrawals,
+            admin_id,
+        )
+    except Exception:
+        logger.exception("Could not list due referral withdrawals")
+        await message.reply_text("Pending withdrawals are temporarily unavailable.")
+        return
+    if not withdrawals:
+        await message.reply_text("There are no due referral withdrawals.")
+        return
+    for withdrawal in withdrawals:
+        try:
+            payout_details = trade_history_service.decrypt_payout_details(
+                withdrawal["payout_details_encrypted"]
+            )
+        except Exception:
+            logger.exception(
+                "Could not decrypt payout details for withdrawal %s",
+                withdrawal.get("id"),
+            )
+            payout_details = "Unable to decrypt. Check payout encryption configuration."
+        await message.reply_text(
+            f"Withdrawal: {withdrawal['id']}\n"
+            f"User: {withdrawal['telegram_user_id']}\n"
+            f"Amount: ${float(withdrawal['amount']):.2f} USD\n"
+            f"Country: {withdrawal.get('payout_country') or 'Not provided'}\n"
+            f"Payout details:\n{payout_details}\n\n"
+            f"Mark paid: /admin_mark_paid {withdrawal['id']}\n"
+            f"Mark failed: /admin_mark_failed {withdrawal['id']} <reason>"
+        )
+
+
+async def _notify_withdrawal_user(context, withdrawal: dict) -> None:
+    application = getattr(context, "application", None)
+    if application is None:
+        return
+    text = (
+        f"✅ Your referral payout of ${float(withdrawal['amount']):.2f} USD "
+        "has been marked as paid."
+        if withdrawal["status"] == "paid"
+        else (
+            "⚠️ Your referral payout could not be completed.\n\n"
+            f"Reason: {withdrawal.get('failure_reason')}\n\n"
+            "Your earnings have been returned to your available balance. "
+            "Update your payout details and submit a new request when ready."
+        )
+    )
+    keyboard = (
+        None
+        if withdrawal["status"] == "paid"
+        else TelegramKeyboard.referral_keyboard()
+    )
+    try:
+        await application.bot.send_message(
+            chat_id=int(withdrawal["telegram_user_id"]),
+            text=text,
+            reply_markup=keyboard,
+        )
+    except Exception:
+        logger.exception(
+            "Could not notify user %s about referral payout",
+            withdrawal.get("telegram_user_id"),
+        )
+
+
+async def handle_admin_mark_paid_command(update, context) -> None:
+    await _handle_admin_withdrawal_update(update, context, "paid")
+
+
+async def handle_admin_mark_failed_command(update, context) -> None:
+    await _handle_admin_withdrawal_update(update, context, "failed")
+
+
+async def _handle_admin_withdrawal_update(update, context, status: str) -> None:
+    admin_id = update.effective_user.id
+    message = _user_message(update)
+    if not await _is_admin(admin_id):
+        await message.reply_text("This command is available to bot admins only.")
+        return
+    args = list(getattr(context, "args", []) or [])
+    minimum = 2 if status == "failed" else 1
+    if len(args) < minimum:
+        usage = (
+            "/admin_mark_failed <withdrawal_id> <reason>"
+            if status == "failed"
+            else "/admin_mark_paid <withdrawal_id>"
+        )
+        await message.reply_text(f"Usage: {usage}")
+        return
+    withdrawal_id = args[0]
+    reason = " ".join(args[1:]).strip() if status == "failed" else None
+    try:
+        withdrawal = await asyncio.to_thread(
+            trade_history_service.update_referral_withdrawal,
+            admin_telegram_user_id=admin_id,
+            withdrawal_id=withdrawal_id,
+            status=status,
+            failure_reason=reason,
+        )
+    except Exception:
+        logger.exception("Could not update referral withdrawal")
+        await message.reply_text(
+            "The withdrawal could not be updated. It may already have been processed."
+        )
+        return
+    await message.reply_text(
+        f"Withdrawal {withdrawal_id} marked {status}."
+    )
+    await _notify_withdrawal_user(context, withdrawal)
+
+
 def _cycle_report_text(
     cycle: int,
     completed_steps: list[str],
@@ -999,7 +1360,7 @@ async def _run_auto_trade(update, state) -> None:
                 f"Market: {market_label}\n"
                 f"Direction: {current.direction}\n"
                 f"Target: {current.max_cycles} winning cycles\n"
-                f"Safety stop: {auto_trade_service.MAX_CONSECUTIVE_LOSSES} "
+                f"Safety Stop: {auto_trade_service.MAX_CONSECUTIVE_LOSSES} "
                 "consecutive losses.",
             )
             session_status_message_updated = True
@@ -1070,7 +1431,7 @@ async def _prepare_trade_confirmation(
         f"Available tokens: {token_balance}\n"
         "Expiry: 30 seconds\n"
         "Target: 5 winning cycles\n"
-        f"Safety stop: {auto_trade_service.MAX_CONSECUTIVE_LOSSES} "
+        f"Safety Stop: {auto_trade_service.MAX_CONSECUTIVE_LOSSES} "
         "consecutive losses\n\n"
         "A loss stays in the current cycle and increases the next stake "
         "through Smart Scaling to help recover. "
@@ -1093,6 +1454,56 @@ async def handle_custom_stake_input(update, context=None) -> None:
     del context
     message = update.message
     user = update.effective_user
+    profile = await _sync_profile(update)
+    payout_step = profile.get("payout_input_step") if profile else None
+    if payout_step == "country":
+        try:
+            await asyncio.to_thread(
+                trade_history_service.save_payout_country,
+                user.id,
+                message.text or "",
+            )
+        except ValueError:
+            await message.reply_text(
+                "Please send a valid country name (up to 100 characters)."
+            )
+            return
+        except Exception:
+            logger.exception("Could not save user's payout country")
+            await message.reply_text(
+                "Could not save your country right now. Please try again."
+            )
+            return
+        await message.reply_text(
+            "Now send your bank or payout details for receiving money in that "
+            "country. Include the information carefully; it will be encrypted "
+            "before storage. You can update it later."
+        )
+        return
+    if payout_step == "details":
+        try:
+            await asyncio.to_thread(
+                trade_history_service.save_payout_details,
+                user.id,
+                message.text or "",
+            )
+        except ValueError:
+            await message.reply_text(
+                "Please send payout details as text (up to 2,000 characters)."
+            )
+            return
+        except Exception:
+            logger.exception("Could not save user's encrypted payout details")
+            await message.reply_text(
+                "Could not securely save those details. Please try again later."
+            )
+            return
+        await message.reply_text(
+            "✅ Your payout details were saved securely. You can change them "
+            "any time from 🎁 Invite."
+        )
+        return
+
     request = auto_trade_service.get_custom_stake_request(user.id)
     if request is None:
         return
@@ -1222,6 +1633,94 @@ async def dispatch_callback(update, context) -> None:
     user_id = update.effective_user.id
     user_key = str(user_id)
 
+    if data == "WELCOME_GIFT_ACCEPT_200":
+        try:
+            result = await asyncio.to_thread(
+                trade_history_service.claim_welcome_gift_200,
+                user_id,
+            )
+        except Exception:
+            logger.exception("Could not grant user's 200-token welcome gift")
+            await _safe_edit_message(
+                query,
+                "The welcome gift could not be verified right now. Your balance "
+                "has not changed. Please try again shortly.",
+            )
+            return
+        if result.get("granted"):
+            await _safe_edit_message(
+                query,
+                "🎉 Your 200-token first-time gift has been added to your "
+                f"balance! You now have {result['token_balance']} Yields Tokens "
+                "to use for trading.",
+            )
+        else:
+            await _safe_edit_message(
+                query,
+                "This first-time 200-token gift has already been claimed. "
+                f"Your current balance is {result['token_balance']} Yields Tokens.",
+            )
+        return
+
+    if data == "REFERRAL_PAYOUT_DETAILS":
+        await _start_payout_details(
+            user_id,
+            query.message.reply_text,
+        )
+        return
+
+    if data == "REFERRAL_WITHDRAW":
+        try:
+            profile = await asyncio.to_thread(
+                trade_history_service.get_user,
+                user_id,
+            )
+        except Exception:
+            logger.exception("Could not load payout profile")
+            await _safe_edit_message(
+                query,
+                "Payout information is temporarily unavailable. Please try again.",
+            )
+            return
+        if not profile.get("payout_country") or not profile.get("payout_details_encrypted"):
+            await _start_payout_details(
+                user_id,
+                query.message.reply_text,
+            )
+            return
+        try:
+            withdrawal = await asyncio.to_thread(
+                trade_history_service.create_referral_withdrawal,
+                user_id,
+                profile["payout_details_encrypted"],
+            )
+        except Exception as exc:
+            reason = str(exc)
+            if "REFERRAL_MINIMUM_WITHDRAWAL_NOT_MET" in reason:
+                await query.message.reply_text(
+                    "Withdrawals require at least $10. Your referral earnings "
+                    "remain available until you reach the minimum."
+                )
+                return
+            if "REFERRAL_WITHDRAWAL_ALREADY_PENDING" in reason:
+                await query.message.reply_text(
+                    "You already have a pending withdrawal request."
+                )
+                return
+            logger.exception("Could not create referral withdrawal")
+            await query.message.reply_text(
+                "The withdrawal could not be created. Your earnings remain "
+                "available; please try again later."
+            )
+            return
+        await query.message.reply_text(
+            f"✅ Withdrawal request received for "
+            f"${float(withdrawal['amount']):.2f} USD.\n"
+            f"Scheduled payout: {withdrawal['scheduled_for']} (UTC). "
+            "We’ll notify you when it is processed."
+        )
+        return
+
     if data == "START_CONNECT":
         message, connect_url = build_connect_prompt(user_id)
         await _safe_edit_message(
@@ -1345,17 +1844,7 @@ async def dispatch_callback(update, context) -> None:
         return
 
     if data == "MENU_INVITE":
-        bot_username = str(settings.telegram_bot_username or "").strip().lstrip("@")
-        invite_text = (
-            f"Invite a friend to Yields: https://t.me/{bot_username}"
-            if bot_username
-            else "Open Yields in Telegram, tap the bot profile, and share it with a friend."
-        )
-        await _safe_edit_message(
-            query,
-            f"🎁 INVITE FRIENDS\n\n{invite_text}",
-            reply_markup=TelegramKeyboard.menu_keyboard(settings.community_url),
-        )
+        await _send_referral_summary(update, edit_query=query)
         return
 
     if data == "START_STATS":

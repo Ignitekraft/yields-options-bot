@@ -1,11 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
+import hmac
+import json
 import logging
 import os
+import time
+from collections.abc import Mapping
+from decimal import Decimal, InvalidOperation
 
-from fastapi import FastAPI, Query
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import HTMLResponse, JSONResponse
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.bot.telegram_bot import create_application
@@ -115,19 +122,15 @@ async def deriv_oauth_callback(
     except Exception as exc:
         return f"<h3>OAuth exchange failed: {exc}</h3>"
 
-    welcome_tokens = None
+    profile = None
     try:
-        await asyncio.to_thread(
+        profile = await asyncio.to_thread(
             trade_history_service.ensure_user,
-            telegram_user_id,
-        )
-        welcome_tokens = await asyncio.to_thread(
-            trade_history_service.grant_first_auth_tokens,
             telegram_user_id,
         )
     except Exception:
         logger.exception(
-            "Could not apply first-auth token grant for Telegram user %s",
+            "Could not sync OAuth Telegram profile for user %s",
             telegram_user_id,
         )
 
@@ -140,7 +143,17 @@ async def deriv_oauth_callback(
                 chat_id = telegram_user_id
 
             main_menu_button = InlineKeyboardMarkup(
-                [[InlineKeyboardButton("🏠 Main Menu", callback_data="START_DASHBOARD")]]
+                [
+                    [InlineKeyboardButton("🏠 Main Menu", callback_data="START_DASHBOARD")],
+                    *(
+                        [[InlineKeyboardButton(
+                            "🎁 Accept 200 Tokens",
+                            callback_data="WELCOME_GIFT_ACCEPT_200",
+                        )]]
+                        if not (profile or {}).get("welcome_gift_200_claimed", False)
+                        else []
+                    ),
+                ]
             )
 
             await application.bot.send_message(
@@ -149,15 +162,10 @@ async def deriv_oauth_callback(
                     "✅ Deriv account connected successfully!\n\n"
                     "Your account is active and ready.\n\n"
                     + (
-                        "🎁 150 welcome Yields Tokens have been added to "
-                        "your account.\n\n"
-                        if welcome_tokens and welcome_tokens.get("granted")
-                        else (
-                            "Your first-time token grant could not be verified. "
-                            "Please reconnect or contact Sammie for help.\n\n"
-                            if welcome_tokens is None
-                            else ""
-                        )
+                        "🎁 You have a one-time gift of 200 Yields Tokens "
+                        "available to accept.\n\n"
+                        if not (profile or {}).get("welcome_gift_200_claimed", False)
+                        else ""
                     )
                     + "Tap below to return to the main menu."
                 ),
@@ -166,13 +174,13 @@ async def deriv_oauth_callback(
         except Exception as e:
             logger.exception("Failed to send Telegram OAuth success notification")
 
-    if welcome_tokens is None:
+    if profile is None:
         return """
         <html>
             <body style="font-family: Arial, sans-serif; text-align: center; padding-top: 50px; background: #0f1a24; color: #f5f7fa;">
                 <h2>Deriv Account Connected</h2>
-                <p>Your account is active, but the first-time token grant could not be verified.</p>
-                <p>Please reconnect from Telegram or contact Sammie for help.</p>
+                <p>Your account is active, but your Telegram profile could not be synced.</p>
+                <p>Please return to Telegram and try /start again.</p>
             </body>
         </html>
         """
@@ -188,6 +196,160 @@ async def deriv_oauth_callback(
         </body>
     </html>
     """
+
+
+def verify_whop_webhook_signature(
+    payload: bytes,
+    headers: Mapping[str, str],
+    secret: str,
+    *,
+    now: float | None = None,
+) -> bool:
+    webhook_id = headers.get("webhook-id")
+    timestamp = headers.get("webhook-timestamp")
+    signature_header = headers.get("webhook-signature")
+    if not secret or not webhook_id or not timestamp or not signature_header:
+        return False
+    try:
+        timestamp_seconds = int(timestamp)
+    except (TypeError, ValueError):
+        return False
+    current_time = time.time() if now is None else now
+    if abs(current_time - timestamp_seconds) > 300:
+        return False
+
+    signed_content = f"{webhook_id}.{timestamp}.".encode("utf-8") + payload
+    expected = base64.b64encode(
+        hmac.new(
+            secret.encode("utf-8"),
+            signed_content,
+            hashlib.sha256,
+        ).digest()
+    ).decode("ascii")
+    return any(
+        hmac.compare_digest(item.removeprefix("v1,"), expected)
+        for item in signature_header.split()
+        if item.startswith("v1,")
+    )
+
+
+@app.post("/webhooks/whop")
+async def whop_webhook(request: Request):
+    if not settings.whop_webhook_secret:
+        raise HTTPException(status_code=503, detail="WHOP_WEBHOOK_NOT_CONFIGURED")
+    payload = await request.body()
+    if not verify_whop_webhook_signature(
+        payload,
+        request.headers,
+        settings.whop_webhook_secret,
+    ):
+        raise HTTPException(status_code=401, detail="INVALID_WEBHOOK_SIGNATURE")
+
+    try:
+        event = json.loads(payload)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="INVALID_WEBHOOK_JSON") from exc
+    if not isinstance(event, dict):
+        raise HTTPException(status_code=400, detail="INVALID_WEBHOOK_EVENT")
+    if event.get("type") != "payment.succeeded":
+        return JSONResponse({"received": True, "ignored": True})
+
+    payment = event.get("data")
+    if not isinstance(payment, dict):
+        raise HTTPException(status_code=400, detail="INVALID_PAYMENT_EVENT")
+    metadata = payment.get("metadata")
+    if not isinstance(metadata, dict):
+        raise HTTPException(status_code=422, detail="PAYMENT_METADATA_REQUIRED")
+
+    telegram_user_id = metadata.get(settings.whop_telegram_user_metadata_key)
+    token_amount = metadata.get(settings.whop_token_amount_metadata_key)
+    payment_id = payment.get("id")
+    event_id = request.headers.get("webhook-id")
+    amount_paid = payment.get("total")
+    currency = str(payment.get("currency") or "").upper()
+    try:
+        if isinstance(token_amount, bool):
+            raise ValueError
+        token_value = Decimal(str(token_amount))
+        amount = Decimal(str(amount_paid))
+        if (
+            not token_value.is_finite()
+            or token_value != token_value.to_integral_value()
+        ):
+            raise ValueError
+        tokens = int(token_value)
+        if (
+            not str(telegram_user_id).isdigit()
+            or int(telegram_user_id) <= 0
+            or payment_id is None
+            or isinstance(payment_id, bool)
+            or not str(payment_id).strip()
+            or not str(event_id).strip()
+        ):
+            raise ValueError
+        if (
+            tokens <= 0
+            or not amount.is_finite()
+            or amount <= 0
+            or currency != "USD"
+        ):
+            raise ValueError
+    except (InvalidOperation, TypeError, ValueError):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "PAYMENT_METADATA_INVALID: expected Telegram user ID, positive "
+                "token_amount, USD total, payment ID, and webhook-id"
+            ),
+        )
+
+    try:
+        purchase = await asyncio.to_thread(
+            trade_history_service.record_verified_token_purchase,
+            provider="whop",
+            provider_purchase_id=str(payment_id),
+            provider_event_id=str(event_id),
+            telegram_user_id=str(telegram_user_id),
+            tokens=tokens,
+            amount_paid=str(amount),
+            currency=currency,
+        )
+    except Exception as exc:
+        logger.exception("Could not process verified Whop payment")
+        raise HTTPException(status_code=503, detail="PURCHASE_CREDIT_FAILED") from exc
+
+    if purchase.get("credited"):
+        application = get_bot_application()
+        if application is not None:
+            try:
+                await application.bot.send_message(
+                    chat_id=int(telegram_user_id),
+                    text=f"✅ Your Whop payment was verified. {tokens} Yields "
+                    "Tokens have been added to your balance.",
+                )
+            except Exception:
+                logger.exception("Could not notify buyer of Whop token credit")
+            referrer_id = purchase.get("referrer_telegram_user_id")
+            if referrer_id and float(purchase.get("commission") or 0) > 0:
+                try:
+                    await application.bot.send_message(
+                        chat_id=int(referrer_id),
+                        text=(
+                            "🎉 Your referral made a token purchase. "
+                            f"${float(purchase['commission']):.2f} USD (5%) "
+                            "has been added to your referral earnings."
+                        ),
+                    )
+                except Exception:
+                    logger.exception("Could not notify referrer of commission")
+
+    return JSONResponse(
+        {
+            "received": True,
+            "credited": bool(purchase.get("credited")),
+            "duplicate": bool(purchase.get("duplicate")),
+        }
+    )
 
 
 @app.get("/")

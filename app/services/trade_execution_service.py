@@ -10,6 +10,7 @@ from typing import Any
 import websockets
 
 from app.config import settings
+from app.services.deriv.websocket_connection import connect_async_with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -542,12 +543,14 @@ class TradeExecutionService:
 
         last_error: Exception | None = None
         try:
-            async with websockets.connect(
+            connection = await connect_async_with_retry(
+                websockets.connect,
                 ws_url,
                 open_timeout=15,
                 ping_timeout=20,
                 ping_interval=20,
-            ) as websocket:
+            )
+            async with connection as websocket:
                 candidates = self.asset_candidates(symbol)
                 for candidate_symbol in candidates:
                     try:
@@ -705,12 +708,14 @@ class TradeExecutionService:
             "req_id": req_id,
         }
 
-        async with websockets.connect(
+        connection = await connect_async_with_retry(
+            websockets.connect,
             ws_url,
             open_timeout=15,
             ping_timeout=20,
             ping_interval=20,
-        ) as websocket:
+        )
+        async with connection as websocket:
 
             await websocket.send(
                 json.dumps(payload)

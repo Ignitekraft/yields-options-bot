@@ -26,8 +26,10 @@ Implemented:
 - Supabase stores Telegram user profiles, read-only Deriv balance snapshots, per-contract trade history, and end-of-session summaries.
 - `/stats` reports the last 10 finalized Auto Trade sessions; session win rate is based on positive session PnL, while direction accuracy is calculated from settled contract ticks.
 - One Yields Token is reserved for each contract purchase. Explicitly rejected purchases are refunded; an uncertain purchase outcome is not refunded to prevent an uncharged possible trade.
-- New users receive 150 Yields Tokens after their first successful Deriv OAuth connection. The grant is recorded against the persistent Supabase user profile, so reconnecting after disconnect does not grant another bonus.
+- Users can claim a one-time gift of 200 Yields Tokens from the Telegram welcome flow. The claim is recorded on their persistent Supabase profile, including for users who received the former 150-token OAuth grant.
 - The dashboard's Get Tokens button and `/tokens` command show Whop packages for 50, 100, 200, and 500 tokens. The package selection screen links to each checkout and returns to the `/start` menu.
+- `/referrals` shows a user's unique invite link and referral earnings. Verified purchases credit the buyer's tokens and pay the referrer 5% of the USD amount paid.
+- Referral earnings can be withdrawn at a $10 minimum. Requests are scheduled for the next 15th or month-end payout date in UTC; an admin manually pays them and records the result in the bot.
 
 ## Auto Trade market analysis
 
@@ -46,8 +48,10 @@ momentum are included as context instead of hard vetoes. The score is an
 indicator balance, not a probability or guarantee of a profitable 30-second
 contract. Live data errors stop a market scan instead of producing a signal
 from sample data. Public market data uses Deriv's unauthenticated public
-WebSocket; the Auto Trade product flow still requires the user to connect an
-account before scanning or trading.
+WebSocket; HTTP 429 handshake responses receive bounded retries and honor
+Deriv's `Retry-After` header. Repeated rate limits stop safely rather than
+continuing without a verified Deriv connection. The Auto Trade product flow
+still requires the user to connect an account before scanning or trading.
 The scan requests tick and candle history over one public WebSocket connection
 for the configured markets. The stake buttons use 0.1%, 0.5%, or 1% of the
 selected account balance, calculated to the nearest cent. Users can also
@@ -61,13 +65,50 @@ confirmation.
 1. Create a Python virtual environment.
 2. Install dependencies:
    `pip install -r requirements.txt`
-3. Copy `.env.example` to `.env` and add the Telegram and Deriv values. Set `SUPABASE_URL` and the backend-only `SUPABASE_SERVICE_ROLE_KEY` for trade history, Auto Trade, and encrypted OAuth credential storage.
+3. Copy `.env.example` to `.env` and add the Telegram and Deriv values. Set `TELEGRAM_BOT_USERNAME`, `SUPABASE_URL`, and the backend-only `SUPABASE_SERVICE_ROLE_KEY` for user profiles, referrals, Auto Trade, and encrypted credential storage. Configure `WHOP_WEBHOOK_SECRET` to enable payment webhooks; `WHOP_TELEGRAM_USER_METADATA_KEY` and `WHOP_TOKEN_AMOUNT_METADATA_KEY` default to `telegram_user_id` and `token_amount`.
 4. Register a Deriv App ID for OAuth. Public market data connects to `wss://api.derivws.com/trading/v1/options/ws/public` without sending the App ID. The project does not require a separate Deriv client secret for the PKCE authorization-code flow.
 5. Generate a Fernet key with `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` and set it as the backend-only `DERIV_TOKEN_ENCRYPTION_KEY` environment variable. Keep the same key across deploys and do not rotate it unless stored credentials are re-encrypted.
 6. Apply the Supabase migrations with `supabase db push --linked`.
 7. Start the FastAPI backend:
    `uvicorn app.main:app --host 0.0.0.0 --port 8000`
 8. Start the Telegram bot with your webhook or polling setup.
+
+## Welcome gifts, referrals, and payouts
+
+Apply the new migration with the other Supabase migrations before deploying this
+feature. The 200-token welcome gift is explicitly claimed through Telegram; the
+old 150-token OAuth grant is disabled. Existing users, including recipients of
+the former 150-token grant, can claim the new gift once.
+
+For Whop webhook crediting, configure a `payment.succeeded` webhook to
+`https://<your-backend-host>/webhooks/whop` and set `WHOP_WEBHOOK_SECRET`. Every
+checkout must include the Telegram user ID and token quantity in payment
+metadata, using the keys configured by `WHOP_TELEGRAM_USER_METADATA_KEY` and
+`WHOP_TOKEN_AMOUNT_METADATA_KEY`. The webhook currently accepts USD purchases.
+Existing static checkout links must be configured to supply this metadata;
+otherwise, verify a purchase with `/admin_verify_purchase` after confirming it
+in Whop. Both paths deduplicate by purchase ID.
+
+Promote trusted bot operators to admins after their Telegram profile exists by
+running this SQL in the Supabase SQL editor:
+
+```sql
+update public.users
+set is_admin = true
+where telegram_user_id = '<trusted-telegram-user-id>';
+```
+
+Admins can manually credit a purchase with
+`/admin_verify_purchase <buyer_telegram_id> <whop_payment_id> <token_amount> <amount_usd> [currency]`.
+Users manage their invite and payout details with `/referrals`, `/payout`, and
+`/payout_details`. Admins see due payout requests with `/admin_withdrawals`,
+then record manual transfers with `/admin_mark_paid <withdrawal_id>` or
+`/admin_mark_failed <withdrawal_id> <reason>`. Failure returns the earnings to
+the user's available balance and notifies them with the recorded reason.
+
+Payout details are encrypted using `DERIV_TOKEN_ENCRYPTION_KEY`; keep that key
+stable across deployments. Admin processing and payout notifications require
+the bot to be running with the configured Telegram token.
 
 ## Security note
 

@@ -3,8 +3,19 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from app.bot.callbacks import dispatch_callback, handle_custom_stake_input
+from app.bot.callbacks import (
+    dispatch_callback,
+    handle_admin_mark_failed_command,
+    handle_admin_mark_paid_command,
+    handle_admin_verify_purchase_command,
+    handle_admin_withdrawals_command,
+    handle_custom_stake_input,
+    handle_payout_details_command,
+    handle_referrals_command,
+    handle_withdraw_command,
+)
 from app.bot.handlers import (
+    account_mode_service,
     auth_service,
     build_connect_prompt,
     build_menu_message,
@@ -29,6 +40,7 @@ try:
         CommandHandler,
         ContextTypes,
         MessageHandler,
+        TypeHandler,
         filters,
     )
 except ImportError:  # pragma: no cover - optional dependency in local dev sandbox
@@ -38,6 +50,7 @@ except ImportError:  # pragma: no cover - optional dependency in local dev sandb
     CallbackQueryHandler = None
     CommandHandler = None
     MessageHandler = None
+    TypeHandler = None
     filters = None
 
 logger = logging.getLogger(__name__)
@@ -65,6 +78,21 @@ async def _send_menu_message(update: Update) -> None:
     except Exception:
         logger.exception("Could not send the Yields start-menu image")
         await update.message.reply_text(text, reply_markup=keyboard)
+
+    try:
+        profile = await asyncio.to_thread(
+            trade_history_service.get_user,
+            user.id,
+        )
+        if not profile.get("welcome_gift_200_claimed", False):
+            await update.message.reply_text(
+                "🎁 FIRST-TIME GIFT\n\n"
+                "You have a one-time gift of 200 Yields Tokens to use for "
+                "trading. Accept it now and it will be added to your token balance.",
+                reply_markup=TelegramKeyboard.welcome_gift_keyboard(),
+            )
+    except Exception:
+        logger.exception("Could not check welcome gift eligibility")
 
 
 async def _send_stats_message(update: Update) -> None:
@@ -96,7 +124,48 @@ def create_application():
     application = Application.builder().token(settings.telegram_bot_token).build()
 
     async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        args = list(getattr(context, "args", []) or [])
+        if args and args[0].startswith("ref_"):
+            referrer_id = args[0].removeprefix("ref_")
+            if referrer_id.isdigit():
+                try:
+                    await asyncio.to_thread(
+                        trade_history_service.ensure_user,
+                        referrer_id,
+                        account_mode="demo",
+                    )
+                    await asyncio.to_thread(
+                        trade_history_service.attach_referral,
+                        update.effective_user.id,
+                        referrer_id,
+                    )
+                except Exception:
+                    logger.exception("Could not attach new user's referral")
         await _send_menu_message(update)
+
+    async def sync_telegram_profile(
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        del context
+        user = getattr(update, "effective_user", None)
+        if user is None:
+            return
+        try:
+            await asyncio.to_thread(
+                trade_history_service.ensure_user,
+                user.id,
+                first_name=getattr(user, "first_name", None),
+                last_name=getattr(user, "last_name", None),
+                username=getattr(user, "username", None),
+                account_mode=account_mode_service.get_mode(str(user.id)),
+                sync_telegram_profile=True,
+            )
+        except Exception:
+            logger.exception(
+                "Could not sync Telegram profile for user %s",
+                user.id,
+            )
 
     async def connect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = update.effective_user.id
@@ -150,6 +219,28 @@ def create_application():
     application.add_handler(CommandHandler("tokens", tokens))
     application.add_handler(CommandHandler("logout", logout))
     application.add_handler(CommandHandler("scan", scan))
+    application.add_handler(CommandHandler("referrals", handle_referrals_command))
+    application.add_handler(CommandHandler("payout", handle_withdraw_command))
+    application.add_handler(
+        CommandHandler("payout_details", handle_payout_details_command)
+    )
+    application.add_handler(
+        CommandHandler("admin_verify_purchase", handle_admin_verify_purchase_command)
+    )
+    application.add_handler(
+        CommandHandler("admin_withdrawals", handle_admin_withdrawals_command)
+    )
+    application.add_handler(
+        CommandHandler("admin_mark_paid", handle_admin_mark_paid_command)
+    )
+    application.add_handler(
+        CommandHandler("admin_mark_failed", handle_admin_mark_failed_command)
+    )
+    if TypeHandler is not None:
+        application.add_handler(
+            TypeHandler(Update, sync_telegram_profile),
+            group=-1,
+        )
     if CallbackQueryHandler is not None:
         application.add_handler(CallbackQueryHandler(dispatch_callback))
     if MessageHandler is not None and filters is not None:

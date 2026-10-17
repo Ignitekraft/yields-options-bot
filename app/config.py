@@ -24,6 +24,15 @@ class Settings:
     supabase_url: str = os.getenv("SUPABASE_URL", "")
     supabase_service_role_key: str = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
     deriv_token_encryption_key: str = os.getenv("DERIV_TOKEN_ENCRYPTION_KEY", "")
+    whop_webhook_secret: str = os.getenv("WHOP_WEBHOOK_SECRET", "")
+    whop_telegram_user_metadata_key: str = os.getenv(
+        "WHOP_TELEGRAM_USER_METADATA_KEY",
+        "telegram_user_id",
+    )
+    whop_token_amount_metadata_key: str = os.getenv(
+        "WHOP_TOKEN_AMOUNT_METADATA_KEY",
+        "token_amount",
+    )
     menu_image_url: str = "https://hvvwkijquaoqsbzhpyim.supabase.co/storage/v1/object/public/Bot%20images/Yields%20Options%20Bot%20Neon%20Branding.png"
     community_url: str = "https://t.me/+N58js2a8NF1mMzY0"
     support_contact_url: str = "https://t.me/samueludoh_ng"

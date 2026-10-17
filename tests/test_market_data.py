@@ -1,4 +1,7 @@
 import asyncio
+import base64
+import hashlib
+import hmac
 import importlib
 import json
 import math
@@ -7,9 +10,10 @@ import time
 from types import SimpleNamespace
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
+from cryptography.fernet import Fernet
 
 from app.bot.callbacks import (
     _handle_auto_trade_entry,
@@ -39,13 +43,17 @@ from app.bot.handlers import (
 from app.bot.keyboards import TelegramKeyboard
 from app.bot.telegram_bot import _send_menu_message, _send_tokens_message
 from app.config import settings
-from app.main import app, deriv_oauth_callback
+from app.main import app, deriv_oauth_callback, verify_whop_webhook_signature
 from app.models.market import MarketSnapshot
 from app.services.account_service import AccountService
 from app.services.auth_service import AuthService
 from app.services.auto_trade_service import AutoTradeService
 from app.services.deriv.auth import build_deriv_oauth_url
 from app.services.deriv.market_data import MarketDataService
+from app.services.deriv.websocket_connection import (
+    connect_async_with_retry,
+    connect_sync_with_retry,
+)
 from app.services.scanner import SignalResult, YieldsScanner
 from app.services.trade_history_service import TradeHistoryService
 from app.services.trade_execution_service import TradeExecutionService
@@ -106,6 +114,39 @@ def _sample_one_minute_candles(count: int = 60) -> list[dict]:
 
 
 class MarketDataTests(unittest.TestCase):
+    def test_websocket_handshake_retries_http_429_with_retry_after(self):
+        class RateLimited(Exception):
+            def __init__(self):
+                self.response = SimpleNamespace(
+                    status_code=429,
+                    headers={"Retry-After": "0"},
+                )
+
+        async def check_async_retry():
+            websocket = object()
+            connect = AsyncMock(side_effect=[RateLimited(), websocket])
+            sleep = AsyncMock()
+            with patch(
+                "app.services.deriv.websocket_connection.asyncio.sleep",
+                sleep,
+            ):
+                result = await connect_async_with_retry(connect, "wss://example.com")
+            self.assertIs(result, websocket)
+            self.assertEqual(connect.await_count, 2)
+            sleep.assert_awaited_once_with(0.0)
+
+        async def check_sync_retry():
+            connection = object()
+            connect = Mock(side_effect=[RateLimited(), connection])
+            with patch("app.services.deriv.websocket_connection.time.sleep") as sleep:
+                result = connect_sync_with_retry(connect, "wss://example.com")
+            self.assertIs(result, connection)
+            self.assertEqual(connect.call_count, 2)
+            sleep.assert_called_once_with(0.0)
+
+        asyncio.run(check_async_retry())
+        asyncio.run(check_sync_retry())
+
     def test_market_data_normalizes_tick_payload(self):
         service = MarketDataService()
 
@@ -3393,12 +3434,46 @@ class MarketDataTests(unittest.TestCase):
             {"p_telegram_user_id": "12345"},
         )
 
-    def test_first_auth_token_grant_calls_idempotent_supabase_rpc(self):
+    def test_telegram_profile_sync_clears_removed_fields_and_encrypts_payout_details(self):
+        requests = []
+
+        def respond(request):
+            requests.append(request)
+            return httpx.Response(
+                200,
+                json=[{"telegram_user_id": "12345"}],
+                request=request,
+            )
+
+        service = TradeHistoryService(
+            supabase_url="https://project.supabase.co",
+            service_role_key="test-service-role-key",
+            transport=httpx.MockTransport(respond),
+            encryption_key=Fernet.generate_key().decode("ascii"),
+        )
+        service.ensure_user(
+            "12345",
+            first_name="Sam",
+            last_name=None,
+            username=None,
+            sync_telegram_profile=True,
+        )
+        payout_details = "Account number: 1234567890"
+        encrypted = service.encrypt_payout_details(payout_details)
+
+        payload = json.loads(requests[0].content)
+        self.assertEqual(payload["telegram_first_name"], "Sam")
+        self.assertIsNone(payload["telegram_last_name"])
+        self.assertIsNone(payload["telegram_username"])
+        self.assertNotEqual(encrypted, payout_details)
+        self.assertEqual(service.decrypt_payout_details(encrypted), payout_details)
+
+    def test_welcome_gift_claim_calls_idempotent_supabase_rpc(self):
         requests = []
         rpc_responses = iter(
             [
-                {"granted": True, "tokens_granted": 150, "token_balance": 150},
-                {"granted": False, "tokens_granted": 0, "token_balance": 150},
+                {"granted": True, "tokens_granted": 200, "token_balance": 200},
+                {"granted": False, "tokens_granted": 0, "token_balance": 200},
             ]
         )
 
@@ -3416,24 +3491,68 @@ class MarketDataTests(unittest.TestCase):
             transport=httpx.MockTransport(respond),
         )
 
-        first_grant = service.grant_first_auth_tokens("telegram-user-150")
-        reconnect = service.grant_first_auth_tokens("telegram-user-150")
+        first_grant = service.claim_welcome_gift_200("telegram-user-200")
+        reconnect = service.claim_welcome_gift_200("telegram-user-200")
 
         self.assertTrue(first_grant["granted"])
-        self.assertEqual(first_grant["tokens_granted"], 150)
-        self.assertEqual(first_grant["token_balance"], 150)
+        self.assertEqual(first_grant["tokens_granted"], 200)
+        self.assertEqual(first_grant["token_balance"], 200)
         self.assertFalse(reconnect["granted"])
-        self.assertEqual(reconnect["token_balance"], 150)
+        self.assertEqual(reconnect["token_balance"], 200)
         self.assertEqual(len(requests), 2)
         self.assertTrue(
             all(
-                request.url.path.endswith("/rpc/grant_first_auth_tokens")
+                request.url.path.endswith("/rpc/claim_welcome_gift_200")
                 for request in requests
             )
         )
         self.assertEqual(
             json.loads(requests[0].content),
-            {"p_telegram_user_id": "telegram-user-150"},
+            {"p_telegram_user_id": "telegram-user-200"},
+        )
+
+    def test_whop_webhook_signature_requires_fresh_matching_signature(self):
+        payload = b'{"type":"payment.succeeded"}'
+        secret = "ws_test_secret"
+        webhook_id = "evt_test_123"
+        timestamp = "1700000000"
+        signed_content = f"{webhook_id}.{timestamp}.".encode() + payload
+        signature = base64.b64encode(
+            hmac.new(
+                secret.encode(),
+                signed_content,
+                hashlib.sha256,
+            ).digest()
+        ).decode()
+        headers = {
+            "webhook-id": webhook_id,
+            "webhook-timestamp": timestamp,
+            "webhook-signature": f"v1,{signature}",
+        }
+
+        self.assertTrue(
+            verify_whop_webhook_signature(
+                payload,
+                headers,
+                secret,
+                now=1700000000,
+            )
+        )
+        self.assertFalse(
+            verify_whop_webhook_signature(
+                payload,
+                headers,
+                secret,
+                now=1700000301,
+            )
+        )
+        self.assertFalse(
+            verify_whop_webhook_signature(
+                payload,
+                {**headers, "webhook-signature": "v1,invalid"},
+                secret,
+                now=1700000000,
+            )
         )
 
     def test_stats_message_renders_recent_trades_and_account_summaries(self):
@@ -3528,7 +3647,7 @@ class MarketDataTests(unittest.TestCase):
         self.assertIn("Tokens used: 10", text)
         self.assertIn("Tokens remaining: 40", text)
 
-    def test_deriv_oauth_success_message_includes_main_menu_button(self):
+    def test_deriv_oauth_success_message_includes_welcome_gift_offer(self):
         class FakeBot:
             def __init__(self):
                 self.sent = []
@@ -3547,17 +3666,12 @@ class MarketDataTests(unittest.TestCase):
              patch("app.main.auth_service.exchange_oauth_code", return_value={"access_token": "token"}), \
              patch(
                  "app.main.trade_history_service.ensure_user",
-                 return_value={"telegram_user_id": "telegram-user-42"},
-             ) as ensure_user, \
-             patch(
-                 "app.main.trade_history_service.grant_first_auth_tokens",
                  return_value={
-                     "granted": True,
-                     "tokens_granted": 150,
-                     "token_balance": 150,
+                     "telegram_user_id": "telegram-user-42",
+                     "welcome_gift_200_claimed": False,
                  },
-             ) as grant_tokens, \
-             patch("app.main.get_bot_application", return_value=fake_app):
+             ) as ensure_user, \
+              patch("app.main.get_bot_application", return_value=fake_app):
             response = asyncio.run(
                 deriv_oauth_callback(
                     code="auth-code",
@@ -3569,11 +3683,10 @@ class MarketDataTests(unittest.TestCase):
         self.assertIn("Deriv Account Connected Successfully", response)
         self.assertIn("Open Dashboard", response)
         ensure_user.assert_called_once_with("telegram-user-42")
-        grant_tokens.assert_called_once_with("telegram-user-42")
 
         sent_message = fake_app.bot.sent[0]
         self.assertIn("reply_markup", sent_message)
-        self.assertIn("150 welcome Yields Tokens", sent_message["text"])
+        self.assertIn("one-time gift of 200 Yields Tokens", sent_message["text"])
         self.assertIsNotNone(sent_message["reply_markup"])
 
     def test_user_messages_avoid_slash_commands_and_expose_faq_stats(self):
@@ -3887,14 +4000,14 @@ class MarketDataTests(unittest.TestCase):
                     self.calls.append(("POST", url, headers))
                     if url.endswith("/demo-001/otp"):
                         return FakeOtpResponse(
-                            "wss://demo.example/ws?otp=demo"
+                            "wss://api.derivws.com/ws?otp=demo"
                         )
                     if url.endswith("/real-001/otp"):
                         return FakeOtpResponse(
-                            "wss://real.example/ws?otp=real"
+                            "wss://api.derivws.com/ws?otp=real"
                         )
                     return FakeOtpResponse(
-                        "wss://demo.example/ws?otp=demo"
+                        "wss://api.derivws.com/ws?otp=demo"
                     )
 
             class FakeSocket:
@@ -3932,10 +4045,10 @@ class MarketDataTests(unittest.TestCase):
                     return self._recv.pop(0)
 
             fake_demo_socket = FakeSocket(
-                "wss://demo.example/ws?otp=demo"
+                "wss://api.derivws.com/ws?otp=demo"
             )
             fake_real_socket = FakeSocket(
-                "wss://real.example/ws?otp=real"
+                "wss://api.derivws.com/ws?otp=real"
             )
 
             with patch(
@@ -3944,8 +4057,8 @@ class MarketDataTests(unittest.TestCase):
             ), patch(
                 "app.services.account_service.websockets.connect",
                 side_effect=[
-                    fake_demo_socket,
                     fake_real_socket,
+                    fake_demo_socket,
                 ],
             ):
                 balances = await AccountService(auth).get_live_balances(

@@ -12,6 +12,7 @@ except ImportError:  # pragma: no cover - optional in local dev sandbox
     websocket_client = None
 
 from app.config import settings
+from app.services.deriv.websocket_connection import connect_sync_with_retry
 
 
 class MarketDataService:
@@ -45,11 +46,13 @@ class MarketDataService:
         if websocket_client is None:
             raise RuntimeError("DERIV_WEBSOCKETS_CLIENT_UNAVAILABLE")
 
-        with websocket_client.connect(
+        connection = connect_sync_with_retry(
+            websocket_client.connect,
             self._connection_url(),
             open_timeout=10,
             close_timeout=2,
-        ) as connection:
+        )
+        with connection:
             response = self._request_on_connection(
                 connection,
                 payload,
@@ -106,11 +109,13 @@ class MarketDataService:
                 list[dict[str, float | int]],
             ] | Exception,
         ] = {}
-        with websocket_client.connect(
+        connection = connect_sync_with_retry(
+            websocket_client.connect,
             self._connection_url(),
             open_timeout=10,
             close_timeout=2,
-        ) as connection:
+        )
+        with connection:
             request_id = 0
             for symbol in symbols:
                 try:
