@@ -51,7 +51,7 @@ class TradeRunState:
 class AutoTradeService:
     """Thread-safe in-memory Auto Trade state registry."""
 
-    MAX_CONSECUTIVE_LOSSES = 3
+    MAX_CONSECUTIVE_LOSSES = 5
 
     ACTIVE_STATUSES = {
         "pending",
