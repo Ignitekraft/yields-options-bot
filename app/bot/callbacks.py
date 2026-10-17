@@ -385,6 +385,96 @@ async def _get_trade_token_balance(update, query, account_mode: str) -> int | No
         return None
 
 
+async def _get_auto_trade_limit_status() -> dict:
+    return await asyncio.to_thread(
+        trade_history_service.get_auto_trade_session_limit_status
+    )
+
+
+async def _auto_trade_locked_seconds() -> int | None:
+    try:
+        status = await _get_auto_trade_limit_status()
+    except Exception:
+        logger.exception("Could not load Auto Trade limit for menu")
+        return None
+    return status["retry_after_seconds"] if status["locked"] else None
+
+
+async def _dashboard_keyboard_with_limit():
+    return TelegramKeyboard.dashboard_keyboard(
+        locked_seconds=await _auto_trade_locked_seconds(),
+    )
+
+
+async def _menu_keyboard_with_limit():
+    return TelegramKeyboard.menu_keyboard(
+        settings.community_url,
+        locked_seconds=await _auto_trade_locked_seconds(),
+    )
+
+
+def _format_auto_trade_countdown(seconds: int) -> str:
+    seconds = max(0, int(seconds))
+    minutes, seconds = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h {minutes}m"
+    return f"{minutes}m {seconds:02d}s"
+
+
+def _locked_auto_trade_keyboard(query, seconds: int):
+    message = getattr(query, "message", None)
+    markup = getattr(message, "reply_markup", None)
+    buttons = getattr(markup, "inline_keyboard", [])
+    is_menu = any(
+        getattr(button, "callback_data", None) == "MENU_GET_TOKENS"
+        for row in buttons
+        for button in row
+    )
+    if is_menu:
+        return TelegramKeyboard.menu_keyboard(
+            settings.community_url,
+            locked_seconds=seconds,
+        )
+    return TelegramKeyboard.dashboard_keyboard(locked_seconds=seconds)
+
+
+async def _show_auto_trade_limit_notice(
+    query,
+    seconds: int,
+    *,
+    callback_already_answered: bool = False,
+) -> None:
+    countdown = _format_auto_trade_countdown(seconds)
+    notice = (
+        "Auto Trade is temporarily paused: the bot has reached its global "
+        "limit of 10 sessions in a rolling hour. "
+        f"New sessions are available in {countdown}."
+    )
+    if callback_already_answered:
+        reply_text = getattr(
+            getattr(query, "message", None),
+            "reply_text",
+            None,
+        )
+        if reply_text is not None:
+            try:
+                await reply_text(notice)
+            except Exception:
+                logger.exception("Could not send Auto Trade session-limit notice")
+    else:
+        try:
+            await query.answer(notice, show_alert=True)
+        except Exception:
+            logger.exception("Could not show Auto Trade session-limit notice")
+    try:
+        await query.edit_message_reply_markup(
+            reply_markup=_locked_auto_trade_keyboard(query, seconds),
+        )
+    except Exception:
+        logger.exception("Could not update locked Auto Trade button")
+
+
 async def _prompt_connect(update, query) -> None:
     user_id = update.effective_user.id
     await _safe_edit_message(
@@ -413,7 +503,7 @@ async def _show_auto_trade_setup(update, query) -> None:
             "⚠️ Live Deriv market data is temporarily unavailable. "
             "No trade has been placed. Please try scanning again shortly.",
             reply_markup=(
-                TelegramKeyboard.dashboard_keyboard()
+                await _dashboard_keyboard_with_limit()
                 if connected
                 else TelegramKeyboard.start_keyboard()
             ),
@@ -429,7 +519,7 @@ async def _show_auto_trade_setup(update, query) -> None:
         )
         if setup.get("direction") in {"BULLISH", "BEARISH"} and connected
         else (
-            TelegramKeyboard.dashboard_keyboard()
+            await _dashboard_keyboard_with_limit()
             if connected
             else TelegramKeyboard.start_keyboard()
         )
@@ -459,6 +549,27 @@ async def _show_auto_trade_setup(update, query) -> None:
 
 async def _handle_auto_trade_entry(update, query, *, allow_low_balance: bool = False) -> None:
     user_id = update.effective_user.id
+    try:
+        limit_status = await _get_auto_trade_limit_status()
+    except Exception:
+        logger.exception("Could not verify the global Auto Trade session limit")
+        await query.answer(
+            "Auto Trade is temporarily unavailable while we check session "
+            "availability. Please try again shortly.",
+            show_alert=True,
+        )
+        return
+    if limit_status["locked"]:
+        await _show_auto_trade_limit_notice(
+            query,
+            limit_status["retry_after_seconds"],
+        )
+        return
+
+    answer = getattr(query, "answer", None)
+    if answer is not None:
+        await answer()
+
     if not auth_service.get_valid_access_token(str(user_id)):
         await _prompt_connect(update, query)
         return
@@ -1688,9 +1799,15 @@ async def dispatch_callback(update, context) -> None:
         return
 
     query = update.callback_query
-    await query.answer()
-
     data = query.data or ""
+    if data not in {
+        "START_AUTO_TRADE",
+        "AUTO_TRADE_LIMIT_INFO",
+        "AUTO_TRADE_START_SCAN",
+        "AUTO_TRADE_TRADE_ANYWAY",
+    }:
+        await query.answer()
+
     user_id = update.effective_user.id
     user_key = str(user_id)
 
@@ -1818,7 +1935,7 @@ async def dispatch_callback(update, context) -> None:
 
         await query.edit_message_text(
             await build_start_message(user_id, display_name=display_name),
-            reply_markup=TelegramKeyboard.dashboard_keyboard(),
+            reply_markup=await _dashboard_keyboard_with_limit(),
         )
         return
 
@@ -1839,7 +1956,7 @@ async def dispatch_callback(update, context) -> None:
     if data == "START_FAQ":
         await query.edit_message_text(
             handle_faq(),
-            reply_markup=TelegramKeyboard.dashboard_keyboard(),
+            reply_markup=await _dashboard_keyboard_with_limit(),
         )
         return
 
@@ -1847,7 +1964,7 @@ async def dispatch_callback(update, context) -> None:
         await _safe_edit_message(
             query,
             handle_faq(),
-            reply_markup=TelegramKeyboard.menu_keyboard(settings.community_url),
+            reply_markup=await _menu_keyboard_with_limit(),
         )
         return
 
@@ -1860,7 +1977,7 @@ async def dispatch_callback(update, context) -> None:
             username=getattr(update.effective_user, "username", None),
         )
         keyboard = (
-            TelegramKeyboard.menu_keyboard(settings.community_url)
+            await _menu_keyboard_with_limit()
             if auth_service.get_valid_access_token(user_key)
             else TelegramKeyboard.start_keyboard()
         )
@@ -1911,7 +2028,7 @@ async def dispatch_callback(update, context) -> None:
     if data == "START_STATS":
         await query.edit_message_text(
             await handle_stats(user_id),
-            reply_markup=TelegramKeyboard.dashboard_keyboard(),
+            reply_markup=await _dashboard_keyboard_with_limit(),
         )
         return
 
@@ -1997,6 +2114,26 @@ async def dispatch_callback(update, context) -> None:
         await _handle_auto_trade_entry(update, query)
         return
 
+    if data == "AUTO_TRADE_LIMIT_INFO":
+        try:
+            limit_status = await _get_auto_trade_limit_status()
+        except Exception:
+            logger.exception("Could not refresh global Auto Trade session limit")
+            await query.answer(
+                "Auto Trade is temporarily unavailable while we check session "
+                "availability. Please try again shortly.",
+                show_alert=True,
+            )
+            return
+        if limit_status["locked"]:
+            await _show_auto_trade_limit_notice(
+                query,
+                limit_status["retry_after_seconds"],
+            )
+        else:
+            await _handle_auto_trade_entry(update, query)
+        return
+
     if data == "AUTO_TRADE_START_SCAN":
         await _handle_auto_trade_entry(update, query)
         return
@@ -2077,8 +2214,8 @@ async def dispatch_callback(update, context) -> None:
                 )
                 return
 
-            await asyncio.to_thread(
-                trade_history_service.create_session,
+            session_start = await asyncio.to_thread(
+                trade_history_service.start_auto_trade_session,
                 {
                     "session_id": state.session_id,
                     "telegram_user_id": user_id,
@@ -2089,6 +2226,14 @@ async def dispatch_callback(update, context) -> None:
                     "target_winning_cycles": state.max_cycles,
                 },
             )
+            if not session_start["started"]:
+                auto_trade_service.cancel_run(user_id)
+                await _show_auto_trade_limit_notice(
+                    query,
+                    session_start["retry_after_seconds"],
+                    callback_already_answered=True,
+                )
+                return
         except Exception:
             logger.exception("Could not create Supabase Auto Trade session")
             await _safe_edit_message(
@@ -2102,6 +2247,9 @@ async def dispatch_callback(update, context) -> None:
             auto_trade_service.confirm_run(user_id)
         except RuntimeError as exc:
             logger.warning("Auto Trade confirmation failed: %s", exc)
+            failed_state = auto_trade_service.finish_run(user_id, "failed")
+            if failed_state is not None:
+                await _save_session_summary(failed_state, "failed")
             await _safe_edit_message(
                 query,
                 "⚠️ Auto Trade could not start because the session is no longer "
@@ -2287,5 +2435,5 @@ async def dispatch_callback(update, context) -> None:
 
     await query.edit_message_text(
         handle_start(user_id),
-        reply_markup=TelegramKeyboard.dashboard_keyboard(),
+        reply_markup=await _dashboard_keyboard_with_limit(),
     )

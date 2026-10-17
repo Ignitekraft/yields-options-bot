@@ -197,6 +197,75 @@ class MarketDataTests(unittest.TestCase):
         self.assertNotIn("TimeoutError", unavailable)
         self.assertIn("try again shortly", unavailable)
 
+    def test_auto_trade_keyboard_displays_locked_countdown(self):
+        dashboard = TelegramKeyboard.dashboard_keyboard(125)
+        menu = TelegramKeyboard.menu_keyboard("https://t.me/community", 125)
+
+        self.assertEqual(
+            dashboard.inline_keyboard[0][0].text,
+            "🔒 Auto Trade · 2m 05s",
+        )
+        self.assertEqual(
+            dashboard.inline_keyboard[0][0].callback_data,
+            "AUTO_TRADE_LIMIT_INFO",
+        )
+        self.assertEqual(menu.inline_keyboard[0][0].text, "🔒 Auto Trade · 2m 05s")
+        self.assertEqual(
+            menu.inline_keyboard[0][0].callback_data,
+            "AUTO_TRADE_LIMIT_INFO",
+        )
+
+    def test_auto_trade_entry_shows_global_limit_and_does_not_scan(self):
+        update = SimpleNamespace(
+            effective_user=SimpleNamespace(id="limited-user")
+        )
+
+        class FakeQuery:
+            def __init__(self):
+                self.message = SimpleNamespace(
+                    reply_markup=TelegramKeyboard.menu_keyboard(
+                        "https://t.me/community"
+                    )
+                )
+                self.alert = None
+                self.updated_markup = None
+
+            async def answer(self, text, **_kwargs):
+                self.alert = text
+
+            async def edit_message_reply_markup(self, **kwargs):
+                self.updated_markup = kwargs["reply_markup"]
+
+        query = FakeQuery()
+        with patch(
+            "app.bot.callbacks.auth_service.get_valid_access_token",
+            return_value="access-token",
+        ), patch(
+            "app.bot.callbacks._get_auto_trade_limit_status",
+            new=AsyncMock(
+                return_value={
+                    "locked": True,
+                    "retry_after_seconds": 125,
+                }
+            ),
+        ), patch(
+            "app.bot.callbacks._get_trade_token_balance",
+            new=AsyncMock(),
+        ) as token_balance, patch(
+            "app.bot.callbacks._show_auto_trade_setup",
+            new=AsyncMock(),
+        ) as scan_setup:
+            asyncio.run(_handle_auto_trade_entry(update, query))
+
+        self.assertIn("10 sessions in a rolling hour", query.alert)
+        self.assertIn("2m 05s", query.alert)
+        self.assertEqual(
+            query.updated_markup.inline_keyboard[0][0].text,
+            "🔒 Auto Trade · 2m 05s",
+        )
+        token_balance.assert_not_awaited()
+        scan_setup.assert_not_awaited()
+
     def test_unhandled_telegram_errors_use_a_generic_user_message(self):
         reply_text = AsyncMock()
         update = SimpleNamespace(
@@ -2048,6 +2117,9 @@ class MarketDataTests(unittest.TestCase):
         ), patch(
             "app.bot.telegram_bot.build_menu_message",
             new=AsyncMock(return_value="Welcome to Yields"),
+        ), patch(
+            "app.bot.telegram_bot._auto_trade_locked_seconds",
+            new=AsyncMock(return_value=None),
         ):
             asyncio.run(_send_menu_message(update))
 
@@ -2478,7 +2550,10 @@ class MarketDataTests(unittest.TestCase):
             "app.bot.callbacks.trade_history_service",
             SimpleNamespace(
                 ensure_user=lambda *_args, **_kwargs: {"token_balance": 5},
-                create_session=lambda *_args: None,
+                start_auto_trade_session=lambda *_args: {
+                    "started": True,
+                    "retry_after_seconds": 0,
+                },
             ),
         ), patch(
             "app.bot.callbacks._run_auto_trade",
@@ -2488,6 +2563,81 @@ class MarketDataTests(unittest.TestCase):
             asyncio.run(dispatch_callback(update, None))
 
         run_auto_trade_mock.assert_awaited_once()
+
+    def test_confirmation_rechecks_global_limit_before_starting_session(self):
+        class FakeQuery:
+            data = "AUTO_TRADE_CONFIRM"
+
+            def __init__(self):
+                self.markup = None
+                self.message = SimpleNamespace(
+                    reply_markup=None,
+                    reply_text=AsyncMock(),
+                )
+
+            async def answer(self, text="", **_kwargs):
+                self.alert = text
+
+            async def edit_message_reply_markup(self, **kwargs):
+                self.markup = kwargs["reply_markup"]
+
+            async def edit_message_text(self, *_args, **_kwargs):
+                return None
+
+        update = SimpleNamespace(
+            callback_query=FakeQuery(),
+            effective_user=SimpleNamespace(
+                id="limit-race-user",
+                first_name="Test",
+                last_name=None,
+                username=None,
+            ),
+        )
+        run_service = AutoTradeService()
+        state = run_service.start_run(
+            "limit-race-user",
+            "step_100",
+            "BULLISH",
+            10.0,
+            account_mode="demo",
+        )
+        start_session = Mock(
+            return_value={
+                "started": False,
+                "retry_after_seconds": 321,
+            }
+        )
+        with patch(
+            "app.bot.callbacks.auto_trade_service",
+            run_service,
+        ), patch(
+            "app.bot.callbacks.auth_service.get_valid_access_token",
+            return_value="access-token",
+        ), patch(
+            "app.bot.callbacks.account_mode_service.get_mode",
+            return_value="demo",
+        ), patch(
+            "app.bot.callbacks.trade_history_service",
+            SimpleNamespace(
+                ensure_user=lambda *_args, **_kwargs: {"token_balance": 10},
+                start_auto_trade_session=start_session,
+            ),
+        ), patch(
+            "app.bot.callbacks._run_auto_trade",
+            new=AsyncMock(),
+        ) as run_auto_trade:
+            asyncio.run(dispatch_callback(update, None))
+
+        self.assertEqual(state.status, "cancelled")
+        limit_notice = update.callback_query.message.reply_text.await_args.args[0]
+        self.assertIn("10 sessions in a rolling hour", limit_notice)
+        self.assertIn("5m 21s", limit_notice)
+        self.assertEqual(
+            update.callback_query.markup.inline_keyboard[0][0].callback_data,
+            "AUTO_TRADE_LIMIT_INFO",
+        )
+        start_session.assert_called_once()
+        run_auto_trade.assert_not_awaited()
 
     def test_confirm_callback_blocks_when_token_balance_is_zero(self):
         class FakeQuery:
@@ -2623,6 +2773,14 @@ class MarketDataTests(unittest.TestCase):
         )
         query = SimpleNamespace()
         with patch(
+            "app.bot.callbacks._get_auto_trade_limit_status",
+            new=AsyncMock(
+                return_value={
+                    "locked": False,
+                    "retry_after_seconds": 0,
+                }
+            ),
+        ), patch(
             "app.bot.callbacks.auth_service.get_valid_access_token",
             return_value=None,
         ), patch(
@@ -2664,6 +2822,9 @@ class MarketDataTests(unittest.TestCase):
         ), patch(
             "app.bot.telegram_bot.build_menu_message",
             new=AsyncMock(return_value="Connect your Deriv account"),
+        ), patch(
+            "app.bot.telegram_bot._auto_trade_locked_seconds",
+            new=AsyncMock(return_value=None),
         ):
             asyncio.run(_send_menu_message(update))
 
@@ -2983,6 +3144,14 @@ class MarketDataTests(unittest.TestCase):
         )
         query = SimpleNamespace()
         with patch(
+            "app.bot.callbacks._get_auto_trade_limit_status",
+            new=AsyncMock(
+                return_value={
+                    "locked": False,
+                    "retry_after_seconds": 0,
+                }
+            ),
+        ), patch(
             "app.bot.callbacks.auth_service.get_valid_access_token",
             return_value=None,
         ), patch(
@@ -3002,6 +3171,14 @@ class MarketDataTests(unittest.TestCase):
         with patch(
             "app.bot.callbacks.auth_service.get_valid_access_token",
             return_value="access-token",
+        ), patch(
+            "app.bot.callbacks._get_auto_trade_limit_status",
+            new=AsyncMock(
+                return_value={
+                    "locked": False,
+                    "retry_after_seconds": 0,
+                }
+            ),
         ), patch(
             "app.bot.callbacks._get_trade_token_balance",
             new=AsyncMock(return_value=0),
@@ -3300,7 +3477,10 @@ class MarketDataTests(unittest.TestCase):
             "app.bot.callbacks.trade_history_service",
             SimpleNamespace(
                 ensure_user=lambda *_args, **_kwargs: {"token_balance": 50},
-                create_session=lambda *_args, **_kwargs: None,
+                start_auto_trade_session=lambda *_args, **_kwargs: {
+                    "started": True,
+                    "retry_after_seconds": 0,
+                },
             ),
         ), patch(
             "app.bot.callbacks._run_auto_trade",
@@ -3373,6 +3553,14 @@ class MarketDataTests(unittest.TestCase):
         ), patch(
             "app.bot.callbacks.auth_service.get_valid_access_token",
             return_value="access-token",
+        ), patch(
+            "app.bot.callbacks._get_auto_trade_limit_status",
+            new=AsyncMock(
+                return_value={
+                    "locked": False,
+                    "retry_after_seconds": 0,
+                }
+            ),
         ), patch(
             "app.bot.callbacks.trade_history_service",
             SimpleNamespace(
@@ -3644,6 +3832,76 @@ class MarketDataTests(unittest.TestCase):
         self.assertEqual(
             json.loads(requests[1].content),
             {"p_telegram_user_id": "12345"},
+        )
+
+    def test_global_auto_trade_session_limit_uses_shared_supabase_rpcs(self):
+        requests = []
+        responses = iter(
+            [
+                {
+                    "sessions_started": 10,
+                    "limit": 10,
+                    "locked": True,
+                    "retry_after_seconds": 125,
+                },
+                {
+                    "started": True,
+                    "sessions_started": 10,
+                    "limit": 10,
+                    "retry_after_seconds": 0,
+                },
+            ]
+        )
+
+        def respond(request):
+            requests.append(request)
+            return httpx.Response(
+                200,
+                json=next(responses),
+                request=request,
+            )
+
+        service = TradeHistoryService(
+            supabase_url="https://project.supabase.co",
+            service_role_key="test-service-role-key",
+            transport=httpx.MockTransport(respond),
+        )
+        status = service.get_auto_trade_session_limit_status()
+        started = service.start_auto_trade_session(
+            {
+                "session_id": "11111111-1111-4111-8111-111111111111",
+                "telegram_user_id": "12345",
+                "account_mode": "DEMO",
+                "market_symbol": "step_100",
+                "direction": "bullish",
+                "initial_stake": 12.5,
+                "target_winning_cycles": 5,
+            }
+        )
+
+        self.assertTrue(status["locked"])
+        self.assertEqual(status["retry_after_seconds"], 125)
+        self.assertTrue(started["started"])
+        self.assertTrue(
+            requests[0].url.path.endswith(
+                "/rpc/get_auto_trade_session_limit_status"
+            )
+        )
+        self.assertEqual(json.loads(requests[0].content), {})
+        self.assertTrue(
+            requests[1].url.path.endswith("/rpc/start_auto_trade_session")
+        )
+        self.assertEqual(
+            json.loads(requests[1].content),
+            {
+                "p_session_id": "11111111-1111-4111-8111-111111111111",
+                "p_telegram_user_id": "12345",
+                "p_account_mode": "demo",
+                "p_market_symbol": "step_100",
+                "p_direction": "BULLISH",
+                "p_initial_stake": 12.5,
+                "p_target_winning_cycles": 5,
+            },
         )
 
     def test_telegram_profile_sync_clears_removed_fields_and_encrypts_payout_details(self):

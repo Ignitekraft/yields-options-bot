@@ -11,6 +11,22 @@ class TelegramKeyboard:
     """Inline keyboard layouts for the Yields dashboard and Auto Trade flow."""
 
     @staticmethod
+    def _auto_trade_button(locked_seconds: int | None = None) -> tuple[str, str]:
+        if locked_seconds is None:
+            return ("🤖 Auto Trade", "START_AUTO_TRADE")
+        seconds = max(0, int(locked_seconds))
+        minutes, remaining_seconds = divmod(seconds, 60)
+        if minutes >= 60:
+            hours, minutes = divmod(minutes, 60)
+            countdown = f"{hours}h {minutes:02d}m"
+        else:
+            countdown = f"{minutes}m {remaining_seconds:02d}s"
+        return (
+            f"🔒 Auto Trade · {countdown}",
+            "AUTO_TRADE_LIMIT_INFO",
+        )
+
+    @staticmethod
     def _keyboard(rows: list[list[tuple[str, str]]]) -> object:
         if InlineKeyboardMarkup is None:
             return [[label for label, _ in row] for row in rows]
@@ -35,10 +51,10 @@ class TelegramKeyboard:
         )
 
     @staticmethod
-    def dashboard_keyboard() -> object:
+    def dashboard_keyboard(locked_seconds: int | None = None) -> object:
         return TelegramKeyboard._keyboard(
             [
-                [("🤖 Auto Trade", "START_AUTO_TRADE")],
+                [TelegramKeyboard._auto_trade_button(locked_seconds)],
                 [("💰 Balance", "START_BALANCE"), ("📊 Status", "START_STATUS")],
                 [("❓ FAQ", "START_FAQ"), ("📈 Stats", "START_STATS")],
                 [("⚙️ Account Mode", "START_SETTINGS"), ("🔌 Disconnect", "START_LOGOUT")],
@@ -46,9 +62,18 @@ class TelegramKeyboard:
         )
 
     @staticmethod
-    def menu_keyboard(community_url: str) -> object:
+    def menu_keyboard(
+        community_url: str,
+        locked_seconds: int | None = None,
+    ) -> object:
         rows = [
-            [("🚀 Auto Trade", "START_AUTO_TRADE")],
+            [
+                (
+                    ("🚀 Auto Trade", "START_AUTO_TRADE")
+                    if locked_seconds is None
+                    else TelegramKeyboard._auto_trade_button(locked_seconds)
+                )
+            ],
             [("💎 Get Tokens", "MENU_GET_TOKENS"), ("🌍 Community", community_url)],
             [("❓ Faq", "MENU_FAQ")],
             [("🎁 Invite", "MENU_INVITE")],

@@ -269,6 +269,45 @@ class TradeHistoryService:
             raise RuntimeError("SUPABASE_REFERRAL_SUMMARY_RESPONSE_INVALID")
         return result
 
+    def get_auto_trade_session_limit_status(self) -> dict[str, Any]:
+        result = self._request(
+            "POST",
+            "rpc/get_auto_trade_session_limit_status",
+            payload={},
+        ).json()
+        if (
+            not isinstance(result, dict)
+            or not isinstance(result.get("locked"), bool)
+            or not isinstance(result.get("retry_after_seconds"), int)
+        ):
+            raise RuntimeError("SUPABASE_AUTO_TRADE_LIMIT_RESPONSE_INVALID")
+        return result
+
+    def start_auto_trade_session(
+        self,
+        session: dict[str, Any],
+    ) -> dict[str, Any]:
+        result = self._request(
+            "POST",
+            "rpc/start_auto_trade_session",
+            payload={
+                "p_session_id": str(session["session_id"]),
+                "p_telegram_user_id": str(session["telegram_user_id"]),
+                "p_account_mode": str(session["account_mode"]).lower(),
+                "p_market_symbol": str(session["market_symbol"]),
+                "p_direction": str(session["direction"]).upper(),
+                "p_initial_stake": round(float(session["initial_stake"]), 2),
+                "p_target_winning_cycles": int(session["target_winning_cycles"]),
+            },
+        ).json()
+        if (
+            not isinstance(result, dict)
+            or not isinstance(result.get("started"), bool)
+            or not isinstance(result.get("retry_after_seconds"), int)
+        ):
+            raise RuntimeError("SUPABASE_AUTO_TRADE_START_RESPONSE_INVALID")
+        return result
+
     def record_verified_token_purchase(
         self,
         *,

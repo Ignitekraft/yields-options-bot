@@ -4,6 +4,7 @@ import asyncio
 import logging
 
 from app.bot.callbacks import (
+    _auto_trade_locked_seconds,
     dispatch_callback,
     handle_admin_mark_failed_command,
     handle_admin_mark_paid_command,
@@ -65,7 +66,10 @@ async def _send_menu_message(update: Update) -> None:
         username=getattr(user, "username", None),
     )
     keyboard = (
-        TelegramKeyboard.menu_keyboard(settings.community_url)
+        TelegramKeyboard.menu_keyboard(
+            settings.community_url,
+            locked_seconds=await _auto_trade_locked_seconds(),
+        )
         if auth_service.get_valid_access_token(str(user.id))
         else TelegramKeyboard.start_keyboard()
     )
@@ -219,7 +223,12 @@ def create_application():
         await update.message.reply_text(await handle_balance(user_id), reply_markup=TelegramKeyboard.status_keyboard())
 
     async def faq(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await update.message.reply_text(handle_faq(), reply_markup=TelegramKeyboard.dashboard_keyboard())
+        await update.message.reply_text(
+            handle_faq(),
+            reply_markup=TelegramKeyboard.dashboard_keyboard(
+                locked_seconds=await _auto_trade_locked_seconds(),
+            ),
+        )
 
     async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await _send_stats_message(update)
@@ -242,7 +251,9 @@ def create_application():
             )
         await update.message.reply_text(
             result,
-            reply_markup=TelegramKeyboard.dashboard_keyboard(),
+            reply_markup=TelegramKeyboard.dashboard_keyboard(
+                locked_seconds=await _auto_trade_locked_seconds(),
+            ),
         )
 
     application.add_handler(CommandHandler("start", start))
