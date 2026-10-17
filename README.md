@@ -48,10 +48,17 @@ momentum are included as context instead of hard vetoes. The score is an
 indicator balance, not a probability or guarantee of a profitable 30-second
 contract. Live data errors stop a market scan instead of producing a signal
 from sample data. Public market data uses Deriv's unauthenticated public
-WebSocket; HTTP 429 handshake responses receive bounded retries and honor
-Deriv's `Retry-After` header. Repeated rate limits stop safely rather than
-continuing without a verified Deriv connection. The Auto Trade product flow
-still requires the user to connect an account before scanning or trading.
+WebSocket. Deriv's documented WebSocket request budgets and REST limits are
+enforced centrally. Connection handshakes also have a separate four-second
+minimum interval with jitter as a defensive measure; this is not a published
+Deriv handshake limit. A Deriv HTTP 429 pauses outbound calls globally and uses
+bounded exponential retries with `Retry-After` support for WebSocket
+handshakes. Repeated rate limits stop safely rather than continuing without a
+verified Deriv connection. This in-memory limiter covers one bot process; if
+deploying multiple workers or replicas, use a shared distributed limiter before
+increasing traffic. Deriv may still impose additional or changing limits. The
+Auto Trade product flow still requires the user to connect an account before
+scanning or trading.
 The scan requests tick and candle history over one public WebSocket connection
 for the configured markets. The stake buttons use 0.1%, 0.5%, or 1% of the
 selected account balance, calculated to the nearest cent. Users can also
@@ -59,6 +66,37 @@ choose Custom amount and enter a stake directly; the amount must be positive,
 have no more than two decimal places, and not exceed the selected account
 balance. The selected market and direction remain pinned from analysis through
 confirmation.
+
+## Deriv rate limiting
+
+Deriv's [limits guide](https://developers.deriv.com/docs/limits/) describes
+shared WebSocket request budgets and REST limits, and its
+[best-practices guide](https://developers.deriv.com/docs/best-practices/)
+recommends reusing connections, pacing bursts, and backing off after rate-limit
+responses. The bot serializes outbound WebSocket connection starts and
+REST requests through process-wide rolling request budgets:
+
+| WebSocket request group | Per minute | Per hour |
+| --- | ---: | ---: |
+| `proposal`, `proposal_open_contract`, `buy`, `sell` (shared) | 360 | 14,400 |
+| `balance`, `statement` (shared) | 100 | 2,000 |
+| `portfolio`, `profit_table` (shared) | 30 | 1,500 |
+| All other calls | 220 | 14,400 |
+
+REST calls are also held to 300 per minute and 1,000 per 10 minutes per bot
+server IP, plus 80 per minute per logged-in Deriv account. WebSocket `ping`
+frames are outside those request budgets. New WebSocket handshakes are spaced
+at least four seconds apart as an additional defensive throttle; Deriv's
+published request-budget table does not specify a numeric handshake quota.
+A 429 pauses all outbound Deriv requests for the provider's `Retry-After`
+period when supplied, otherwise for increasing backoff delays.
+
+The limiter is intentionally not a claim that a 429 can never occur: Deriv can
+change limits or apply additional shared limits, and an in-memory limiter
+cannot coordinate multiple bot processes. Run one bot process, or put a shared
+distributed limiter in front of Deriv traffic before scaling to multiple
+workers or replicas. Keep the handshake throttle conservative unless Deriv
+confirms the applicable connection limit.
 
 ## Setup
 

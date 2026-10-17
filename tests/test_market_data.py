@@ -16,6 +16,9 @@ import httpx
 from cryptography.fernet import Fernet
 
 from app.bot.callbacks import (
+    _auto_trade_failure_message,
+    _auto_trade_start_failure_message,
+    _payout_failure_reason_for_user,
     _handle_auto_trade_entry,
     _run_auto_trade,
     handle_custom_stake_input,
@@ -30,6 +33,7 @@ from app.bot.callbacks import (
     execute_trade,
 )
 from app.bot.handlers import (
+    _friendly_market_issue,
     build_menu_message,
     build_auto_trade_setup,
     build_start_message,
@@ -41,7 +45,11 @@ from app.bot.handlers import (
     handle_start,
 )
 from app.bot.keyboards import TelegramKeyboard
-from app.bot.telegram_bot import _send_menu_message, _send_tokens_message
+from app.bot.telegram_bot import (
+    _handle_unexpected_error,
+    _send_menu_message,
+    _send_tokens_message,
+)
 from app.config import settings
 from app.main import app, deriv_oauth_callback, verify_whop_webhook_signature
 from app.models.market import MarketSnapshot
@@ -114,6 +122,137 @@ def _sample_one_minute_candles(count: int = 60) -> list[dict]:
 
 
 class MarketDataTests(unittest.TestCase):
+    def setUp(self):
+        from app.services.deriv.websocket_connection import (
+            _DerivRequestLimiter,
+        )
+
+        limiter = _DerivRequestLimiter(4)
+        limiter.interval_seconds = 0
+        self.rate_limiter_patch = patch(
+            "app.services.deriv.websocket_connection._deriv_request_limiter",
+            limiter,
+        )
+        self.rate_limiter_patch.start()
+        self.addCleanup(self.rate_limiter_patch.stop)
+
+    def test_auto_trade_failure_messages_are_user_friendly(self):
+        rate_limit_message = _auto_trade_failure_message(
+            "rejected",
+            "RateLimit: Too many requests",
+        )
+        payout_message = _auto_trade_failure_message(
+            "rejected",
+            "ContractBuyValidationError: maximum payout exceeded",
+            "ContractBuyValidationError",
+        )
+        generic_message = _auto_trade_failure_message(
+            "rejected",
+            "INVALID_CONTRACT_SPECIFICATION",
+        )
+
+        self.assertIn("temporarily limiting requests", rate_limit_message)
+        self.assertNotIn("RateLimit", rate_limit_message)
+        self.assertIn("maximum payout", payout_message)
+        self.assertNotIn("ContractBuyValidationError", payout_message)
+        self.assertNotIn("INVALID_CONTRACT_SPECIFICATION", generic_message)
+        self.assertIn("stopped safely", generic_message)
+
+    def test_auto_trade_start_failure_messages_hide_internal_codes(self):
+        duplicate = _auto_trade_start_failure_message(
+            RuntimeError("AUTO_TRADE_ALREADY_RUNNING")
+        )
+        unavailable = _auto_trade_start_failure_message(
+            RuntimeError("AUTO_TRADE_NOT_CONFIRMABLE")
+        )
+
+        self.assertIn("already active", duplicate)
+        self.assertNotIn("AUTO_TRADE_ALREADY_RUNNING", duplicate)
+        self.assertIn("could not start", unavailable)
+        self.assertNotIn("AUTO_TRADE_NOT_CONFIRMABLE", unavailable)
+
+    def test_payout_failure_messages_hide_technical_details(self):
+        technical = _payout_failure_reason_for_user(
+            "HTTP 502: PaymentProviderError at https://example.test/payout"
+        )
+        readable = _payout_failure_reason_for_user(
+            "The account name does not match the bank records."
+        )
+
+        self.assertNotIn("HTTP 502", technical)
+        self.assertNotIn("PaymentProviderError", technical)
+        self.assertIn("payment partner could not complete", technical)
+        self.assertEqual(readable, "The account name does not match the bank records.")
+
+    def test_market_scan_failure_reasons_are_user_friendly(self):
+        limited = _friendly_market_issue(
+            "Market data request failed: WebSocket handshake rejected (HTTP 429)"
+        )
+        unavailable = _friendly_market_issue(
+            "Market data request failed: TimeoutError"
+        )
+
+        self.assertIn("temporarily limiting", limited)
+        self.assertNotIn("HTTP 429", limited)
+        self.assertNotIn("TimeoutError", unavailable)
+        self.assertIn("try again shortly", unavailable)
+
+    def test_unhandled_telegram_errors_use_a_generic_user_message(self):
+        reply_text = AsyncMock()
+        update = SimpleNamespace(
+            effective_message=SimpleNamespace(reply_text=reply_text),
+            callback_query=None,
+        )
+        context = SimpleNamespace(
+            error=RuntimeError("DATABASE_PASSWORD=private"),
+        )
+
+        asyncio.run(_handle_unexpected_error(update, context))
+
+        shown_message = reply_text.await_args.args[0]
+        self.assertIn("could not be completed", shown_message)
+        self.assertNotIn("DATABASE_PASSWORD", shown_message)
+        self.assertNotIn("private", shown_message)
+
+    def test_oauth_errors_are_friendly_and_not_reflected_as_html(self):
+        denied = asyncio.run(
+            deriv_oauth_callback(
+                code=None,
+                state=None,
+                error='<script>alert("x")</script>',
+            )
+        )
+        self.assertIn("connection was not completed", denied)
+        self.assertNotIn("<script>", denied)
+
+        with (
+            patch(
+                "app.main.auth_service.get_pending_user_for_state",
+                return_value="oauth-failure-user",
+            ),
+            patch("app.main.auth_service.validate_state", return_value=True),
+            patch(
+                "app.main.auth_service.exchange_oauth_code",
+                side_effect=RuntimeError("private provider response"),
+            ),
+        ):
+            failed_exchange = asyncio.run(
+                deriv_oauth_callback(
+                    code="valid-code",
+                    state="valid-state",
+                    error=None,
+                )
+            )
+
+        self.assertIn("could not complete the connection", failed_exchange)
+        self.assertNotIn("private provider response", failed_exchange)
+        self.jitter_patch = patch(
+            "app.services.deriv.websocket_connection.random.uniform",
+            return_value=0.0,
+        )
+        self.jitter_patch.start()
+        self.addCleanup(self.jitter_patch.stop)
+
     def test_websocket_handshake_retries_http_429_with_retry_after(self):
         class RateLimited(Exception):
             def __init__(self):
@@ -129,23 +268,95 @@ class MarketDataTests(unittest.TestCase):
             with patch(
                 "app.services.deriv.websocket_connection.asyncio.sleep",
                 sleep,
+            ), patch(
+                "app.services.deriv.websocket_connection.random.uniform",
+                return_value=0.0,
             ):
                 result = await connect_async_with_retry(connect, "wss://example.com")
             self.assertIs(result, websocket)
             self.assertEqual(connect.await_count, 2)
-            sleep.assert_awaited_once_with(0.0)
+            sleep.assert_not_awaited()
 
         async def check_sync_retry():
             connection = object()
             connect = Mock(side_effect=[RateLimited(), connection])
-            with patch("app.services.deriv.websocket_connection.time.sleep") as sleep:
+            with patch(
+                "app.services.deriv.websocket_connection.random.uniform",
+                return_value=0.0,
+            ), patch(
+                "app.services.deriv.websocket_connection.time.sleep"
+            ) as sleep:
                 result = connect_sync_with_retry(connect, "wss://example.com")
             self.assertIs(result, connection)
             self.assertEqual(connect.call_count, 2)
-            sleep.assert_called_once_with(0.0)
+            sleep.assert_not_called()
 
         asyncio.run(check_async_retry())
         asyncio.run(check_sync_retry())
+
+    def test_deriv_connection_starts_are_paced_across_concurrent_calls(self):
+        from app.services.deriv import websocket_connection
+
+        async def check_pacing():
+            timestamps = []
+
+            async def connect(_url):
+                timestamps.append(time.monotonic())
+                return object()
+
+            limiter = websocket_connection._DerivRequestLimiter(4)
+            limiter.interval_seconds = 0.02
+            with patch.object(
+                websocket_connection,
+                "_deriv_request_limiter",
+                limiter,
+            ), patch(
+                "app.services.deriv.websocket_connection.random.uniform",
+                return_value=0.0,
+            ):
+                await asyncio.gather(
+                    connect_async_with_retry(connect, "wss://example.com/one"),
+                    connect_async_with_retry(connect, "wss://example.com/two"),
+                )
+
+            self.assertEqual(len(timestamps), 2)
+            self.assertGreaterEqual(timestamps[1] - timestamps[0], 0.015)
+
+        asyncio.run(check_pacing())
+
+    def test_deriv_request_limiter_enforces_documented_shared_budgets(self):
+        from app.services.deriv.websocket_connection import (
+            REST_ACCOUNT_REQUEST_LIMITS,
+            REST_IP_REQUEST_LIMITS,
+            WEBSOCKET_REQUEST_LIMITS,
+            _DerivRequestLimiter,
+            _websocket_request_group,
+        )
+
+        limiter = _DerivRequestLimiter(0)
+        scopes = (("websocket:trading", ((60.0, 2),)),)
+        with patch(
+            "app.services.deriv.websocket_connection.time.monotonic",
+            return_value=100.0,
+        ):
+            self.assertEqual(limiter._reserve_budget(scopes), 0.0)
+            self.assertEqual(limiter._reserve_budget(scopes), 0.0)
+            self.assertEqual(limiter._reserve_budget(scopes), 60.0)
+
+        self.assertEqual(WEBSOCKET_REQUEST_LIMITS["trading"], ((60.0, 360), (3600.0, 14400)))
+        self.assertEqual(WEBSOCKET_REQUEST_LIMITS["account"], ((60.0, 100), (3600.0, 2000)))
+        self.assertEqual(WEBSOCKET_REQUEST_LIMITS["portfolio"], ((60.0, 30), (3600.0, 1500)))
+        self.assertEqual(WEBSOCKET_REQUEST_LIMITS["other"], ((60.0, 220), (3600.0, 14400)))
+        self.assertEqual(REST_IP_REQUEST_LIMITS, ((60.0, 300), (600.0, 1000)))
+        self.assertEqual(REST_ACCOUNT_REQUEST_LIMITS, ((60.0, 80),))
+        self.assertEqual(_websocket_request_group({"proposal": 1}), "trading")
+        self.assertEqual(
+            _websocket_request_group({"proposal_open_contract": 1}),
+            "trading",
+        )
+        self.assertEqual(_websocket_request_group({"balance": 1}), "account")
+        self.assertEqual(_websocket_request_group({"portfolio": 1}), "portfolio")
+        self.assertEqual(_websocket_request_group({"ticks": "STPRNG"}), "other")
 
     def test_market_data_normalizes_tick_payload(self):
         service = MarketDataService()
@@ -2225,7 +2436,8 @@ class MarketDataTests(unittest.TestCase):
             setup = build_auto_trade_setup("stale-data-user")
 
         self.assertEqual(setup["symbol"], "NO_SETUP")
-        self.assertIn("42 seconds old", setup["reasoning"])
+        self.assertIn("prices are out of date", setup["reasoning"])
+        self.assertNotIn("42 seconds old", setup["reasoning"])
 
     def test_confirmation_callback_executes_trade(self):
         class FakeQuery:
@@ -4158,13 +4370,14 @@ class MarketDataTests(unittest.TestCase):
         self.assertEqual(market_data.requested_counts, [1000] * len(snapshots))
         self.assertEqual(snapshots[0].data_quality, "unavailable")
         self.assertIn(
-            "Market data request failed",
+            "Live market data could not be retrieved",
             snapshots[0].indicators["signal_reason"],
         )
         self.assertTrue(
             all(snapshot.data_quality == "good" for snapshot in snapshots[1:])
         )
         self.assertIn("TimeoutError", snapshots[0].indicators["data_error"])
+        self.assertNotIn("TimeoutError", snapshots[0].indicators["signal_reason"])
 
     def test_all_market_data_failures_are_reported_as_one_scan_failure(self):
         failed_snapshots = [
@@ -4200,12 +4413,13 @@ class MarketDataTests(unittest.TestCase):
         self.assertEqual(setup["markets_scanned"], 5)
         self.assertEqual(setup["markets_available"], 0)
         self.assertEqual(len(setup["market_issues"]), 5)
-        self.assertIn("Step 500", setup["reasoning"])
+        self.assertIn("Live market data could not be retrieved", setup["reasoning"])
         self.assertIn("any of the 5 configured markets", message)
         self.assertIn("Step 100", message)
         self.assertIn("Step 500", message)
-        self.assertIn("WebSocket handshake rejected (HTTP 520)", message)
-        self.assertIn("Shared failure", message)
+        self.assertIn("Live market data could not be retrieved", message)
+        self.assertNotIn("HTTP 520", message)
+        self.assertNotIn("Shared failure", message)
         self.assertNotIn("Step 100: Step 100", message)
         self.assertNotIn("RSI(7): unavailable", message)
 

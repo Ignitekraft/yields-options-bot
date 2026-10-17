@@ -114,6 +114,41 @@ async def _send_tokens_message(update: Update) -> None:
         await update.message.reply_text(text, reply_markup=keyboard)
 
 
+async def _handle_unexpected_error(update, context) -> None:
+    error = getattr(context, "error", None)
+    if isinstance(error, BaseException):
+        logger.error(
+            "Unhandled Telegram update failure",
+            exc_info=(type(error), error, error.__traceback__),
+        )
+    else:
+        logger.error("Unhandled Telegram update failure without exception details")
+
+    message = getattr(update, "effective_message", None)
+    reply_text = getattr(message, "reply_text", None)
+    if reply_text is not None:
+        try:
+            await reply_text(
+                "⚠️ Sorry, that request could not be completed. Please try "
+                "again. If you were placing a trade, check your Deriv account "
+                "before retrying."
+            )
+            return
+        except Exception:
+            logger.exception("Could not send Telegram error notification")
+
+    query = getattr(update, "callback_query", None)
+    answer = getattr(query, "answer", None)
+    if answer is not None:
+        try:
+            await answer(
+                "Sorry, that request could not be completed. Please try again.",
+                show_alert=True,
+            )
+        except Exception:
+            logger.exception("Could not answer failed Telegram callback")
+
+
 def create_application():
     """Create the Telegram bot application if the library and token are available."""
     if Application is None:
@@ -250,4 +285,5 @@ def create_application():
                 handle_custom_stake_input,
             )
         )
+    application.add_error_handler(_handle_unexpected_error)
     return application

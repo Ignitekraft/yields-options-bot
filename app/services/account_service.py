@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from typing import Any
 from urllib.parse import urlparse
 
@@ -9,10 +10,17 @@ import httpx
 import websockets
 
 from app.services.auth_service import AuthService
-from app.services.deriv.websocket_connection import connect_async_with_retry
+from app.services.deriv.websocket_connection import (
+    connect_async_with_retry,
+    defer_deriv_requests_after_rate_limit,
+    deriv_account_scope,
+    send_deriv_websocket_request,
+    wait_for_deriv_request_for_account_async,
+)
 
 
 OPTIONS_ACCOUNTS_URL = "https://api.derivws.com/trading/v1/options/accounts"
+logger = logging.getLogger(__name__)
 
 
 class AccountService:
@@ -118,6 +126,9 @@ class AccountService:
         if not access_token:
             raise ValueError("DERIV_NOT_AUTHENTICATED")
 
+        await wait_for_deriv_request_for_account_async(
+            deriv_account_scope(access_token)
+        )
         async with httpx.AsyncClient(timeout=20.0) as client:
             response = await client.get(
                 OPTIONS_ACCOUNTS_URL,
@@ -128,6 +139,13 @@ class AccountService:
             )
 
         if response.status_code != 200:
+            if response.status_code == 429:
+                rate_limit_error = httpx.HTTPStatusError(
+                    "Deriv account-list request was rate-limited",
+                    request=response.request,
+                    response=response,
+                )
+                defer_deriv_requests_after_rate_limit(rate_limit_error)
             details = (response.text or "")[:300].replace("\n", " ")
             raise ValueError(
                 f"OPTIONS_ACCOUNTS_REQUEST_FAILED:"
@@ -246,6 +264,9 @@ class AccountService:
 
         endpoint = f"{OPTIONS_ACCOUNTS_URL}/{account_id}/otp"
 
+        await wait_for_deriv_request_for_account_async(
+            deriv_account_scope(access_token)
+        )
         async with httpx.AsyncClient(timeout=20.0) as client:
             response = await client.post(
                 endpoint,
@@ -258,6 +279,13 @@ class AccountService:
 
         if response.status_code != 200:
             details = (response.text or "")[:300].replace("\n", " ")
+            if response.status_code == 429:
+                rate_limit_error = httpx.HTTPStatusError(
+                    "Deriv account OTP request was rate-limited",
+                    request=response.request,
+                    response=response,
+                )
+                defer_deriv_requests_after_rate_limit(rate_limit_error)
             raise ValueError(
                 f"OTP_REQUEST_REJECTED:"
                 f"HTTP_{response.status_code}:{details}"
@@ -308,14 +336,13 @@ class AccountService:
             ping_interval=20,
         )
         async with connection as websocket:
-            await websocket.send(
-                json.dumps(
-                    {
-                        "balance": 1,
-                        "subscribe": 1,
-                        "req_id": 1,
-                    }
-                )
+            await send_deriv_websocket_request(
+                websocket,
+                {
+                    "balance": 1,
+                    "subscribe": 1,
+                    "req_id": 1,
+                },
             )
 
             deadline = asyncio.get_running_loop().time() + 20
@@ -446,7 +473,10 @@ class AccountService:
             except Exception:
                 # Preserve the account-list balance if the optional refresh
                 # fails; do not change the account's identity or mode.
-                pass
+                logger.exception(
+                    "Could not refresh live Deriv balance for account %s",
+                    account["account_id"],
+                )
 
             result[mode] = entry
 

@@ -43,6 +43,35 @@ TOKEN_PACKAGES = {
 }
 
 
+def _friendly_market_issue(reason: object) -> str:
+    message = str(reason or "").strip()
+    lowered = message.lower()
+    if any(
+        marker in lowered
+        for marker in ("rate limit", "too many requests", "http 429", "http_429")
+    ):
+        return (
+            "Deriv is temporarily limiting market-data connections. "
+            "Please wait a little and try again."
+        )
+    if "stale" in lowered or "old." in lowered or "future" in lowered:
+        return (
+            "Market prices are out of date. "
+            "Please wait for fresh data and try again."
+        )
+    if "not enough live history" in lowered:
+        return (
+            "There isn't enough recent market history to analyze this market yet."
+        )
+    if "no deriv tick history" in lowered:
+        return "No recent live prices were available for this market."
+    if "indicator warm-up" in lowered:
+        return "More recent market history is needed to analyze this market."
+    if "volatility baseline" in lowered:
+        return "Market conditions could not be assessed yet."
+    return "Live market data could not be retrieved. Please try again shortly."
+
+
 def _format_currency(
     value: float | int | str | None,
     currency: str = "USD",
@@ -319,7 +348,7 @@ def build_auto_trade_setup(
     market_issues = [
         {
             "display_name": snapshot.display_name,
-            "reason": str(
+            "reason": _friendly_market_issue(
                 (snapshot.indicators or {}).get("signal_reason")
                 or "Market data could not be analyzed."
             ),
@@ -666,19 +695,18 @@ def handle_auto_trade_start(
             str(item["reason"]) for item in issues
         }
         if len(distinct_reasons) == 1:
-            shared_reason = html.escape(next(iter(distinct_reasons)))
+            shared_reason = html.escape(
+                _friendly_market_issue(next(iter(distinct_reasons)))
+            )
             affected_markets = ", ".join(
                 html.escape(str(item["display_name"]))
                 for item in issues
             )
-            details = (
-                f"Shared failure: {shared_reason}\n"
-                f"Affected markets: {affected_markets}"
-            )
+            details = f"{shared_reason}\nAffected markets: {affected_markets}"
         else:
             issue_lines = [
                 f"• {html.escape(str(item['display_name']))}: "
-                f"{html.escape(str(item['reason']))}"
+                f"{html.escape(_friendly_market_issue(item['reason']))}"
                 for item in issues
             ]
             details = "\n".join(issue_lines)
@@ -800,7 +828,7 @@ def handle_auto_trade_start(
     if markets_scanned and market_issues:
         issue_lines = [
             f"• {html.escape(str(item['display_name']))}: "
-            f"{html.escape(str(item['reason']))}"
+            f"{html.escape(_friendly_market_issue(item['reason']))}"
             for item in market_issues
         ]
         availability_note = (

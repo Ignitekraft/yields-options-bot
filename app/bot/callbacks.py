@@ -585,7 +585,10 @@ async def execute_trade(user_id: str | int, state=None) -> dict:
         except Exception:
             state.status = "rejected"
             logger.exception("Could not reserve a Yields Token before purchase")
-            return {"status": "token_service_error", "reason": str(exc)}
+            return {
+                "status": "token_service_error",
+                "reason": "TOKEN_RESERVATION_FAILED",
+            }
 
         if not reservation.get("ok"):
             state.status = "rejected"
@@ -964,7 +967,8 @@ async def _notify_withdrawal_user(context, withdrawal: dict) -> None:
         if withdrawal["status"] == "paid"
         else (
             "⚠️ Your referral payout could not be completed.\n\n"
-            f"Reason: {withdrawal.get('failure_reason')}\n\n"
+            f"Reason: "
+            f"{_payout_failure_reason_for_user(withdrawal.get('failure_reason'))}\n\n"
             "Your earnings have been returned to your available balance. "
             "Update your payout details and submit a new request when ready."
         )
@@ -1042,6 +1046,63 @@ def _cycle_report_text(
     if pending_step:
         sections.append(f"⚡ Cycle {cycle} {pending_step}")
     return "\n\n".join(sections)
+
+
+def _auto_trade_failure_message(
+    status: str | None,
+    reason: str,
+    deriv_error_code: str | None = None,
+) -> str:
+    if status == "insufficient_tokens":
+        return TOKEN_EXHAUSTED_MESSAGE
+    if status == "token_service_error":
+        return "Your token balance could not be verified. No trade was attempted."
+    if status == "unknown_buy_outcome":
+        return (
+            "The purchase outcome is uncertain. Auto Trade stopped to avoid "
+            "placing a duplicate trade. Please check your Deriv account before "
+            "trying again."
+        )
+
+    error_details = f"{deriv_error_code or ''} {reason}".lower()
+    if "contractbuyvalidationerror" in error_details and "maximum payout" in error_details:
+        return (
+            "Deriv's maximum payout would be exceeded for this trade. "
+            "Please choose a lower stake or a different setup."
+        )
+    if re.search(r"rate.?limit|too many requests|http\s*429", error_details):
+        return (
+            "Deriv is temporarily limiting requests. Auto Trade stopped safely. "
+            "Please wait a little before starting another session."
+        )
+    return (
+        "Deriv couldn't place the next trade, so Auto Trade stopped safely. "
+        "Please try again shortly. If the issue continues, contact support."
+    )
+
+
+def _auto_trade_start_failure_message(error: Exception) -> str:
+    if str(error) == "AUTO_TRADE_ALREADY_RUNNING":
+        return "An Auto Trade session is already active. Finish or cancel it before starting another."
+    if str(error) == "INVALID_STAKE":
+        return "That stake amount is invalid. Please choose a valid amount and try again."
+    return "Auto Trade could not start right now. Please try again shortly."
+
+
+def _payout_failure_reason_for_user(reason: object) -> str:
+    message = str(reason or "").strip()
+    technical_detail = re.search(
+        r"https?://|(?i:\b(?:traceback|exception|stack trace|http|sql|database|"
+        r"endpoint|api|status code)\b)|[A-Z][A-Za-z]+Error\b|"
+        r"\b[A-Z][A-Z0-9_]{5,}\b",
+        message,
+    )
+    if not message or len(message) > 240 or technical_detail:
+        return (
+            "Our payment partner could not complete the transfer. "
+            "Please review your payout details and contact support if needed."
+        )
+    return message
 
 
 async def _update_cycle_report(query, text: str, message=None):
@@ -1311,26 +1372,23 @@ async def _run_auto_trade(update, state) -> None:
             status = result.get("status")
             reason = result.get("reason", "Unknown error")
 
+            logger.warning(
+                "Auto Trade stopped before placing the next trade "
+                "(status=%s, deriv_error_code=%s, reason=%s)",
+                status,
+                result.get("deriv_error_code"),
+                reason,
+            )
             auto_trade_service.finish_run(
                 user_id,
                 "unknown_buy_outcome" if status == "unknown_buy_outcome" else "rejected",
             )
 
             current = auto_trade_service.get_run(user_id) or current
-            status_reason = {
-                "insufficient_tokens": (
-                    TOKEN_EXHAUSTED_MESSAGE
-                ),
-                "token_service_error": (
-                    "Your token balance could not be verified. No trade was attempted."
-                ),
-                "unknown_buy_outcome": (
-                    "The purchase outcome is uncertain. Auto Trade stopped to avoid a duplicate trade."
-                ),
-            }.get(
+            status_reason = _auto_trade_failure_message(
                 status,
-                "The next trade could not be placed, so Auto Trade stopped safely. "
-                f"Deriv response: {reason}",
+                str(reason),
+                str(result.get("deriv_error_code") or ""),
             )
             await _save_session_summary(
                 current,
@@ -1418,7 +1476,10 @@ async def _prepare_trade_confirmation(
             state.currency = currency
             state.stake_percentage_key = stake_percentage_key
     except (RuntimeError, ValueError) as exc:
-        await report(f"⚠️ Unable to prepare Auto Trade: {exc}")
+        logger.warning("Auto Trade preparation was rejected: %s", exc)
+        await report(
+            "⚠️ " + _auto_trade_start_failure_message(exc)
+        )
         return False
 
     confirmation = (
@@ -2040,9 +2101,11 @@ async def dispatch_callback(update, context) -> None:
         try:
             auto_trade_service.confirm_run(user_id)
         except RuntimeError as exc:
+            logger.warning("Auto Trade confirmation failed: %s", exc)
             await _safe_edit_message(
                 query,
-                f"⚠️ Auto Trade could not start: {exc}"
+                "⚠️ Auto Trade could not start because the session is no longer "
+                "available. Please start a new session and try again."
             )
             return
 

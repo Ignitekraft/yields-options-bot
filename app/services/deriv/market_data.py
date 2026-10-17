@@ -12,7 +12,10 @@ except ImportError:  # pragma: no cover - optional in local dev sandbox
     websocket_client = None
 
 from app.config import settings
-from app.services.deriv.websocket_connection import connect_sync_with_retry
+from app.services.deriv.websocket_connection import (
+    connect_sync_with_retry,
+    send_deriv_websocket_request_sync,
+)
 
 
 class MarketDataService:
@@ -67,7 +70,10 @@ class MarketDataService:
         payload: dict[str, Any],
         req_id: int,
     ) -> dict[str, Any]:
-        connection.send(json.dumps({**payload, "req_id": req_id}))
+        send_deriv_websocket_request_sync(
+            connection,
+            {**payload, "req_id": req_id},
+        )
         response = json.loads(connection.recv(timeout=10))
         if not isinstance(response, dict):
             raise ValueError("DERIV_MARKET_DATA_INVALID_RESPONSE")

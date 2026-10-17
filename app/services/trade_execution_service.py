@@ -10,7 +10,12 @@ from typing import Any
 import websockets
 
 from app.config import settings
-from app.services.deriv.websocket_connection import connect_async_with_retry
+from app.services.deriv.websocket_connection import (
+    connect_async_with_retry,
+    defer_deriv_requests_after_rate_limit,
+    is_deriv_rate_limit_error,
+    send_deriv_websocket_request,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -274,12 +279,13 @@ class TradeExecutionService:
 
                 if isinstance(error, dict):
                     code = error.get("code")
-                    message = error.get("message")
-
-                    raise DerivRequestError(
+                    deriv_error = DerivRequestError(
                         cls._error_message(response),
                         code=str(code) if code else None,
                     )
+                    if is_deriv_rate_limit_error(deriv_error):
+                        defer_deriv_requests_after_rate_limit(deriv_error)
+                    raise deriv_error
 
                 raise DerivRequestError(
                     cls._error_message(response)
@@ -304,10 +310,7 @@ class TradeExecutionService:
         if not isinstance(req_id, int):
             raise ValueError("DERIV_REQUEST_ID_MISSING")
 
-        await asyncio.wait_for(
-            websocket.send(json.dumps(payload)),
-            timeout=15,
-        )
+        await send_deriv_websocket_request(websocket, payload)
 
         return await cls._receive_response(
             websocket,
@@ -394,10 +397,7 @@ class TradeExecutionService:
         # Once the buy request has been sent, never automatically
         # retry it unless Deriv has explicitly rejected it.
         try:
-            await asyncio.wait_for(
-                websocket.send(json.dumps(payload)),
-                timeout=15,
-            )
+            await send_deriv_websocket_request(websocket, payload)
         except Exception as exc:
             raise UnknownBuyOutcome(
                 "BUY_OUTCOME_UNKNOWN_AFTER_SEND_FAILURE"
@@ -717,19 +717,16 @@ class TradeExecutionService:
         )
         async with connection as websocket:
 
-            await websocket.send(
-                json.dumps(payload)
-            )
+            await send_deriv_websocket_request(websocket, payload)
             if market_symbol and tick_req_id is not None:
                 try:
-                    await websocket.send(
-                        json.dumps(
-                            {
-                                "ticks": self.normalize_step_symbol(market_symbol),
-                                "subscribe": 1,
-                                "req_id": tick_req_id,
-                            }
-                        )
+                    await send_deriv_websocket_request(
+                        websocket,
+                        {
+                            "ticks": self.normalize_step_symbol(market_symbol),
+                            "subscribe": 1,
+                            "req_id": tick_req_id,
+                        },
                     )
                 except Exception:
                     logger.exception(

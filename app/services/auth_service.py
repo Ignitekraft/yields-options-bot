@@ -13,6 +13,11 @@ from typing import Any, Dict, Optional
 import httpx
 
 from app.config import settings
+from app.services.deriv.websocket_connection import (
+    defer_deriv_requests_after_rate_limit,
+    deriv_account_scope,
+    wait_for_deriv_request_sync,
+)
 from app.services.oauth_credential_store import SupabaseOAuthCredentialStore
 
 
@@ -177,6 +182,7 @@ class AuthService:
             request_data["client_secret"] = settings.deriv_client_secret
 
         try:
+            wait_for_deriv_request_sync(deriv_account_scope(refresh_token))
             response = httpx.post(
                 "https://auth.deriv.com/oauth2/token",
                 data=request_data,
@@ -185,6 +191,11 @@ class AuthService:
             response.raise_for_status()
             refreshed_payload = response.json()
         except (httpx.HTTPError, ValueError) as exc:
+            if (
+                isinstance(exc, httpx.HTTPStatusError)
+                and exc.response.status_code == 429
+            ):
+                defer_deriv_requests_after_rate_limit(exc)
             raise RuntimeError("DERIV_TOKEN_REFRESH_FAILED") from exc
 
         refreshed_access_token = (
@@ -387,6 +398,7 @@ class AuthService:
             return existing
 
         try:
+            wait_for_deriv_request_sync(deriv_account_scope(access_token))
             response = httpx.get(
                 DERIV_OPTIONS_ACCOUNTS_URL,
                 headers={
@@ -397,6 +409,13 @@ class AuthService:
             )
 
             if response.status_code != 200:
+                if response.status_code == 429:
+                    rate_limit_error = httpx.HTTPStatusError(
+                        "Deriv OAuth account lookup was rate-limited",
+                        request=response.request,
+                        response=response,
+                    )
+                    defer_deriv_requests_after_rate_limit(rate_limit_error)
                 return existing
 
             accounts = self._normalize_accounts(response.json())
@@ -424,7 +443,12 @@ class AuthService:
 
             return result
 
-        except (httpx.HTTPError, ValueError, TypeError):
+        except (httpx.HTTPError, ValueError, TypeError) as exc:
+            if (
+                isinstance(exc, httpx.HTTPStatusError)
+                and exc.response.status_code == 429
+            ):
+                defer_deriv_requests_after_rate_limit(exc)
             return existing
 
     def complete_oauth_session(
@@ -498,12 +522,18 @@ class AuthService:
         if client_secret:
             payload["client_secret"] = client_secret
 
+        wait_for_deriv_request_sync()
         response = httpx.post(
             "https://auth.deriv.com/oauth2/token",
             data=payload,
             timeout=20.0,
         )
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 429:
+                defer_deriv_requests_after_rate_limit(exc)
+            raise
 
         return self.complete_oauth_session(
             telegram_user_id,

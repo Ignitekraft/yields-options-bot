@@ -93,10 +93,17 @@ async def deriv_oauth_callback(
     """Callback from Deriv after OAuth login. Exchange the code for real tokens and complete the Telegram session."""
 
     if error:
-        return f"<h3>OAuth Error: {error}</h3>"
+        logger.warning("Deriv OAuth authorization was declined or failed")
+        return (
+            "<h3>Deriv connection was not completed.</h3>"
+            "<p>Please return to Telegram and try connecting again.</p>"
+        )
 
     if not code or not state:
-        return "<h3>Error: Missing code or state parameters.</h3>"
+        return (
+            "<h3>Deriv connection could not be completed.</h3>"
+            "<p>Please return to Telegram and try connecting again.</p>"
+        )
 
     telegram_user_id = auth_service.get_pending_user_for_state(state)
 
@@ -107,7 +114,10 @@ async def deriv_oauth_callback(
             state,
         )
     ):
-        return "<h3>Error: Invalid or expired OAuth state. Please run /connect again in Telegram.</h3>"
+        return (
+            "<h3>This connection link is invalid or has expired.</h3>"
+            "<p>Please return to Telegram and run /connect again.</p>"
+        )
 
     client_id = settings.deriv_app_id or settings.deriv_client_id
 
@@ -119,8 +129,12 @@ async def deriv_oauth_callback(
             client_id,
             settings.deriv_client_secret,
         )
-    except Exception as exc:
-        return f"<h3>OAuth exchange failed: {exc}</h3>"
+    except Exception:
+        logger.exception("Deriv OAuth token exchange failed")
+        return (
+            "<h3>Deriv could not complete the connection.</h3>"
+            "<p>Please return to Telegram and try connecting again shortly.</p>"
+        )
 
     profile = None
     try:

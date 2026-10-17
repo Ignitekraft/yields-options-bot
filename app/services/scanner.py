@@ -38,6 +38,17 @@ def _market_data_error_summary(error: Exception) -> str:
             return f"WebSocket handshake rejected ({http_status.group(0)})"
         return f"{type(error).__name__} ({http_status.group(0)})"
     return type(error).__name__
+
+
+def _friendly_market_data_error(error: Exception) -> str:
+    if re.search(r"\bHTTP\s+429\b|rate.?limit|too many requests", str(error), re.I):
+        return (
+            "Deriv is temporarily limiting market-data connections. "
+            "Please wait a little and try again."
+        )
+    return "Live market data could not be retrieved. Please try again shortly."
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -466,9 +477,7 @@ class YieldsScanner:
                         current_price=0.0,
                         trend="neutral",
                         indicators={
-                            "signal_reason": (
-                                f"Market data request failed: {error_summary}"
-                            ),
+                            "signal_reason": _friendly_market_data_error(exc),
                             "data_error": error_summary,
                         },
                         data_quality="unavailable",
