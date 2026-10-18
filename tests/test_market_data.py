@@ -223,7 +223,7 @@ class MarketDataTests(unittest.TestCase):
             "AUTO_TRADE_LIMIT_INFO",
         )
 
-    def test_auto_trade_entry_shows_global_limit_and_does_not_scan(self):
+    def test_auto_trade_entry_shows_per_user_limit_and_does_not_scan(self):
         update = SimpleNamespace(
             effective_user=SimpleNamespace(id="limited-user")
         )
@@ -256,7 +256,7 @@ class MarketDataTests(unittest.TestCase):
                     "retry_after_seconds": 125,
                 }
             ),
-        ), patch(
+        ) as limit_status, patch(
             "app.bot.callbacks._get_trade_token_balance",
             new=AsyncMock(),
         ) as token_balance, patch(
@@ -265,8 +265,10 @@ class MarketDataTests(unittest.TestCase):
         ) as scan_setup:
             asyncio.run(_handle_auto_trade_entry(update, query))
 
-        self.assertIn("10 sessions in a rolling hour", query.alert)
+        self.assertIn("you've started 3 sessions", query.alert)
+        self.assertIn("15-minute cooldown", query.alert)
         self.assertIn("2m 05s", query.alert)
+        limit_status.assert_awaited_once_with("limited-user")
         self.assertEqual(
             query.updated_markup.inline_keyboard[0][0].text,
             "🔒 Auto Trade · 2m 05s",
@@ -3252,7 +3254,7 @@ class MarketDataTests(unittest.TestCase):
 
         run_auto_trade_mock.assert_awaited_once()
 
-    def test_confirmation_rechecks_global_limit_before_starting_session(self):
+    def test_confirmation_rechecks_per_user_limit_before_starting_session(self):
         class FakeQuery:
             data = "AUTO_TRADE_CONFIRM"
 
@@ -3318,13 +3320,18 @@ class MarketDataTests(unittest.TestCase):
 
         self.assertEqual(state.status, "cancelled")
         limit_notice = update.callback_query.message.reply_text.await_args.args[0]
-        self.assertIn("10 sessions in a rolling hour", limit_notice)
+        self.assertIn("you've started 3 sessions", limit_notice)
+        self.assertIn("15-minute cooldown", limit_notice)
         self.assertIn("5m 21s", limit_notice)
         self.assertEqual(
             update.callback_query.markup.inline_keyboard[0][0].callback_data,
             "AUTO_TRADE_LIMIT_INFO",
         )
         start_session.assert_called_once()
+        self.assertEqual(
+            start_session.call_args.args[0]["telegram_user_id"],
+            "limit-race-user",
+        )
         run_auto_trade.assert_not_awaited()
 
     def test_confirm_callback_blocks_when_token_balance_is_zero(self):
@@ -4761,20 +4768,20 @@ class MarketDataTests(unittest.TestCase):
             {"p_telegram_user_id": "12345"},
         )
 
-    def test_global_auto_trade_session_limit_uses_shared_supabase_rpcs(self):
+    def test_per_user_auto_trade_session_limit_uses_shared_supabase_rpcs(self):
         requests = []
         responses = iter(
             [
                 {
-                    "sessions_started": 10,
-                    "limit": 10,
+                    "sessions_started": 3,
+                    "limit": 3,
                     "locked": True,
-                    "retry_after_seconds": 125,
+                    "retry_after_seconds": 900,
                 },
                 {
                     "started": True,
-                    "sessions_started": 10,
-                    "limit": 10,
+                    "sessions_started": 1,
+                    "limit": 3,
                     "retry_after_seconds": 0,
                 },
             ]
@@ -4793,7 +4800,7 @@ class MarketDataTests(unittest.TestCase):
             service_role_key="test-service-role-key",
             transport=httpx.MockTransport(respond),
         )
-        status = service.get_auto_trade_session_limit_status()
+        status = service.get_auto_trade_session_limit_status("12345")
         started = service.start_auto_trade_session(
             {
                 "session_id": "11111111-1111-4111-8111-111111111111",
@@ -4807,14 +4814,17 @@ class MarketDataTests(unittest.TestCase):
         )
 
         self.assertTrue(status["locked"])
-        self.assertEqual(status["retry_after_seconds"], 125)
+        self.assertEqual(status["retry_after_seconds"], 900)
         self.assertTrue(started["started"])
         self.assertTrue(
             requests[0].url.path.endswith(
                 "/rpc/get_auto_trade_session_limit_status"
             )
         )
-        self.assertEqual(json.loads(requests[0].content), {})
+        self.assertEqual(
+            json.loads(requests[0].content),
+            {"p_telegram_user_id": "12345"},
+        )
         self.assertTrue(
             requests[1].url.path.endswith("/rpc/start_auto_trade_session")
         )

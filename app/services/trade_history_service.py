@@ -269,11 +269,14 @@ class TradeHistoryService:
             raise RuntimeError("SUPABASE_REFERRAL_SUMMARY_RESPONSE_INVALID")
         return result
 
-    def get_auto_trade_session_limit_status(self) -> dict[str, Any]:
+    def get_auto_trade_session_limit_status(
+        self,
+        telegram_user_id: str | int,
+    ) -> dict[str, Any]:
         result = self._request(
             "POST",
             "rpc/get_auto_trade_session_limit_status",
-            payload={},
+            payload={"p_telegram_user_id": str(telegram_user_id)},
         ).json()
         if (
             not isinstance(result, dict)

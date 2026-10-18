@@ -425,31 +425,34 @@ async def _get_trade_token_balance(update, query, account_mode: str) -> int | No
         return None
 
 
-async def _get_auto_trade_limit_status() -> dict:
+async def _get_auto_trade_limit_status(telegram_user_id: str | int) -> dict:
     return await asyncio.to_thread(
-        trade_history_service.get_auto_trade_session_limit_status
+        trade_history_service.get_auto_trade_session_limit_status,
+        telegram_user_id,
     )
 
 
-async def _auto_trade_locked_seconds() -> int | None:
+async def _auto_trade_locked_seconds(
+    telegram_user_id: str | int,
+) -> int | None:
     try:
-        status = await _get_auto_trade_limit_status()
+        status = await _get_auto_trade_limit_status(telegram_user_id)
     except Exception:
         logger.exception("Could not load Auto Trade limit for menu")
         return None
     return status["retry_after_seconds"] if status["locked"] else None
 
 
-async def _dashboard_keyboard_with_limit():
+async def _dashboard_keyboard_with_limit(telegram_user_id: str | int):
     return TelegramKeyboard.dashboard_keyboard(
-        locked_seconds=await _auto_trade_locked_seconds(),
+        locked_seconds=await _auto_trade_locked_seconds(telegram_user_id),
     )
 
 
-async def _menu_keyboard_with_limit():
+async def _menu_keyboard_with_limit(telegram_user_id: str | int):
     return TelegramKeyboard.menu_keyboard(
         settings.community_url,
-        locked_seconds=await _auto_trade_locked_seconds(),
+        locked_seconds=await _auto_trade_locked_seconds(telegram_user_id),
     )
 
 
@@ -487,8 +490,8 @@ async def _show_auto_trade_limit_notice(
 ) -> None:
     countdown = _format_auto_trade_countdown(seconds)
     notice = (
-        "Auto Trade is temporarily paused: the bot has reached its global "
-        "limit of 10 sessions in a rolling hour. "
+        "Auto Trade is temporarily paused for your account: you've started "
+        "3 sessions, so a 15-minute cooldown applies. "
         f"New sessions are available in {countdown}."
     )
     if callback_already_answered:
@@ -544,7 +547,7 @@ async def _show_auto_trade_setup(update, query, context=None) -> None:
             "⚠️ Live Deriv market data is temporarily unavailable. "
             "No trade has been placed. Please try scanning again shortly.",
             reply_markup=(
-                await _dashboard_keyboard_with_limit()
+                await _dashboard_keyboard_with_limit(user_id)
                 if connected
                 else TelegramKeyboard.start_keyboard()
             ),
@@ -560,7 +563,7 @@ async def _show_auto_trade_setup(update, query, context=None) -> None:
         )
         if setup.get("direction") in {"BULLISH", "BEARISH"} and connected
         else (
-            await _dashboard_keyboard_with_limit()
+            await _dashboard_keyboard_with_limit(user_id)
             if connected
             else TelegramKeyboard.start_keyboard()
         )
@@ -804,9 +807,9 @@ async def _handle_auto_trade_entry(
 ) -> None:
     user_id = update.effective_user.id
     try:
-        limit_status = await _get_auto_trade_limit_status()
+        limit_status = await _get_auto_trade_limit_status(user_id)
     except Exception:
-        logger.exception("Could not verify the global Auto Trade session limit")
+        logger.exception("Could not verify this user's Auto Trade session limit")
         await query.answer(
             "Auto Trade is temporarily unavailable while we check session "
             "availability. Please try again shortly.",
@@ -2546,7 +2549,7 @@ async def _dispatch_callback(update, context) -> None:
 
         await query.edit_message_text(
             await build_start_message(user_id, display_name=display_name),
-            reply_markup=await _dashboard_keyboard_with_limit(),
+            reply_markup=await _dashboard_keyboard_with_limit(user_id),
         )
         return
 
@@ -2567,7 +2570,7 @@ async def _dispatch_callback(update, context) -> None:
     if data == "START_FAQ":
         await query.edit_message_text(
             handle_faq(),
-            reply_markup=await _dashboard_keyboard_with_limit(),
+            reply_markup=await _dashboard_keyboard_with_limit(user_id),
         )
         return
 
@@ -2575,7 +2578,7 @@ async def _dispatch_callback(update, context) -> None:
         await _safe_edit_message(
             query,
             handle_faq(),
-            reply_markup=await _menu_keyboard_with_limit(),
+            reply_markup=await _menu_keyboard_with_limit(user_id),
         )
         return
 
@@ -2588,7 +2591,7 @@ async def _dispatch_callback(update, context) -> None:
             username=getattr(update.effective_user, "username", None),
         )
         keyboard = (
-            await _menu_keyboard_with_limit()
+            await _menu_keyboard_with_limit(user_id)
             if auth_service.get_valid_access_token(user_key)
             else TelegramKeyboard.start_keyboard()
         )
@@ -2639,7 +2642,7 @@ async def _dispatch_callback(update, context) -> None:
     if data == "START_STATS":
         await query.edit_message_text(
             await handle_stats(user_id),
-            reply_markup=await _dashboard_keyboard_with_limit(),
+            reply_markup=await _dashboard_keyboard_with_limit(user_id),
         )
         return
 
@@ -2727,9 +2730,9 @@ async def _dispatch_callback(update, context) -> None:
 
     if data == "AUTO_TRADE_LIMIT_INFO":
         try:
-            limit_status = await _get_auto_trade_limit_status()
+            limit_status = await _get_auto_trade_limit_status(user_id)
         except Exception:
-            logger.exception("Could not refresh global Auto Trade session limit")
+            logger.exception("Could not refresh this user's Auto Trade session limit")
             await query.answer(
                 "Auto Trade is temporarily unavailable while we check session "
                 "availability. Please try again shortly.",
@@ -3053,5 +3056,5 @@ async def _dispatch_callback(update, context) -> None:
 
     await query.edit_message_text(
         handle_start(user_id),
-        reply_markup=await _dashboard_keyboard_with_limit(),
+        reply_markup=await _dashboard_keyboard_with_limit(user_id),
     )

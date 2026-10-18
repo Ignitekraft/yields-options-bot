@@ -68,7 +68,7 @@ async def _send_menu_message(update: Update) -> None:
     keyboard = (
         TelegramKeyboard.menu_keyboard(
             settings.community_url,
-            locked_seconds=await _auto_trade_locked_seconds(),
+            locked_seconds=await _auto_trade_locked_seconds(user.id),
         )
         if auth_service.get_valid_access_token(str(user.id))
         else TelegramKeyboard.start_keyboard()
@@ -226,10 +226,11 @@ def create_application():
         await update.message.reply_text(await handle_balance(user_id), reply_markup=TelegramKeyboard.status_keyboard())
 
     async def faq(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        user_id = update.effective_user.id
         await update.message.reply_text(
             handle_faq(),
             reply_markup=TelegramKeyboard.dashboard_keyboard(
-                locked_seconds=await _auto_trade_locked_seconds(),
+                locked_seconds=await _auto_trade_locked_seconds(user_id),
             ),
         )
 
@@ -244,6 +245,7 @@ def create_application():
         await update.message.reply_text(handle_logout(user_id), reply_markup=TelegramKeyboard.start_keyboard())
 
     async def scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        user_id = update.effective_user.id
         try:
             result = await asyncio.to_thread(handle_scan)
         except Exception:
@@ -255,7 +257,7 @@ def create_application():
         await update.message.reply_text(
             result,
             reply_markup=TelegramKeyboard.dashboard_keyboard(
-                locked_seconds=await _auto_trade_locked_seconds(),
+                locked_seconds=await _auto_trade_locked_seconds(user_id),
             ),
         )
 
