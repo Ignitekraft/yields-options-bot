@@ -59,14 +59,21 @@ class GeminiChartAnalysisProvider:
         if not image or len(image) > MAX_SCREENSHOT_BYTES:
             raise ChartAnalysisError("INVALID_CHART_IMAGE_SIZE")
 
+        expiry_unit = (
+            "tick" if settings.default_expiry_duration == 1 else "ticks"
+        )
         instructions = (
             "You are reviewing a user-provided chart screenshot to assess "
             "one short-term Deriv Rise/Fall contract. The contract expires "
-            "after 5 ticks. Make a directional assessment only for that "
-            "first 5-tick interval after entry; do not forecast the "
+            f"after {settings.default_expiry_duration} {expiry_unit}. "
+            "Make a directional assessment only for that first "
+            f"{settings.default_expiry_duration}-{expiry_unit} interval "
+            "after entry; do not forecast the "
             "entire Auto Trade session or imply this screenshot validates "
-            "later contracts. A session targeting three winning cycles needs "
-            "at least 15 ticks when every contract wins immediately; elapsed "
+            "later contracts. A session targeting "
+            f"{settings.auto_trade_cycles} winning cycles needs at least "
+            f"{settings.default_expiry_duration * settings.auto_trade_cycles} "
+            "ticks when every contract wins immediately; elapsed "
             "time varies with tick frequency and losses require recovery "
             "trades. The chart "
             "analysis is a snapshot, not a continuing signal for that whole "
@@ -82,12 +89,15 @@ class GeminiChartAnalysisProvider:
             "breakout/rejection evidence, nearby visible support/resistance, "
             "and whether these clues conflict. Weight the latest visible "
             "bars much more than a broad historical trend because the "
-            "contract lasts only 5 ticks. Rise/Fall prices are not forced "
+            f"contract lasts only {settings.default_expiry_duration} "
+            f"{expiry_unit}. "
+            "Rise/Fall prices are not forced "
             "to alternate: never assume a rise must be followed by a fall "
             "(or vice versa), and do not use a gambler's-fallacy reversal "
             "rule. Use indicators only if their "
             "values and labels are actually legible. Do not treat a long-term "
-            "trend alone as evidence for the next 5 ticks.\n\n"
+            f"trend alone as evidence for the next "
+            f"{settings.default_expiry_duration} {expiry_unit}.\n\n"
             "Choose BULLISH (Rise) only when the latest visible evidence "
             "leans toward a near-term rise; choose BEARISH (Fall) when it "
             "leans toward a near-term fall. Do not require unusually strong "

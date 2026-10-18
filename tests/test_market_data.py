@@ -1130,7 +1130,7 @@ class MarketDataTests(unittest.TestCase):
             },
         )
         self.assertEqual(websocket.sent[1]["underlying_symbol"], "STPRNG3")
-        self.assertEqual(websocket.sent[1]["duration"], 5)
+        self.assertEqual(websocket.sent[1]["duration"], 1)
         self.assertEqual(websocket.sent[1]["duration_unit"], "t")
 
     def test_monitor_contract_uses_live_ticks_when_contract_ticks_are_missing(self):
@@ -2284,7 +2284,7 @@ class MarketDataTests(unittest.TestCase):
         self.assertEqual(state.status, "monitoring_error")
         report = update.callback_query.message.replies[0]
         self.assertIn("Contract settlement could not be verified", report.text)
-        self.assertNotIn("Waiting for the 5-tick contract to settle", report.text)
+        self.assertNotIn("Waiting for the 1-tick contract to settle", report.text)
         self.assertEqual(
             update.callback_query.message.replies[-1],
             "Settlement could not be verified.",
@@ -3891,8 +3891,8 @@ class MarketDataTests(unittest.TestCase):
             "market_mismatch",
             instructions,
         )
-        self.assertIn("after 5 ticks", instructions)
-        self.assertIn("at least 15 ticks", instructions)
+        self.assertIn("after 1 tick", instructions)
+        self.assertIn("at least 10 ticks", instructions)
         self.assertIn("most recent visible price action", instructions)
         self.assertIn("not a calibrated win probability", instructions)
         self.assertIn(
@@ -3993,7 +3993,7 @@ class MarketDataTests(unittest.TestCase):
         )
         text, kwargs = message.replies[0]
         self.assertIn("AI evidence confidence: 78%", text)
-        self.assertIn("first 5-tick contract only", text)
+        self.assertIn("first 1-tick contract only", text)
         self.assertIn("Choose your stake", text)
         callbacks = [
             button.callback_data
@@ -5645,7 +5645,7 @@ class MarketDataTests(unittest.TestCase):
 
         self.assertIn("Welcome back", message)
         self.assertNotIn("AI scans 5 Step Indices", message)
-        self.assertIn("Expiry: 5 ticks", message)
+        self.assertIn("Expiry: 1 tick", message)
         self.assertNotIn("AUTO TRADE", message)
 
     def test_exactly_five_step_markets_are_normalized(self):
@@ -5789,46 +5789,46 @@ class MarketDataTests(unittest.TestCase):
         self.assertIn("Data available for 1/5 markets", message)
         self.assertIn("Step 500", message)
 
-    def test_fixed_expiry_is_five_ticks_and_session_target_is_three_cycles(self):
-        self.assertEqual(settings.default_expiry_duration, 5)
+    def test_fixed_expiry_is_one_tick_and_session_target_is_ten_cycles(self):
+        self.assertEqual(settings.default_expiry_duration, 1)
         self.assertEqual(settings.default_expiry_unit, "t")
-        self.assertEqual(settings.auto_trade_cycles, 3)
+        self.assertEqual(settings.auto_trade_cycles, 10)
         payload = TradeExecutionService.build_proposal_payload(
             "step_300",
             "BULLISH",
             10.0,
-            expiry_duration=5,
+            expiry_duration=1,
             expiry_unit="t",
         )
 
-        self.assertEqual(payload["duration"], 5)
+        self.assertEqual(payload["duration"], 1)
         self.assertEqual(payload["duration_unit"], "t")
         proposal = TradingService().create_proposal("step_300", amount=1.0)
-        self.assertEqual(proposal["duration"], 5)
+        self.assertEqual(proposal["duration"], 1)
         self.assertEqual(proposal["duration_unit"], "t")
         with self.assertRaisesRegex(ValueError, "YIELDS_EXPIRY_UNIT_MUST_BE_T"):
             TradeExecutionService.build_proposal_payload(
                 "step_300",
                 "BULLISH",
                 10.0,
-                expiry_duration=5,
+                expiry_duration=1,
                 expiry_unit="s",
             )
         run = AutoTradeService().start_run(
-            "three-cycle-default-user",
+            "ten-cycle-default-user",
             "step_300",
             "BULLISH",
             1.0,
         )
-        self.assertEqual(run.max_cycles, 3)
-        self.assertEqual(run.expiry_duration, 5)
+        self.assertEqual(run.max_cycles, 10)
+        self.assertEqual(run.expiry_duration, 1)
         self.assertEqual(run.expiry_unit, "t")
-        with self.assertRaisesRegex(ValueError, "YIELDS_EXPIRY_MUST_BE_5_TICKS"):
+        with self.assertRaisesRegex(ValueError, "YIELDS_EXPIRY_MUST_BE_1_TICKS"):
             TradeExecutionService.build_proposal_payload(
                 "step_300",
                 "BULLISH",
                 10.0,
-                expiry_duration=15,
+                expiry_duration=5,
                 expiry_unit="t",
             )
 
@@ -5837,14 +5837,14 @@ class MarketDataTests(unittest.TestCase):
             "step_300",
             "BULLISH",
             10.0,
-            expiry_duration=5,
+            expiry_duration=1,
             expiry_unit="t",
         )
 
         self.assertEqual(payload["underlying_symbol"], "STPRNG3")
         self.assertNotIn("symbol", payload)
         self.assertEqual(payload["contract_type"], "CALL")
-        self.assertEqual(payload["duration"], 5)
+        self.assertEqual(payload["duration"], 1)
         self.assertEqual(payload["duration_unit"], "t")
 
     def test_bearish_direction_maps_to_put(self):
@@ -5852,7 +5852,7 @@ class MarketDataTests(unittest.TestCase):
             "step_300",
             "BEARISH",
             10.0,
-            expiry_duration=5,
+            expiry_duration=1,
             expiry_unit="t",
         )
 

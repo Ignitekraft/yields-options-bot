@@ -771,6 +771,9 @@ async def handle_chart_screenshot(update, context=None) -> None:
         "BULLISH (Rise)" if analysis.direction == "BULLISH"
         else "BEARISH (Fall)"
     )
+    expiry_unit = (
+        "tick" if settings.default_expiry_duration == 1 else "ticks"
+    )
     await message.reply_text(
         "📊 AI CHART ANALYSIS\n\n"
         f"Market: {setup['display_name']}\n"
@@ -778,9 +781,11 @@ async def handle_chart_screenshot(update, context=None) -> None:
         f"AI evidence confidence: {analysis.confidence:.0f}% "
         "(not a win probability)\n"
         f"Reason: {analysis.reasoning}\n\n"
-        "This setup is based on the screenshot for the first 5-tick "
-        "contract only. A three-win session needs at least 15 ticks; "
-        "elapsed time varies with market ticks and losses.\n\n"
+        f"This setup is based on the screenshot for the first "
+        f"{settings.default_expiry_duration}-{expiry_unit} contract only. "
+        f"A {settings.auto_trade_cycles}-win session needs at least "
+        f"{settings.default_expiry_duration * settings.auto_trade_cycles} "
+        "ticks; elapsed time varies with market ticks and losses.\n\n"
         "This is an AI interpretation of your screenshot, not a guarantee. "
         "Choose your stake to continue.",
         reply_markup=TelegramKeyboard.stake_keyboard(
@@ -2060,7 +2065,7 @@ async def _run_auto_trade_loop(update, state) -> None:
             f"Step {current.martingale_step}\n⏳ Purchased for "
             f"${current.current_stake:.2f}. Waiting for the "
             f"{current.expiry_duration} "
-            f"{'ticks' if current.expiry_unit == 't' else 'seconds'} "
+            f"{'tick' if current.expiry_unit == 't' and current.expiry_duration == 1 else 'ticks' if current.expiry_unit == 't' else 'seconds'} "
             "to settle."
         )
         active_pending_step = pending_step
@@ -2140,6 +2145,14 @@ async def _prepare_trade_confirmation(
         )
         return False
 
+    expiry_unit = (
+        "tick"
+        if settings.default_expiry_unit == "t"
+        and settings.default_expiry_duration == 1
+        else "ticks"
+        if settings.default_expiry_unit == "t"
+        else "seconds"
+    )
     confirmation = (
         "⚡ TRADE CONFIRMATION\n\n"
         f"Market: {setup.get('display_name', setup['symbol'])}\n"
@@ -2152,7 +2165,7 @@ async def _prepare_trade_confirmation(
         f"{stake_description}\n"
         f"Available tokens: {token_balance}\n"
         f"Expiry: {settings.default_expiry_duration} "
-        f"{'ticks' if settings.default_expiry_unit == 't' else 'seconds'}\n"
+        f"{expiry_unit}\n"
         f"Target: {settings.auto_trade_cycles} winning cycles\n"
         "There is no consecutive-loss stop right now. Smart Scaling raises "
         "the next stake after each loss, so it can grow quickly and may exceed "
