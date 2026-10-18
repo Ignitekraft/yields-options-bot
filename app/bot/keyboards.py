@@ -219,7 +219,7 @@ class TelegramKeyboard:
     def auto_trade_keyboard() -> object:
         return TelegramKeyboard._keyboard(
             [
-                [("📷 Choose Chart Market", "AUTO_TRADE_START_SCAN")],
+                [("📊 Scan Indicators", "AUTO_TRADE_START_SCAN")],
                 [("✕ Cancel", "AUTO_TRADE_CANCEL")],
             ]
         )

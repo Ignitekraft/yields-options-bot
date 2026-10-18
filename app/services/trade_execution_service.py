@@ -175,12 +175,12 @@ class TradeExecutionService:
         except (TypeError, ValueError) as exc:
             raise ValueError("INVALID_EXPIRY") from exc
 
-        if value != 30:
+        if value != settings.default_expiry_seconds:
             raise ValueError(
-                "YIELDS_EXPIRY_MUST_BE_30_SECONDS"
+                f"YIELDS_EXPIRY_MUST_BE_{settings.default_expiry_seconds}_SECONDS"
             )
 
-        return 30
+        return settings.default_expiry_seconds
 
     @classmethod
     def build_proposal_payload(
@@ -188,7 +188,7 @@ class TradeExecutionService:
         symbol: str,
         direction: str,
         stake: float,
-        expiry_seconds: int = 30,
+        expiry_seconds: int = settings.default_expiry_seconds,
         currency: str = "USD",
         subscribe: bool = True,
     ) -> dict[str, Any]:
@@ -403,12 +403,14 @@ class TradeExecutionService:
 
         # Once the buy request has been sent, never automatically
         # retry it unless Deriv has explicitly rejected it.
+        buy_started = time.perf_counter()
         try:
             await send_deriv_websocket_request(websocket, payload)
         except Exception as exc:
             raise UnknownBuyOutcome(
                 "BUY_OUTCOME_UNKNOWN_AFTER_SEND_FAILURE"
             ) from exc
+        send_duration = time.perf_counter() - buy_started
 
         try:
             response = await cls._receive_response(
@@ -426,6 +428,13 @@ class TradeExecutionService:
             raise UnknownBuyOutcome(
                 f"BUY_OUTCOME_UNKNOWN:{type(exc).__name__}"
             ) from exc
+
+        logger.info(
+            "Deriv buy acknowledgment received in %.0f ms "
+            "(request send %.0f ms)",
+            (time.perf_counter() - buy_started) * 1000,
+            send_duration * 1000,
+        )
 
         buy = response.get("buy")
 
@@ -554,7 +563,7 @@ class TradeExecutionService:
             )
 
             amount = self.validate_stake(stake)
-            expiry = self.validate_expiry(30)
+            expiry = self.validate_expiry(settings.default_expiry_seconds)
 
         except ValueError as exc:
             return {
@@ -782,7 +791,7 @@ class TradeExecutionService:
                         symbol=str(preload["symbol"]),
                         direction=str(preload["direction"]),
                         stake=float(preload["stake"]),
-                        expiry_seconds=30,
+                        expiry_seconds=settings.default_expiry_seconds,
                         currency=str(preload.get("currency") or "USD"),
                         subscribe=True,
                     )
@@ -962,7 +971,7 @@ class TradeExecutionService:
                     if math.isfinite(expiry_epoch) and expiry_epoch > 0:
                         seconds_remaining = math.ceil(expiry_epoch - time.time())
                         if (
-                            1 <= seconds_remaining <= 30
+                            1 <= seconds_remaining <= settings.default_expiry_seconds
                             and seconds_remaining != last_countdown
                         ):
                             schedule_countdown(seconds_remaining)

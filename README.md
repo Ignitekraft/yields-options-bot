@@ -34,19 +34,11 @@ Implemented:
 
 ## Auto Trade market analysis
 
-Auto Trade setup starts by asking the user to choose one of the five configured
-Step Indices and send a chart screenshot. The screenshot is analyzed by the
-configured vision provider (Gemini by default); a bullish/bearish result then
-continues through the existing stake selection, confirmation, and trade flow.
-Unclear charts and charts visibly labeled as a different market do not produce
-a trade setup. Screenshots are sent to the selected AI provider for analysis.
-The model output is not a guarantee or financial advice.
-
-Configure `CHART_ANALYSIS_PROVIDER=gemini`, `GEMINI_API_KEY`, and optionally
-`GEMINI_MODEL` in the bot environment. Keep the API key in the deployment's
-secret manager or an untracked `.env` file; never commit it. Provider access is
-isolated behind `ChartAnalysisProvider` so another provider can be added
-without changing the Telegram trade flow.
+Auto Trade scans live Deriv market data for the five configured Step Indices.
+The indicator scanner ranks available Rise/Fall setups and continues into the
+existing stake selection, confirmation, and trade flow when it finds a
+directional result. No screenshot or external AI provider is involved. Indicator
+signals are not a guarantee or financial advice.
 
 The separate `/scan` command continues to analyze recent real ticks and
 one-minute candles from Deriv's public `ticks_history` WebSocket endpoint. It
@@ -60,7 +52,7 @@ slope, 3-bar momentum, price relative to the short- and higher-timeframe EMAs,
 and RSI. The weighted score selects bullish, bearish, or neutral direction;
 ATR and momentum are reported as context rather than hard eligibility gates.
 Markets with insufficient or stale history remain excluded. This scoring
-approach does not guarantee a profitable 30-second contract and has not been
+approach does not guarantee a profitable 15-second contract and has not been
 validated as profitable by a historical backtest. Live data errors stop a
 market scan instead of producing a signal from sample data. Public market data
 uses Deriv's unauthenticated public WebSocket. Deriv's documented WebSocket
@@ -77,10 +69,10 @@ The `/scan` command requests tick and candle history over one public WebSocket
 connection for the configured markets. The Auto Trade stake buttons use 0.1%,
 0.5%, or 1% of the
 selected account balance, calculated to the nearest cent. Users can also
-choose Custom amount and enter a stake directly; the amount must be positive,
-have no more than two decimal places, and not exceed the selected account
-balance. The selected market and direction remain pinned from analysis through
-confirmation. Auto Trade currently has no consecutive-loss stop: Smart Scaling
+choose Custom amount and enter a stake directly; the amount must be at least
+$0.35, no more than 1% of the selected account balance, and have no more than
+two decimal places. The selected market and direction remain pinned from
+analysis through confirmation. Auto Trade currently has no consecutive-loss stop: Smart Scaling
 can increase the next stake substantially after repeated losses. A session ends
 after its target of five winning cycles, token depletion, insufficient balance,
 or an execution/settlement failure.

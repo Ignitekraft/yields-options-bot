@@ -150,9 +150,9 @@ def handle_start(
         return (
             "🤖 YIELDS OPTIONS BOT\n\n"
             f"Hi {name},\n\n"
-            "AI-powered trading intelligence for Deriv.\n\n"
+            "Indicator-based trading tools for Deriv.\n\n"
             "Connect your Deriv account to unlock:\n"
-            "• AI market scanning\n"
+            "• Live indicator market scanning\n"
             "• Auto Trade\n"
             "• Real-time trade monitoring\n"
             "• Account balances\n"
@@ -459,8 +459,8 @@ def handle_status(telegram_user_id: str | int) -> str:
 def handle_faq() -> str:
     return (
         "❓ YIELDS FAQ\n\n"
-        "• How does the AI rank the markets?\n"
-        "  It checks 5-second EMA(8/21), EMA(21) slope, 3-bar momentum, "
+        "• How are Auto Trade setups selected?\n"
+        "  It uses live Step Index prices and checks 5-second EMA(8/21), EMA(21) slope, 3-bar momentum, "
         "ATR(14), RSI(7), and 1-minute EMA(20/50) alignment.\n\n"
         "• Which markets are used?\n"
         "  Only the fixed Step Index family: 100, 200, 300, 400, and 500.\n\n"

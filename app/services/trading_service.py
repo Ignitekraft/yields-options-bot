@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.config import settings
 from app.services.trade_execution_service import TradeExecutionService
 
 
@@ -81,7 +82,7 @@ class TradingService:
         amount: float = 10.0,
         contract_type: str = "CALL",
         currency: str = "USD",
-        duration: int = 30,
+        duration: int = settings.default_expiry_seconds,
         duration_unit: str = "s",
         multiplier: int | None = None,
     ) -> dict[str, object]:
@@ -93,9 +94,9 @@ class TradingService:
         """
         del multiplier
 
-        if duration != 30:
+        if duration != settings.default_expiry_seconds:
             raise ValueError(
-                "YIELDS_EXPIRY_MUST_BE_30_SECONDS"
+                f"YIELDS_EXPIRY_MUST_BE_{settings.default_expiry_seconds}_SECONDS"
             )
 
         if duration_unit != "s":
@@ -120,7 +121,7 @@ class TradingService:
                 symbol=resolved_symbol,
                 direction=resolved_contract_type,
                 stake=stake,
-                expiry_seconds=30,
+                expiry_seconds=settings.default_expiry_seconds,
                 currency=currency,
             )
         )
@@ -132,7 +133,7 @@ class TradingService:
             "contract_type": resolved_contract_type,
             "amount": stake,
             "currency": str(currency).upper(),
-            "duration": 30,
+            "duration": settings.default_expiry_seconds,
             "duration_unit": "s",
             "request": payload,
         }
@@ -174,7 +175,7 @@ class TradingService:
         symbol: str,
         contract_type: str,
         stake_amount: float,
-        duration_seconds: int = 30,
+        duration_seconds: int = settings.default_expiry_seconds,
         cycles: int = 5,
     ) -> list[dict[str, Any]]:
         """

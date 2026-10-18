@@ -33,6 +33,7 @@ from app.bot.callbacks import (
     calculate_relative_stake,
     dispatch_callback,
     execute_trade,
+    validate_custom_stake,
 )
 from app.bot.handlers import (
     _friendly_market_issue,
@@ -1129,6 +1130,7 @@ class MarketDataTests(unittest.TestCase):
             },
         )
         self.assertEqual(websocket.sent[1]["underlying_symbol"], "STPRNG3")
+        self.assertEqual(websocket.sent[1]["duration"], 15)
 
     def test_monitor_contract_uses_live_ticks_when_contract_ticks_are_missing(self):
         service = TradeExecutionService()
@@ -1376,6 +1378,7 @@ class MarketDataTests(unittest.TestCase):
             )
 
         self.assertEqual(result["status"], "accepted")
+        self.assertEqual(result["expiry_seconds"], 15)
         connect.assert_not_called()
         create_proposal.assert_not_awaited()
         buy_contract.assert_awaited_once()
@@ -1448,6 +1451,20 @@ class MarketDataTests(unittest.TestCase):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 parse_custom_stake(invalid)
 
+    def test_custom_stake_enforces_minimum_and_one_percent_balance_ceiling(self):
+        self.assertEqual(validate_custom_stake("0.35", "35"), 0.35)
+        self.assertEqual(validate_custom_stake("10.00", "1000"), 10.0)
+
+        cases = (
+            ("0.34", "100", "CUSTOM_STAKE_BELOW_MINIMUM"),
+            ("0.35", "34.99", "CUSTOM_STAKE_BALANCE_BELOW_MINIMUM"),
+            ("10.01", "1000", "CUSTOM_STAKE_ABOVE_ONE_PERCENT"),
+        )
+        for amount, balance, error in cases:
+            with self.subTest(amount=amount, balance=balance):
+                with self.assertRaisesRegex(ValueError, error):
+                    validate_custom_stake(amount, balance)
+
     def test_custom_stake_button_prompts_for_amount_and_remembers_setup(self):
         service = AutoTradeService()
 
@@ -1510,7 +1527,7 @@ class MarketDataTests(unittest.TestCase):
 
         class FakeMessage:
             def __init__(self):
-                self.text = "$12.34"
+                self.text = "$0.35"
                 self.replies = []
 
             async def reply_text(self, text, **kwargs):
@@ -1552,11 +1569,11 @@ class MarketDataTests(unittest.TestCase):
             asyncio.run(handle_custom_stake_input(update))
 
         state = service.get_run("custom-stake-user")
-        self.assertEqual(state.base_stake, 12.34)
+        self.assertEqual(state.base_stake, 0.35)
         self.assertEqual(state.symbol, "step_300")
         self.assertEqual(state.direction, "BEARISH")
         self.assertEqual(state.status, "awaiting_confirmation")
-        self.assertIn("Initial stake: 12.34 USD (custom amount)", message.replies[0][0])
+        self.assertIn("Initial stake: 0.35 USD (custom amount)", message.replies[0][0])
         self.assertIsNotNone(message.replies[0][1]["reply_markup"])
         self.assertIsNone(
             service.get_custom_stake_request("custom-stake-user")
@@ -1608,14 +1625,15 @@ class MarketDataTests(unittest.TestCase):
             new=AsyncMock(
                 return_value={
                     "account_type": "demo",
-                    "balance": 10.0,
+                    "balance": 1000.0,
                     "currency": "USD",
                 }
             ),
         ):
             asyncio.run(handle_custom_stake_input(update))
 
-        self.assertIn("exceeds the available DEMO balance", message.replies[0])
+        self.assertIn("cannot exceed 1% of your DEMO balance", message.replies[0])
+        self.assertIn("$10.00 USD", message.replies[0])
         self.assertIsNone(service.get_run("custom-stake-too-large-user"))
         self.assertIsNotNone(
             service.get_custom_stake_request("custom-stake-too-large-user")
@@ -2264,7 +2282,7 @@ class MarketDataTests(unittest.TestCase):
         self.assertEqual(state.status, "monitoring_error")
         report = update.callback_query.message.replies[0]
         self.assertIn("Contract settlement could not be verified", report.text)
-        self.assertNotIn("Waiting for the 30-second contract to settle", report.text)
+        self.assertNotIn("Waiting for the 15-second contract to settle", report.text)
         self.assertEqual(
             update.callback_query.message.replies[-1],
             "Settlement could not be verified.",
@@ -3620,8 +3638,9 @@ class MarketDataTests(unittest.TestCase):
         asyncio.run(dispatch_callback(update, None))
 
         self.assertIn("How it works:", query.caption)
-        self.assertIn("send its chart screenshot", query.caption)
-        self.assertIn("suggests Rise, Fall, or no trade", query.caption)
+        self.assertIn("Yields scans live prices", query.caption)
+        self.assertNotIn("screenshot", query.caption.lower())
+        self.assertIn("Indicator alignment ranks available Rise/Fall setups", query.caption)
 
     def test_trade_anyway_rechecks_balance_before_continuing(self):
         class FakeQuery:
@@ -3757,7 +3776,7 @@ class MarketDataTests(unittest.TestCase):
         self.assertIn("Low%20Tokens%20Warning%20Alert.png", update.callback_query.photo["photo"])
         show_setup.assert_not_awaited()
 
-    def test_auto_trade_setup_requests_a_chart_market_without_scanning(self):
+    def test_auto_trade_setup_scans_indicators_and_offers_directional_stakes(self):
         class FakeQuery:
             def __init__(self):
                 self.edited = None
@@ -3769,31 +3788,38 @@ class MarketDataTests(unittest.TestCase):
 
         update = SimpleNamespace(
             callback_query=FakeQuery(),
-            effective_user=SimpleNamespace(id="chart-market-user"),
+            effective_user=SimpleNamespace(id="indicator-scan-user"),
         )
 
+        scan = Mock(return_value={
+            "symbol": "step_100",
+            "display_name": "Step Index 100",
+            "direction": "BULLISH",
+            "score": 7,
+            "confidence": 70,
+        })
         with patch(
             "app.bot.callbacks.auth_service.get_valid_access_token",
             return_value="access-token",
+        ), patch(
+            "app.bot.callbacks.build_auto_trade_setup",
+            scan,
+        ), patch(
+            "app.bot.callbacks._setup_photo_url",
+            return_value=None,
         ):
             asyncio.run(_show_auto_trade_setup(update, update.callback_query))
 
-        self.assertIn("Choose one of the five Step Indices", update.callback_query.edited)
+        scan.assert_called_once_with("indicator-scan-user")
+        self.assertIn("Step Index 100", update.callback_query.edited)
+        self.assertIn("UP SETUP", update.callback_query.edited)
         choices = [
             button.callback_data
             for row in update.callback_query.reply_markup.inline_keyboard
             for button in row
         ]
-        self.assertEqual(
-            choices[:5],
-            [
-                "AUTO_TRADE_CHART_step_100",
-                "AUTO_TRADE_CHART_step_200",
-                "AUTO_TRADE_CHART_step_300",
-                "AUTO_TRADE_CHART_step_400",
-                "AUTO_TRADE_CHART_step_500",
-            ],
-        )
+        self.assertIn("AUTO_TRADE_STAKE_0_1_step_100_BULLISH", choices)
+        self.assertNotIn("AUTO_TRADE_CHART_step_100", choices)
 
     def test_gemini_chart_provider_sends_image_and_parses_typed_setup(self):
         class FakeResponse:
@@ -3863,8 +3889,8 @@ class MarketDataTests(unittest.TestCase):
             "market_mismatch",
             instructions,
         )
-        self.assertIn("30 seconds after entry", instructions)
-        self.assertIn("at least 150 seconds", instructions)
+        self.assertIn("15 seconds after entry", instructions)
+        self.assertIn("at least 75 seconds", instructions)
         self.assertIn("most recent visible price action", instructions)
         self.assertIn("not a calibrated win probability", instructions)
         self.assertIn(
@@ -3897,86 +3923,6 @@ class MarketDataTests(unittest.TestCase):
                     "market_mismatch": False,
                 }
             )
-
-    def test_chart_market_selection_waits_for_photo_and_sets_expiry(self):
-        context = SimpleNamespace(user_data={})
-
-        class FakeQuery:
-            data = "AUTO_TRADE_CHART_step_300"
-
-            def __init__(self):
-                self.text = None
-                self.markup = None
-
-            async def answer(self):
-                return None
-
-            async def edit_message_text(self, text, **kwargs):
-                self.text = text
-                self.markup = kwargs.get("reply_markup")
-
-        query = FakeQuery()
-        update = SimpleNamespace(
-            callback_query=query,
-            effective_user=SimpleNamespace(id="chart-selection-user"),
-        )
-        with patch(
-            "app.bot.callbacks.auth_service.get_valid_access_token",
-            return_value="access-token",
-        ):
-            asyncio.run(dispatch_callback(update, context))
-
-        self.assertEqual(
-            context.user_data["pending_chart_market_symbol"],
-            "step_300",
-        )
-        self.assertGreater(
-            context.user_data["pending_chart_market_expires_at"],
-            0,
-        )
-        self.assertIn("Step Index 300 chart", query.text)
-        self.assertIn("AI provider", query.text)
-
-    def test_expired_chart_setup_cannot_continue_to_stake_selection(self):
-        class FakeQuery:
-            data = "AUTO_TRADE_STAKE_0_1_step_100_BULLISH"
-
-            def __init__(self):
-                self.text = None
-
-            async def answer(self):
-                return None
-
-            async def edit_message_text(self, text, **_kwargs):
-                self.text = text
-
-        query = FakeQuery()
-        update = SimpleNamespace(
-            callback_query=query,
-            effective_user=SimpleNamespace(id="expired-chart-setup-user"),
-        )
-        context = SimpleNamespace(
-            user_data={
-                "auto_trade_chart_setup": {
-                    "symbol": "step_100",
-                    "direction": "BULLISH",
-                },
-                "auto_trade_chart_setup_expires_at": time.monotonic() - 1,
-            }
-        )
-        ensure_user = Mock(return_value={"token_balance": 10})
-
-        with patch(
-            "app.bot.callbacks.auth_service.get_valid_access_token",
-            return_value="access-token",
-        ), patch(
-            "app.bot.callbacks.trade_history_service.ensure_user",
-            ensure_user,
-        ):
-            asyncio.run(dispatch_callback(update, context))
-
-        self.assertIn("chart setup has expired", query.text)
-        ensure_user.assert_not_called()
 
     def test_chart_screenshot_analysis_offers_stake_buttons(self):
         class FakeFile:
@@ -4045,7 +3991,7 @@ class MarketDataTests(unittest.TestCase):
         )
         text, kwargs = message.replies[0]
         self.assertIn("AI evidence confidence: 78%", text)
-        self.assertIn("first 30-second contract only", text)
+        self.assertIn("first 15-second contract only", text)
         self.assertIn("Choose your stake", text)
         callbacks = [
             button.callback_data
@@ -5697,7 +5643,7 @@ class MarketDataTests(unittest.TestCase):
 
         self.assertIn("Welcome back", message)
         self.assertNotIn("AI scans 5 Step Indices", message)
-        self.assertNotIn("Expiry: 30 seconds", message)
+        self.assertIn("Expiry: 15 seconds", message)
         self.assertNotIn("AUTO TRADE", message)
 
     def test_exactly_five_step_markets_are_normalized(self):
@@ -5841,29 +5787,36 @@ class MarketDataTests(unittest.TestCase):
         self.assertIn("Data available for 1/5 markets", message)
         self.assertIn("Step 500", message)
 
-    def test_fixed_expiry_is_always_thirty_seconds(self):
+    def test_fixed_expiry_is_always_fifteen_seconds(self):
         payload = TradeExecutionService.build_proposal_payload(
             "step_300",
             "BULLISH",
             10.0,
-            expiry_seconds=30,
+            expiry_seconds=15,
         )
 
-        self.assertEqual(payload["duration"], 30)
+        self.assertEqual(payload["duration"], 15)
         self.assertEqual(payload["duration_unit"], "s")
+        with self.assertRaisesRegex(ValueError, "YIELDS_EXPIRY_MUST_BE_15_SECONDS"):
+            TradeExecutionService.build_proposal_payload(
+                "step_300",
+                "BULLISH",
+                10.0,
+                expiry_seconds=30,
+            )
 
     def test_proposal_payload_uses_underlying_symbol(self):
         payload = TradeExecutionService.build_proposal_payload(
             "step_300",
             "BULLISH",
             10.0,
-            expiry_seconds=30,
+            expiry_seconds=15,
         )
 
         self.assertEqual(payload["underlying_symbol"], "STPRNG3")
         self.assertNotIn("symbol", payload)
         self.assertEqual(payload["contract_type"], "CALL")
-        self.assertEqual(payload["duration"], 30)
+        self.assertEqual(payload["duration"], 15)
         self.assertEqual(payload["duration_unit"], "s")
 
     def test_bearish_direction_maps_to_put(self):
@@ -5871,7 +5824,7 @@ class MarketDataTests(unittest.TestCase):
             "step_300",
             "BEARISH",
             10.0,
-            expiry_seconds=30,
+            expiry_seconds=15,
         )
 
         self.assertEqual(payload["underlying_symbol"], "STPRNG3")
