@@ -774,9 +774,6 @@ async def handle_chart_screenshot(update, context=None) -> None:
         "BULLISH (Rise)" if analysis.direction == "BULLISH"
         else "BEARISH (Fall)"
     )
-    expiry_unit = (
-        "tick" if settings.default_expiry_duration == 1 else "ticks"
-    )
     await message.reply_text(
         "📊 AI CHART ANALYSIS\n\n"
         f"Market: {setup['display_name']}\n"
@@ -785,7 +782,7 @@ async def handle_chart_screenshot(update, context=None) -> None:
         "(not a win probability)\n"
         f"Reason: {analysis.reasoning}\n\n"
         f"This setup is based on the screenshot for the first "
-        f"{settings.default_expiry_duration}-{expiry_unit} contract only. "
+        f"{settings.default_expiry_duration}-tick contract only. "
         f"A {settings.auto_trade_cycles}-win session needs at least "
         f"{settings.default_expiry_duration * settings.auto_trade_cycles} "
         "ticks; elapsed time varies with market ticks and losses.\n\n"
