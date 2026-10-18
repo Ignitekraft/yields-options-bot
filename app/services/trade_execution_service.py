@@ -515,6 +515,7 @@ class TradeExecutionService:
         ws_url: str | None = None,
         account_type: str | None = None,
         websocket: Any | None = None,
+        prepared_proposals: dict[str, dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Place one Rise/Fall contract on the selected account."""
 
@@ -572,8 +573,14 @@ class TradeExecutionService:
                 candidates = self.asset_candidates(symbol)
                 for candidate_symbol in candidates:
                     try:
+                        proposal_key = (
+                            f"{candidate_symbol}:{amount:.2f}"
+                        )
                         proposal = (
-                            await self._create_proposal_on_ws(
+                            (prepared_proposals or {}).get(proposal_key)
+                        )
+                        if proposal is None:
+                            proposal = await self._create_proposal_on_ws(
                                 websocket=websocket,
                                 symbol=candidate_symbol,
                                 direction=contract_type,
@@ -582,7 +589,11 @@ class TradeExecutionService:
                                 currency=currency,
                                 subscribe=not reuse_websocket,
                             )
-                        )
+                        else:
+                            logger.info(
+                                "Using a preloaded Deriv proposal for the next "
+                                "Auto Trade contract"
+                            )
 
                         proposal_id = proposal["proposal_id"]
 
@@ -705,7 +716,11 @@ class TradeExecutionService:
         timeout_seconds: int = 75,
         market_symbol: str | None = None,
         on_countdown: Callable[[int], Awaitable[None]] | None = None,
-        on_settlement: Callable[[dict[str, Any], Any], Awaitable[Any]] | None = None,
+        on_settlement: Callable[
+            [dict[str, Any], Any, dict[str, dict[str, Any]]],
+            Awaitable[Any],
+        ] | None = None,
+        preload_proposals: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Monitor a contract until Deriv reports it has settled."""
 
@@ -739,6 +754,8 @@ class TradeExecutionService:
         )
         async with connection as websocket:
             countdown_tasks: set[asyncio.Task[None]] = set()
+            proposal_request_keys: dict[int, str] = {}
+            prepared_proposals: dict[str, dict[str, Any]] = {}
 
             await send_deriv_websocket_request(websocket, payload)
             if market_symbol and tick_req_id is not None:
@@ -758,6 +775,29 @@ class TradeExecutionService:
                         contract_id,
                     )
                     tick_req_id = None
+
+            for preload in preload_proposals or []:
+                try:
+                    proposal_payload = self.build_proposal_payload(
+                        symbol=str(preload["symbol"]),
+                        direction=str(preload["direction"]),
+                        stake=float(preload["stake"]),
+                        expiry_seconds=30,
+                        currency=str(preload.get("currency") or "USD"),
+                        subscribe=True,
+                    )
+                    proposal_request_keys[proposal_payload["req_id"]] = (
+                        f"{self.normalize_step_symbol(str(preload['symbol']))}:"
+                        f"{float(preload['stake']):.2f}"
+                    )
+                    await send_deriv_websocket_request(
+                        websocket,
+                        proposal_payload,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Could not preload a proposal for the next Auto Trade"
+                    )
 
             deadline = (
                 asyncio.get_running_loop().time()
@@ -815,6 +855,35 @@ class TradeExecutionService:
                 echo_req = response.get(
                     "echo_req"
                 )
+
+                if isinstance(echo_req, dict):
+                    proposal_req_id = echo_req.get("req_id")
+                    proposal_key = proposal_request_keys.get(proposal_req_id)
+                    if proposal_key is not None:
+                        if "error" in response:
+                            logger.warning(
+                                "Deriv rejected a preloaded proposal: %s",
+                                self._error_message(response),
+                            )
+                            proposal_request_keys.pop(proposal_req_id, None)
+                            continue
+                        proposal = response.get("proposal")
+                        if isinstance(proposal, dict):
+                            proposal_id = proposal.get("id")
+                            try:
+                                ask_price = float(proposal.get("ask_price"))
+                            except (TypeError, ValueError):
+                                ask_price = 0.0
+                            if (
+                                proposal_id
+                                and math.isfinite(ask_price)
+                                and ask_price > 0
+                            ):
+                                prepared_proposals[proposal_key] = {
+                                    "proposal_id": str(proposal_id),
+                                    "ask_price": ask_price,
+                                }
+                        continue
 
                 tick = response.get("tick")
                 if isinstance(echo_req, dict):
@@ -987,6 +1056,7 @@ class TradeExecutionService:
                             settlement["next_trade_result"] = await on_settlement(
                                 settlement,
                                 websocket,
+                                prepared_proposals,
                             )
                         except Exception:
                             logger.exception(

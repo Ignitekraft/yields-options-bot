@@ -836,6 +836,8 @@ async def execute_trade(
     *,
     prepared_account: dict | None = None,
     websocket=None,
+    prepared_proposals: dict | None = None,
+    token_pre_reserved: bool = False,
 ) -> dict:
     state = state or auto_trade_service.get_run(user_id)
 
@@ -843,11 +845,23 @@ async def execute_trade(
         return {"status": "rejected", "reason": "AUTO_TRADE_NOT_FOUND"}
 
     if state.status == "executing" or not auto_trade_service.mark_executing(user_id):
+        if token_pre_reserved:
+            try:
+                await asyncio.to_thread(
+                    trade_history_service.refund_token,
+                    user_id,
+                    state.session_id,
+                )
+            except Exception:
+                logger.exception("Could not refund token after duplicate execution")
         return {"status": "rejected", "reason": "DUPLICATE_EXECUTION"}
 
     state.status = "executing"
-    token_reserved = False
+    token_reserved = token_pre_reserved
+    if token_pre_reserved:
+        state.tokens_spent += 1
     purchase_confirmed = False
+    purchase_uncertain = False
 
     try:
         user_key = str(user_id)
@@ -891,29 +905,30 @@ async def execute_trade(
                 account_id=account_id,
             )
 
-        try:
-            reservation = await asyncio.to_thread(
-                trade_history_service.reserve_token,
-                user_id,
-                state.session_id,
-            )
-        except Exception:
-            state.status = "rejected"
-            logger.exception("Could not reserve a Yields Token before purchase")
-            return {
-                "status": "token_service_error",
-                "reason": "TOKEN_RESERVATION_FAILED",
-            }
+        if not token_reserved:
+            try:
+                reservation = await asyncio.to_thread(
+                    trade_history_service.reserve_token,
+                    user_id,
+                    state.session_id,
+                )
+            except Exception:
+                state.status = "rejected"
+                logger.exception("Could not reserve a Yields Token before purchase")
+                return {
+                    "status": "token_service_error",
+                    "reason": "TOKEN_RESERVATION_FAILED",
+                }
 
-        if not reservation.get("ok"):
-            state.status = "rejected"
-            return {
-                "status": "insufficient_tokens",
-                "reason": "INSUFFICIENT_TOKENS",
-                "token_balance": reservation.get("token_balance", 0),
-            }
-        token_reserved = True
-        state.tokens_spent += 1
+            if not reservation.get("ok"):
+                state.status = "rejected"
+                return {
+                    "status": "insufficient_tokens",
+                    "reason": "INSUFFICIENT_TOKENS",
+                    "token_balance": reservation.get("token_balance", 0),
+                }
+            token_reserved = True
+            state.tokens_spent += 1
 
         result = await trade_execution_service.execute_trade(
             user_id=user_id,
@@ -926,8 +941,10 @@ async def execute_trade(
             ws_url=ws_url,
             account_type=state.account_mode,
             websocket=websocket,
+            prepared_proposals=prepared_proposals,
         )
         purchase_confirmed = result.get("status") == "accepted"
+        purchase_uncertain = result.get("status") == "unknown_buy_outcome"
 
         if result.get("account_type") != state.account_mode:
             state.status = "rejected"
@@ -950,24 +967,20 @@ async def execute_trade(
             state.status = "unknown_buy_outcome"
         else:
             state.status = "rejected"
-            try:
-                await asyncio.to_thread(
-                    trade_history_service.refund_token,
-                    user_id,
-                    state.session_id,
-                )
-                state.tokens_spent = max(0, state.tokens_spent - 1)
-            except Exception:
-                logger.exception("Could not refund token for rejected purchase")
 
         return result
 
     except UnknownBuyOutcome as exc:
         state.status = "unknown_buy_outcome"
+        purchase_uncertain = True
         return {"status": "unknown_buy_outcome", "reason": str(exc)}
 
     except Exception as exc:
-        if token_reserved and not purchase_confirmed:
+        state.status = "rejected"
+        return {"status": "rejected", "reason": str(exc)}
+
+    finally:
+        if token_reserved and not purchase_confirmed and not purchase_uncertain:
             try:
                 await asyncio.to_thread(
                     trade_history_service.refund_token,
@@ -976,11 +989,7 @@ async def execute_trade(
                 )
                 state.tokens_spent = max(0, state.tokens_spent - 1)
             except Exception:
-                logger.exception("Could not refund token after pre-purchase failure")
-        state.status = "rejected"
-        return {"status": "rejected", "reason": str(exc)}
-
-    finally:
+                logger.exception("Could not refund token after rejected purchase")
         auto_trade_service.clear_execution_lock(user_id)
 
 
@@ -1448,6 +1457,7 @@ async def _monitor_settlement(
     state,
     on_countdown=None,
     on_settlement=None,
+    preload_proposals: list[dict] | None = None,
 ) -> dict:
     user_key = str(user_id)
     access_token = auth_service.get_valid_access_token(user_key)
@@ -1473,10 +1483,15 @@ async def _monitor_settlement(
         "ws_url": ws_url,
     }
 
-    async def handle_settlement(settlement, websocket):
+    async def handle_settlement(settlement, websocket, prepared_proposals):
         if on_settlement is None:
             return None
-        return await on_settlement(settlement, websocket, prepared_account)
+        return await on_settlement(
+            settlement,
+            websocket,
+            prepared_account,
+            prepared_proposals,
+        )
 
     return await trade_execution_service.monitor_contract(
         contract_id=state.contract_id,
@@ -1485,6 +1500,7 @@ async def _monitor_settlement(
         market_symbol=state.market_symbol or state.symbol,
         on_countdown=on_countdown,
         on_settlement=handle_settlement if on_settlement is not None else None,
+        preload_proposals=preload_proposals,
     )
 
 
@@ -1498,6 +1514,51 @@ async def _run_auto_trade_loop(update, state) -> None:
     session_status_message_updated = False
     pending_settlement: dict | None = None
     active_pending_step: str | None = None
+    next_token_reservation_task: asyncio.Task | None = None
+
+    def start_next_token_reservation() -> None:
+        nonlocal next_token_reservation_task
+        if next_token_reservation_task is not None:
+            return
+
+        async def reserve() -> dict:
+            try:
+                return await asyncio.to_thread(
+                    trade_history_service.reserve_token,
+                    user_id,
+                    state.session_id,
+                )
+            except Exception:
+                logger.exception("Could not pre-reserve a Yields Token")
+                return {"ok": False, "service_error": True}
+
+        next_token_reservation_task = asyncio.create_task(reserve())
+
+    async def refund_unused_token_reservation() -> None:
+        nonlocal next_token_reservation_task
+        if next_token_reservation_task is None:
+            return
+        task = next_token_reservation_task
+        next_token_reservation_task = None
+        reservation = await task
+        if not reservation.get("ok"):
+            return
+        try:
+            await asyncio.to_thread(
+                trade_history_service.refund_token,
+                user_id,
+                state.session_id,
+            )
+        except Exception:
+            logger.exception("Could not refund unused pre-reserved Yields Token")
+
+    async def take_next_token_reservation() -> dict:
+        nonlocal next_token_reservation_task
+        if next_token_reservation_task is None:
+            return {"ok": False, "service_error": True}
+        task = next_token_reservation_task
+        next_token_reservation_task = None
+        return await task
 
     def create_settlement_countdown_callback():
         last_rendered_countdown = 31
@@ -1505,6 +1566,8 @@ async def _run_auto_trade_loop(update, state) -> None:
 
         async def update_countdown(seconds_remaining: int) -> None:
             nonlocal last_rendered_countdown
+            if seconds_remaining <= 8:
+                start_next_token_reservation()
             async with edit_lock:
                 current = auto_trade_service.get_run(user_id)
                 if (
@@ -1570,10 +1633,10 @@ async def _run_auto_trade_loop(update, state) -> None:
             f"⚡ Cycle {trade_cycle} Step {record['step']}\n"
             f"<pre>{html.escape(step_details)}</pre>"
         )
-        if not record["won"] and current.status == "running":
+        if not record["won"] and record["next_status"] == "running":
             result_text += (
                 "\n\n🔄 Smart Scaling activated\n"
-                f"Next stake: ${current.current_stake:.2f}"
+                f"Next stake: ${record['next_stake']:.2f}"
             )
         elif record["won"]:
             result_text += "\n\n✅ Cycle completed."
@@ -1640,6 +1703,8 @@ async def _run_auto_trade_loop(update, state) -> None:
             "stake": trade_stake,
             "profit": profit,
             "won": won,
+            "next_status": current.status,
+            "next_stake": current.current_stake,
             "entry_tick": entry_tick,
             "exit_tick": exit_tick,
             "trade": {
@@ -1665,6 +1730,7 @@ async def _run_auto_trade_loop(update, state) -> None:
             return
 
         if current.status == "cancelled":
+            await refund_unused_token_reservation()
             await flush_pending_settlement(current)
             await _save_session_summary(current, "cancelled")
             await _send_session_end_message(
@@ -1676,6 +1742,7 @@ async def _run_auto_trade_loop(update, state) -> None:
             return
 
         if current.status == "completed":
+            await refund_unused_token_reservation()
             await flush_pending_settlement(current)
             await _save_session_summary(current, "completed")
             await _send_session_end_message(
@@ -1686,6 +1753,7 @@ async def _run_auto_trade_loop(update, state) -> None:
             return
 
         if current.status not in {"running", "monitoring"}:
+            await refund_unused_token_reservation()
             await flush_pending_settlement(current)
             await _save_session_summary(current, "failed")
             await _send_session_end_message(
@@ -1704,22 +1772,48 @@ async def _run_auto_trade_loop(update, state) -> None:
                 settlement,
                 websocket,
                 prepared_account,
+                prepared_proposals,
             ):
                 nonlocal immediate_trade_result
                 nonlocal settlement_processed
                 nonlocal settlement_error
+                handoff_started = asyncio.get_running_loop().time()
                 settlement_processed = True
                 settled_state, settlement_error = apply_settlement_result(settlement)
                 if settled_state is None or settled_state.status != "running":
                     return None
                 if account_mode_service.get_mode(user_id) != settled_state.account_mode:
                     return None
+                if next_token_reservation_task is None:
+                    start_next_token_reservation()
+                reservation = await take_next_token_reservation()
+                if not reservation.get("ok"):
+                    immediate_trade_result = {
+                        "status": (
+                            "token_service_error"
+                            if reservation.get("service_error")
+                            else "insufficient_tokens"
+                        ),
+                        "reason": "TOKEN_RESERVATION_FAILED"
+                        if reservation.get("service_error")
+                        else "INSUFFICIENT_TOKENS",
+                        "token_balance": reservation.get("token_balance", 0),
+                    }
+                    logger.info(
+                        "Auto Trade settlement handoff finished without a purchase "
+                        "in %.0f ms (status=%s)",
+                        (asyncio.get_running_loop().time() - handoff_started) * 1000,
+                        immediate_trade_result["status"],
+                    )
+                    return immediate_trade_result
                 try:
                     immediate_trade_result = await execute_trade(
                         user_id,
                         settled_state,
                         prepared_account=prepared_account,
                         websocket=websocket,
+                        prepared_proposals=prepared_proposals,
+                        token_pre_reserved=True,
                     )
                 except Exception:
                     logger.exception(
@@ -1729,14 +1823,37 @@ async def _run_auto_trade_loop(update, state) -> None:
                         "status": "unknown_buy_outcome",
                         "reason": "AUTO_TRADE_EXECUTION_INTERRUPTED",
                     }
+                logger.info(
+                    "Auto Trade settlement-to-next-buy handoff completed in %.0f ms "
+                    "(status=%s)",
+                    (asyncio.get_running_loop().time() - handoff_started) * 1000,
+                    immediate_trade_result.get("status"),
+                )
                 return immediate_trade_result
 
+            next_stakes = {
+                round(current.base_stake, 2),
+                round(
+                    current.current_stake * settings.martingale_multiplier,
+                    2,
+                ),
+            }
+            preload_proposals = [
+                {
+                    "symbol": current.market_symbol or current.symbol,
+                    "direction": current.direction,
+                    "stake": stake,
+                    "currency": current.currency,
+                }
+                for stake in next_stakes
+            ]
             try:
                 settlement = await _monitor_settlement(
                     user_id,
                     current,
                     on_countdown=create_settlement_countdown_callback(),
                     on_settlement=buy_next_after_settlement,
+                    preload_proposals=preload_proposals,
                 )
             except Exception:
                 logger.exception(
@@ -1754,7 +1871,8 @@ async def _run_auto_trade_loop(update, state) -> None:
                         _cycle_report_text(current.cycle, cycle_steps),
                         cycle_report_message,
                     )
-                await _save_session_summary(current, "failed")
+                    await refund_unused_token_reservation()
+                    await _save_session_summary(current, "failed")
                 await _send_session_end_message(
                     query,
                     user_id,
@@ -1767,6 +1885,7 @@ async def _run_auto_trade_loop(update, state) -> None:
                 current, settlement_error = apply_settlement_result(settlement)
             if settlement_error:
                 current = auto_trade_service.get_run(user_id) or current
+                await refund_unused_token_reservation()
                 await _save_session_summary(current, "failed")
                 await _send_session_end_message(
                     query,
@@ -1785,6 +1904,7 @@ async def _run_auto_trade_loop(update, state) -> None:
             and account_mode_service.get_mode(user_id) != current.account_mode
         ):
             current = auto_trade_service.finish_run(user_id, "account_mode_changed") or current
+            await refund_unused_token_reservation()
             await flush_pending_settlement(current)
             await _save_session_summary(current, "stopped")
             await _send_session_end_message(
@@ -1808,6 +1928,7 @@ async def _run_auto_trade_loop(update, state) -> None:
             status = result.get("status")
             reason = result.get("reason", "Unknown error")
             current = auto_trade_service.get_run(user_id) or current
+            await refund_unused_token_reservation()
             await flush_pending_settlement(current)
 
             logger.warning(

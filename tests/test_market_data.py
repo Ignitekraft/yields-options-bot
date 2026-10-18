@@ -1007,8 +1007,18 @@ class MarketDataTests(unittest.TestCase):
 
         websocket = FakeWebSocket()
 
-        async def on_settlement(settlement, connected_websocket):
-            handoff_calls.append((settlement["contract_id"], connected_websocket))
+        async def on_settlement(
+            settlement,
+            connected_websocket,
+            prepared_proposals,
+        ):
+            handoff_calls.append(
+                (
+                    settlement["contract_id"],
+                    connected_websocket,
+                    prepared_proposals,
+                )
+            )
             return {"status": "accepted"}
 
         with patch(
@@ -1024,11 +1034,101 @@ class MarketDataTests(unittest.TestCase):
                 )
             )
 
-        self.assertEqual(handoff_calls, [("123456789", websocket)])
+        self.assertEqual(
+            handoff_calls,
+            [("123456789", websocket, {})],
+        )
         self.assertEqual(
             result["next_trade_result"],
             {"status": "accepted"},
         )
+
+    def test_monitor_contract_preloads_proposal_before_settlement(self):
+        service = TradeExecutionService()
+        handoff = []
+
+        class FakeWebSocket:
+            def __init__(self):
+                self.sent = []
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return None
+
+            async def send(self, payload):
+                self.sent.append(json.loads(payload))
+
+            async def recv(self):
+                contract_req_id = self.sent[0]["req_id"]
+                proposal_request = next(
+                    request
+                    for request in self.sent
+                    if request.get("proposal") == 1
+                )
+                if not getattr(self, "proposal_sent", False):
+                    self.proposal_sent = True
+                    return json.dumps(
+                        {
+                            "echo_req": {"req_id": proposal_request["req_id"]},
+                            "proposal": {
+                                "id": "preloaded-proposal",
+                                "ask_price": 1.25,
+                            },
+                        }
+                    )
+                return json.dumps(
+                    {
+                        "echo_req": {"req_id": contract_req_id},
+                        "proposal_open_contract": {
+                            "contract_id": 123456789,
+                            "is_sold": True,
+                            "profit": 1.0,
+                            "entry_tick": 100,
+                            "exit_tick": 101,
+                        },
+                    }
+                )
+
+        websocket = FakeWebSocket()
+
+        async def on_settlement(_settlement, connected_websocket, proposals):
+            handoff.append((connected_websocket, proposals))
+            return {"status": "accepted"}
+
+        with patch(
+            "app.services.trade_execution_service.websockets.connect",
+            return_value=websocket,
+        ):
+            result = asyncio.run(
+                service.monitor_contract(
+                    "123456789",
+                    "wss://example.com",
+                    timeout_seconds=1,
+                    on_settlement=on_settlement,
+                    preload_proposals=[
+                        {
+                            "symbol": "step_300",
+                            "direction": "BULLISH",
+                            "stake": 2.0,
+                            "currency": "USD",
+                        }
+                    ],
+                )
+            )
+
+        self.assertEqual(result["next_trade_result"]["status"], "accepted")
+        self.assertEqual(len(handoff), 1)
+        self.assertIs(handoff[0][0], websocket)
+        self.assertEqual(
+            handoff[0][1]["STPRNG3:2.00"],
+            {
+                "proposal_id": "preloaded-proposal",
+                "ask_price": 1.25,
+            },
+        )
+        self.assertEqual(websocket.sent[1]["underlying_symbol"], "STPRNG3")
 
     def test_monitor_contract_uses_live_ticks_when_contract_ticks_are_missing(self):
         service = TradeExecutionService()
@@ -1266,16 +1366,25 @@ class MarketDataTests(unittest.TestCase):
                     ws_url="wss://example.com",
                     account_type="demo",
                     websocket=websocket,
+                    prepared_proposals={
+                        "STPRNG:1.00": {
+                            "proposal_id": "preloaded-proposal",
+                            "ask_price": 1.05,
+                        }
+                    },
                 )
             )
 
         self.assertEqual(result["status"], "accepted")
         connect.assert_not_called()
-        create_proposal.assert_awaited_once()
-        self.assertIs(create_proposal.await_args.kwargs["websocket"], websocket)
-        self.assertFalse(create_proposal.await_args.kwargs["subscribe"])
+        create_proposal.assert_not_awaited()
         buy_contract.assert_awaited_once()
         self.assertIs(buy_contract.await_args.kwargs["websocket"], websocket)
+        self.assertEqual(
+            buy_contract.await_args.kwargs["proposal_id"],
+            "preloaded-proposal",
+        )
+        self.assertEqual(buy_contract.await_args.kwargs["price"], 1.05)
 
     def test_contract_buy_validation_error_is_human_readable(self):
         message = TradeExecutionService._error_message(
@@ -1649,8 +1758,10 @@ class MarketDataTests(unittest.TestCase):
             effective_user=SimpleNamespace(id="martingale-progression-user"),
         )
 
-        async def fake_execute_trade(_user_id, trade_state):
+        async def fake_execute_trade(_user_id, trade_state, **kwargs):
             executed_stakes.append(trade_state.current_stake)
+            if len(executed_stakes) > 1:
+                self.assertTrue(kwargs.get("token_pre_reserved"))
             service.record_trade_stake(
                 trade_state.user_id,
                 trade_state.current_stake,
@@ -1659,6 +1770,21 @@ class MarketDataTests(unittest.TestCase):
             trade_state.market_symbol = "STPRNG"
             trade_state.status = "monitoring"
             return {"status": "accepted"}
+
+        async def fake_monitor(_user_id, _trade_state, **kwargs):
+            settlement = next(settlements)
+            await kwargs["on_settlement"](
+                settlement,
+                object(),
+                {
+                    "account_type": "demo",
+                    "account_id": "demo-1",
+                    "currency": "USD",
+                    "ws_url": "wss://example.test",
+                },
+                {},
+            )
+            return settlement
 
         with patch(
             "app.bot.callbacks.auto_trade_service",
@@ -1671,10 +1797,14 @@ class MarketDataTests(unittest.TestCase):
             new=AsyncMock(side_effect=fake_execute_trade),
         ), patch(
             "app.bot.callbacks._monitor_settlement",
-            new=AsyncMock(side_effect=lambda *_args: next(settlements)),
+            new=AsyncMock(side_effect=fake_monitor),
         ), patch(
             "app.bot.callbacks.trade_history_service",
-            SimpleNamespace(record_settled_trade=lambda *_args: None),
+            SimpleNamespace(
+                reserve_token=lambda *_: {"ok": True, "token_balance": 10},
+                refund_token=lambda *_: {"ok": True, "token_balance": 10},
+                record_settled_trade=lambda *_args: None,
+            ),
         ), patch(
             "app.bot.callbacks._save_session_summary",
             new=AsyncMock(),
@@ -1708,6 +1838,8 @@ class MarketDataTests(unittest.TestCase):
         executed_stakes = []
         cycle_reports = []
         end_photos = []
+        token_reservations = []
+        token_refunds = []
 
         class FakeCycleMessage:
             def __init__(self, text, parse_mode=None):
@@ -1741,8 +1873,10 @@ class MarketDataTests(unittest.TestCase):
             effective_user=SimpleNamespace(id="five-loss-report-user"),
         )
 
-        async def fake_execute_trade(_user_id, trade_state):
+        async def fake_execute_trade(_user_id, trade_state, **kwargs):
             executed_stakes.append(trade_state.current_stake)
+            if len(executed_stakes) > 1:
+                self.assertTrue(kwargs.get("token_pre_reserved"))
             service.record_trade_stake(
                 trade_state.user_id,
                 trade_state.current_stake,
@@ -1763,6 +1897,30 @@ class MarketDataTests(unittest.TestCase):
             ]
         )
 
+        async def fake_monitor(_user_id, _trade_state, **kwargs):
+            settlement = next(settlements)
+            await kwargs["on_countdown"](8)
+            await kwargs["on_settlement"](
+                settlement,
+                object(),
+                {
+                    "account_type": "demo",
+                    "account_id": "demo-1",
+                    "currency": "USD",
+                    "ws_url": "wss://example.test",
+                },
+                {},
+            )
+            return settlement
+
+        def reserve_token(*_args):
+            token_reservations.append(True)
+            return {"ok": True, "token_balance": 10}
+
+        def refund_token(*_args):
+            token_refunds.append(True)
+            return {"ok": True, "token_balance": 10}
+
         with patch(
             "app.bot.callbacks.auto_trade_service",
             service,
@@ -1774,10 +1932,14 @@ class MarketDataTests(unittest.TestCase):
             new=AsyncMock(side_effect=fake_execute_trade),
         ), patch(
             "app.bot.callbacks._monitor_settlement",
-            new=AsyncMock(side_effect=lambda *_args: next(settlements)),
+            new=AsyncMock(side_effect=fake_monitor),
         ), patch(
             "app.bot.callbacks.trade_history_service",
-            SimpleNamespace(record_settled_trade=lambda *_args: None),
+            SimpleNamespace(
+                reserve_token=reserve_token,
+                refund_token=refund_token,
+                record_settled_trade=lambda *_args: None,
+            ),
         ), patch(
             "app.bot.callbacks._save_session_summary",
             new=AsyncMock(),
@@ -1814,6 +1976,8 @@ class MarketDataTests(unittest.TestCase):
         self.assertNotIn("stopped after 5 consecutive losses", cycle_reports[0].text)
         self.assertEqual(state.status, "completed")
         self.assertEqual(state.consecutive_losses, 0)
+        self.assertEqual(len(token_reservations), 6)
+        self.assertEqual(len(token_refunds), 1)
         self.assertEqual(len(end_photos), 1)
         self.assertEqual(
             end_photos[0]["photo"],
@@ -2135,13 +2299,40 @@ class MarketDataTests(unittest.TestCase):
 
         update = FakeUpdate()
 
-        async def fake_execute_trade(_user_id, trade_state):
+        async def fake_execute_trade(_user_id, trade_state, **kwargs):
             events.append("purchase_attempt")
             if events.count("purchase_attempt") == 1:
                 trade_state.contract_id = "first-contract"
+                trade_state.market_symbol = "STPRNG3"
                 trade_state.status = "monitoring"
                 return {"status": "accepted"}
+            self.assertTrue(kwargs.get("token_pre_reserved"))
+            self.assertEqual(
+                kwargs.get("prepared_proposals", {}).get("STPRNG3:4.60"),
+                {"proposal_id": "cached", "ask_price": 4.6},
+            )
             return {"status": "rejected", "reason": "stop"}
+
+        async def fake_monitor(_user_id, trade_state, **kwargs):
+            settlement = {
+                "profit": -2.0,
+                "status": "settled",
+                "contract_id": "first-contract",
+                "entry_tick": 100,
+                "exit_tick": 99,
+            }
+            await kwargs["on_settlement"](
+                settlement,
+                object(),
+                {
+                    "account_type": "demo",
+                    "account_id": "demo-1",
+                    "currency": "USD",
+                    "ws_url": "wss://example.test",
+                },
+                {"STPRNG3:4.60": {"proposal_id": "cached", "ask_price": 4.6}},
+            )
+            return settlement
 
         def record_settled_trade(trade):
             events.append(("settled_trade", trade))
@@ -2157,15 +2348,7 @@ class MarketDataTests(unittest.TestCase):
             service,
         ), patch(
             "app.bot.callbacks._monitor_settlement",
-            new=AsyncMock(
-                return_value={
-                    "profit": -2.0,
-                    "status": "settled",
-                    "contract_id": "first-contract",
-                    "entry_tick": 100,
-                    "exit_tick": 99,
-                }
-            ),
+            new=AsyncMock(side_effect=fake_monitor),
         ), patch(
             "app.bot.callbacks.execute_trade",
             new=AsyncMock(side_effect=fake_execute_trade),
@@ -2260,6 +2443,7 @@ class MarketDataTests(unittest.TestCase):
                 settlement,
                 websocket,
                 prepared_account,
+                {},
             )
             events.append("monitor_returned")
             return {**settlement, "next_trade_result": result}
@@ -2278,7 +2462,11 @@ class MarketDataTests(unittest.TestCase):
             return_value="demo",
         ), patch(
             "app.bot.callbacks.trade_history_service",
-            SimpleNamespace(record_settled_trade=lambda *_args: None),
+            SimpleNamespace(
+                reserve_token=lambda *_: {"ok": True, "token_balance": 10},
+                refund_token=lambda *_: {"ok": True, "token_balance": 10},
+                record_settled_trade=lambda *_args: None,
+            ),
         ), patch(
             "app.bot.callbacks._save_session_summary",
             new=AsyncMock(),
@@ -4504,10 +4692,6 @@ class MarketDataTests(unittest.TestCase):
         deriv_trade.assert_awaited_once()
 
     def test_execute_trade_uses_preverified_account_and_existing_websocket(self):
-        class FakeTradeHistory:
-            def reserve_token(self, *_args):
-                return {"ok": True, "token_balance": 4}
-
         run_service = AutoTradeService()
         state = run_service.start_run(
             "reuse-account-user",
@@ -4524,6 +4708,10 @@ class MarketDataTests(unittest.TestCase):
             "ws_url": "wss://example.test",
         }
         websocket = object()
+        trade_history = SimpleNamespace(
+            reserve_token=Mock(return_value={"ok": True, "token_balance": 4}),
+            refund_token=Mock(),
+        )
 
         with patch(
             "app.bot.callbacks.auto_trade_service",
@@ -4542,7 +4730,7 @@ class MarketDataTests(unittest.TestCase):
             new=AsyncMock(side_effect=AssertionError("must reuse active socket")),
         ) as request_otp, patch(
             "app.bot.callbacks.trade_history_service",
-            FakeTradeHistory(),
+            trade_history,
         ), patch(
             "app.bot.callbacks.trade_execution_service.execute_trade",
             new=AsyncMock(
@@ -4562,12 +4750,15 @@ class MarketDataTests(unittest.TestCase):
                     state,
                     prepared_account=prepared_account,
                     websocket=websocket,
+                    token_pre_reserved=True,
                 )
             )
 
         self.assertEqual(result["status"], "accepted")
         resolve_account.assert_not_awaited()
         request_otp.assert_not_awaited()
+        trade_history.reserve_token.assert_not_called()
+        self.assertEqual(state.tokens_spent, 1)
         self.assertIs(deriv_trade.await_args.kwargs["websocket"], websocket)
         self.assertEqual(
             deriv_trade.await_args.kwargs["ws_url"],
