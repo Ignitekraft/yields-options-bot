@@ -27,6 +27,7 @@ Implemented:
 - `/stats` reports the last 10 finalized Auto Trade sessions; session win rate is based on positive session PnL, while direction accuracy is calculated from settled contract ticks.
 - One Yields Token is reserved for each contract purchase. Explicitly rejected purchases are refunded; an uncertain purchase outcome is not refunded to prevent an uncharged possible trade.
 - Auto Trade session starts are recorded in Supabase and limited to 3 per user before a 15-minute cooldown, enforced across bot workers. The cooldown begins when the third session starts. When the limit is reached, that user's Auto Trade button displays the remaining cooldown and explains the pause; the limit is atomically checked again when a session is confirmed.
+- Consecutive Auto Trade sessions for a user must use different markets. The previous session's market is excluded from the next scan, and Supabase atomically rejects a stale confirmation that would reuse it.
 - Users can claim a one-time gift of 200 Yields Tokens from the Telegram welcome flow. The claim is recorded on their persistent Supabase profile, including for users who received the former 150-token OAuth grant.
 - The dashboard's Get Tokens button and `/tokens` command show Whop packages for 50, 100, 200, and 500 tokens. The package selection screen links to each checkout and returns to the `/start` menu.
 - `/referrals` shows a user's unique invite link and referral earnings. Verified purchases credit the buyer's tokens and pay the referrer 5% of the USD amount paid.
@@ -75,7 +76,11 @@ two decimal places. The selected market and direction remain pinned from
 analysis through confirmation. Auto Trade currently has no consecutive-loss stop: Smart Scaling
 can increase the next stake substantially after repeated losses. Contracts
 expire after five ticks, and a session ends after its target of 3 winning cycles,
-token depletion, insufficient balance, or an execution/settlement failure.
+token depletion, insufficient balance, or an execution failure. After a
+contract is bought, settlement monitoring reconnects with a fresh account URL
+and retries transient errors until Deriv confirms the result; no next contract
+is purchased before that confirmation. This recovery depends on the bot process
+remaining running.
 
 ## Deriv rate limiting
 

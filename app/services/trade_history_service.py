@@ -286,6 +286,31 @@ class TradeHistoryService:
             raise RuntimeError("SUPABASE_AUTO_TRADE_LIMIT_RESPONSE_INVALID")
         return result
 
+    def get_last_auto_trade_market(
+        self,
+        telegram_user_id: str | int,
+    ) -> str | None:
+        result = self._request(
+            "GET",
+            "auto_trade_sessions",
+            params={
+                "select": "market_symbol",
+                "telegram_user_id": f"eq.{telegram_user_id}",
+                "order": "started_at.desc,id.desc",
+                "limit": "1",
+            },
+        ).json()
+        if not isinstance(result, list):
+            raise RuntimeError("SUPABASE_LAST_AUTO_TRADE_MARKET_RESPONSE_INVALID")
+        if not result:
+            return None
+        if not isinstance(result[0], dict):
+            raise RuntimeError("SUPABASE_LAST_AUTO_TRADE_MARKET_RESPONSE_INVALID")
+        market_symbol = result[0].get("market_symbol")
+        if not isinstance(market_symbol, str) or not market_symbol.strip():
+            raise RuntimeError("SUPABASE_LAST_AUTO_TRADE_MARKET_RESPONSE_INVALID")
+        return market_symbol
+
     def start_auto_trade_session(
         self,
         session: dict[str, Any],

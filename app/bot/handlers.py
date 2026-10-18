@@ -13,6 +13,7 @@ from app.services.auto_trade_service import AutoTradeService
 from app.services.deriv.auth import build_deriv_oauth_url
 from app.services.deriv.market_data import MarketDataService
 from app.services.scanner import YieldsScanner
+from app.services.trade_execution_service import TradeExecutionService
 from app.services.trade_history_service import TradeHistoryService
 
 from .messages import (
@@ -320,6 +321,7 @@ def handle_account_mode_settings(
 
 def build_auto_trade_setup(
     telegram_user_id: str | int,
+    excluded_market_symbol: str | None = None,
 ) -> dict:
     user_key = str(telegram_user_id)
     if not auth_service.get_valid_access_token(user_key):
@@ -334,7 +336,18 @@ def build_auto_trade_setup(
 
     service = MarketDataService()
     scanner = YieldsScanner()
-    snapshots = scanner.collect_step_market_snapshots(service)
+    scanned_snapshots = scanner.collect_step_market_snapshots(service)
+    excluded_market = None
+    if excluded_market_symbol:
+        excluded_market = TradeExecutionService.normalize_step_symbol(
+            excluded_market_symbol
+        )
+    snapshots = [
+        snapshot
+        for snapshot in scanned_snapshots
+        if excluded_market is None
+        or _market_identity(snapshot.symbol) != excluded_market
+    ]
     candidates = [
         snapshot
         for snapshot in snapshots
@@ -357,7 +370,7 @@ def build_auto_trade_setup(
         if snapshot.data_quality != "good"
     ]
     scan_summary = {
-        "markets_scanned": len(snapshots),
+        "markets_scanned": len(scanned_snapshots),
         "markets_available": len(candidates),
         "market_issues": market_issues,
     }
@@ -394,15 +407,28 @@ def build_auto_trade_setup(
                 f"{item['display_name']}: {item['reason']}"
                 for item in market_issues
             )
-        reasoning = (
-            "No usable live market data was available."
-            + (f" {issue_details}" if issue_details else "")
-        )
+        if excluded_market is not None and not market_issues:
+            reasoning = (
+                "No directional setup was available in another market."
+            )
+        else:
+            reasoning = (
+                "No usable live market data was available."
+                + (f" {issue_details}" if issue_details else "")
+            )
+        if excluded_market is not None:
+            reasoning += (
+                f" Previous market "
+                f"({_trade_market_name(excluded_market_symbol or '')}) was "
+                "excluded to alternate markets."
+            )
         return {
             "symbol": "NO_SETUP",
             "display_name": "Market Scan",
             "direction": "NO_TRADE",
-            "scan_status": "unavailable",
+            "scan_status": (
+                "no_setup" if excluded_market is not None else "unavailable"
+            ),
             "indicators": {"signal_reason": reasoning},
             "current_price": 0.0,
             "signal_strength": 0.0,
@@ -437,6 +463,13 @@ def build_auto_trade_setup(
         "scan_status": "ready" if is_directional else "no_setup",
         **scan_summary,
     }
+
+
+def _market_identity(symbol: str) -> str:
+    try:
+        return TradeExecutionService.normalize_step_symbol(symbol)
+    except ValueError:
+        return str(symbol or "").strip().upper()
 
 
 def handle_status(telegram_user_id: str | int) -> str:

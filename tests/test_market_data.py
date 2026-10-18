@@ -20,6 +20,7 @@ from app.bot.callbacks import (
     _auto_trade_start_failure_message,
     _payout_failure_reason_for_user,
     _handle_auto_trade_entry,
+    _monitor_settlement,
     _run_auto_trade,
     _run_auto_trade_loop,
     handle_custom_stake_input,
@@ -275,6 +276,38 @@ class MarketDataTests(unittest.TestCase):
         )
         token_balance.assert_not_awaited()
         scan_setup.assert_not_awaited()
+
+    def test_auto_trade_entry_does_not_block_on_expired_countdown(self):
+        update = SimpleNamespace(
+            effective_user=SimpleNamespace(id="expired-limit-user")
+        )
+
+        class FakeQuery:
+            async def answer(self, *_args, **_kwargs):
+                return None
+
+        with patch(
+            "app.bot.callbacks._get_auto_trade_limit_status",
+            new=AsyncMock(
+                return_value={
+                    "locked": True,
+                    "retry_after_seconds": 0,
+                }
+            ),
+        ) as limit_status, patch(
+            "app.bot.callbacks.auth_service.get_valid_access_token",
+            return_value="access-token",
+        ), patch(
+            "app.bot.callbacks._get_trade_token_balance",
+            new=AsyncMock(return_value=51),
+        ), patch(
+            "app.bot.callbacks._show_auto_trade_setup",
+            new=AsyncMock(),
+        ) as show_setup:
+            asyncio.run(_handle_auto_trade_entry(update, FakeQuery()))
+
+        limit_status.assert_awaited_once_with("expired-limit-user")
+        show_setup.assert_awaited_once()
 
     def test_unhandled_telegram_errors_hide_technical_details(self):
         reply_text = AsyncMock()
@@ -2292,6 +2325,94 @@ class MarketDataTests(unittest.TestCase):
             "Settlement could not be verified.",
         )
 
+    def test_monitor_settlement_reconnects_until_deriv_confirms_settlement(self):
+        state = SimpleNamespace(
+            account_mode="demo",
+            contract_id="pending-contract",
+            market_symbol="STPRNG3",
+            symbol="step_300",
+        )
+        monitor_results = [
+            TimeoutError("CONTRACT_MONITOR_TIMEOUT"),
+            {
+                "status": "settled",
+                "contract_id": "pending-contract",
+                "is_sold": True,
+                "profit": -2.99,
+            },
+        ]
+        monitor_calls = []
+        settlement_callback = AsyncMock()
+
+        async def monitor_contract(**kwargs):
+            monitor_calls.append(kwargs)
+            result = monitor_results.pop(0)
+            if isinstance(result, Exception):
+                raise result
+            await kwargs["on_settlement"](
+                result,
+                object(),
+                {},
+            )
+            return result
+
+        with patch(
+            "app.bot.callbacks.auth_service.get_valid_access_token",
+            return_value="access-token",
+        ), patch(
+            "app.bot.callbacks.account_service.get_trade_account",
+            new=AsyncMock(
+                return_value={
+                    "account_type": "demo",
+                    "account_id": "demo-account",
+                    "currency": "USD",
+                }
+            ),
+        ) as get_trade_account, patch(
+            "app.bot.callbacks.account_service.request_account_otp_url",
+            new=AsyncMock(
+                side_effect=[
+                    "wss://api.derivws.com/first-otp",
+                    "wss://api.derivws.com/refreshed-otp",
+                ]
+            ),
+        ) as request_otp, patch(
+            "app.bot.callbacks.trade_execution_service.monitor_contract",
+            new=AsyncMock(side_effect=monitor_contract),
+        ), patch(
+            "app.bot.callbacks.asyncio.sleep",
+            new=AsyncMock(),
+        ) as retry_sleep:
+            result = asyncio.run(
+                _monitor_settlement(
+                    "settlement-retry-user",
+                    state,
+                    on_settlement=settlement_callback,
+                )
+            )
+
+        self.assertEqual(result["status"], "settled")
+        self.assertEqual(result["contract_id"], "pending-contract")
+        self.assertEqual(len(monitor_calls), 2)
+        self.assertEqual(
+            [call["ws_url"] for call in monitor_calls],
+            [
+                "wss://api.derivws.com/first-otp",
+                "wss://api.derivws.com/refreshed-otp",
+            ],
+        )
+        self.assertTrue(
+            all(call["contract_id"] == "pending-contract" for call in monitor_calls)
+        )
+        self.assertEqual(get_trade_account.await_count, 2)
+        self.assertEqual(request_otp.await_count, 2)
+        retry_sleep.assert_awaited_once_with(2)
+        settlement_callback.assert_awaited_once()
+        self.assertEqual(
+            settlement_callback.await_args.args[2]["ws_url"],
+            "wss://api.derivws.com/refreshed-otp",
+        )
+
     def test_auto_trade_starts_next_cycle_without_delay_after_settlement(self):
         service = AutoTradeService()
         service.start_run(
@@ -3138,6 +3259,69 @@ class MarketDataTests(unittest.TestCase):
         self.assertEqual(setup["scan_status"], "ready")
         self.assertEqual(setup["indicators"]["directional_score"], -68.0)
 
+    def test_auto_trade_setup_skips_the_previous_session_market(self):
+        auth = AuthService()
+        auth.connect_user(
+            "alternate-market-user",
+            {
+                "access_token": "alternate-market-token",
+                "refresh_token": "alternate-market-refresh",
+                "expires_in": 3600,
+                "token_type": "Bearer",
+            },
+        )
+        snapshots = [
+            MarketSnapshot(
+                symbol="step_100",
+                display_name="Step 100",
+                current_price=100.0,
+                trend="bullish",
+                indicators={
+                    "directional_score": 80.0,
+                    "signal_strength": 8.0,
+                    "signal_reason": "Strong bullish indicators.",
+                },
+                data_quality="good",
+            ),
+            MarketSnapshot(
+                symbol="step_200",
+                display_name="Step 200",
+                current_price=200.0,
+                trend="bearish",
+                indicators={
+                    "directional_score": -40.0,
+                    "signal_strength": 4.0,
+                    "signal_reason": "Bearish indicators.",
+                },
+                data_quality="good",
+            ),
+        ]
+
+        with patch(
+            "app.bot.handlers.YieldsScanner.collect_step_market_snapshots",
+            return_value=snapshots,
+        ):
+            setup = build_auto_trade_setup(
+                "alternate-market-user",
+                excluded_market_symbol="STPRNG",
+            )
+        with patch(
+            "app.bot.handlers.YieldsScanner.collect_step_market_snapshots",
+            return_value=[snapshots[0]],
+        ):
+            no_alternative = build_auto_trade_setup(
+                "alternate-market-user",
+                excluded_market_symbol="step_100",
+            )
+
+        self.assertEqual(setup["symbol"], "step_200")
+        self.assertEqual(setup["direction"], "BEARISH")
+        self.assertEqual(setup["markets_scanned"], 2)
+        self.assertEqual(setup["markets_available"], 1)
+        self.assertEqual(no_alternative["symbol"], "NO_SETUP")
+        self.assertEqual(no_alternative["scan_status"], "no_setup")
+        self.assertIn("previous market", no_alternative["reasoning"].lower())
+
     def test_auto_trade_setup_rejects_conflicting_indicator_votes(self):
         auth = AuthService()
         auth.connect_user(
@@ -3332,6 +3516,138 @@ class MarketDataTests(unittest.TestCase):
             start_session.call_args.args[0]["telegram_user_id"],
             "limit-race-user",
         )
+        run_auto_trade.assert_not_awaited()
+
+    def test_confirmation_retries_atomic_start_when_countdown_is_zero(self):
+        class FakeQuery:
+            data = "AUTO_TRADE_CONFIRM"
+
+            def __init__(self):
+                self.message = SimpleNamespace(reply_text=AsyncMock())
+
+            async def answer(self, *_args, **_kwargs):
+                return None
+
+            async def edit_message_text(self, *_args, **_kwargs):
+                return None
+
+        user_id = "expired-limit-confirm-user"
+        update = SimpleNamespace(
+            callback_query=FakeQuery(),
+            effective_user=SimpleNamespace(
+                id=user_id,
+                first_name="Test",
+                last_name=None,
+                username=None,
+            ),
+        )
+        run_service = AutoTradeService()
+        state = run_service.start_run(
+            user_id,
+            "step_100",
+            "BULLISH",
+            10.0,
+            account_mode="demo",
+        )
+        start_session = Mock(
+            side_effect=[
+                {
+                    "started": False,
+                    "retry_after_seconds": 0,
+                },
+                {
+                    "started": True,
+                    "retry_after_seconds": 0,
+                },
+            ]
+        )
+
+        with patch(
+            "app.bot.callbacks.auto_trade_service",
+            run_service,
+        ), patch(
+            "app.bot.callbacks.auth_service.get_valid_access_token",
+            return_value="access-token",
+        ), patch(
+            "app.bot.callbacks.account_mode_service.get_mode",
+            return_value="demo",
+        ), patch(
+            "app.bot.callbacks.trade_history_service",
+            SimpleNamespace(
+                ensure_user=lambda *_args, **_kwargs: {"token_balance": 10},
+                start_auto_trade_session=start_session,
+            ),
+        ), patch(
+            "app.bot.callbacks._run_auto_trade",
+            new=AsyncMock(),
+        ) as run_auto_trade:
+            asyncio.run(dispatch_callback(update, None))
+
+        self.assertEqual(start_session.call_count, 2)
+        self.assertEqual(state.status, "running")
+        run_auto_trade.assert_awaited_once_with(update, state)
+
+    def test_confirmation_rejects_same_market_as_previous_session(self):
+        class FakeQuery:
+            data = "AUTO_TRADE_CONFIRM"
+
+            def __init__(self):
+                self.message = SimpleNamespace(reply_text=AsyncMock())
+                self.edited = None
+
+            async def answer(self, *_args, **_kwargs):
+                return None
+
+            async def edit_message_text(self, text, **_kwargs):
+                self.edited = text
+
+        user_id = "same-market-user"
+        update = SimpleNamespace(
+            callback_query=FakeQuery(),
+            effective_user=SimpleNamespace(
+                id=user_id,
+                first_name="Test",
+                last_name=None,
+                username=None,
+            ),
+        )
+        run_service = AutoTradeService()
+        state = run_service.start_run(
+            user_id,
+            "step_100",
+            "BULLISH",
+            10.0,
+            account_mode="demo",
+        )
+        with patch(
+            "app.bot.callbacks.auto_trade_service",
+            run_service,
+        ), patch(
+            "app.bot.callbacks.auth_service.get_valid_access_token",
+            return_value="access-token",
+        ), patch(
+            "app.bot.callbacks.account_mode_service.get_mode",
+            return_value="demo",
+        ), patch(
+            "app.bot.callbacks.trade_history_service",
+            SimpleNamespace(
+                ensure_user=lambda *_args, **_kwargs: {"token_balance": 10},
+                start_auto_trade_session=lambda *_args: {
+                    "started": False,
+                    "same_market": True,
+                    "previous_market_symbol": "STPRNG",
+                },
+            ),
+        ), patch(
+            "app.bot.callbacks._run_auto_trade",
+            new=AsyncMock(),
+        ) as run_auto_trade:
+            asyncio.run(dispatch_callback(update, None))
+
+        self.assertEqual(state.status, "cancelled")
+        self.assertIn("Step Index 100", update.callback_query.edited)
+        self.assertIn("different one", update.callback_query.edited)
+        self.assertIn("no trade has been placed", update.callback_query.edited)
         run_auto_trade.assert_not_awaited()
 
     def test_confirm_callback_blocks_when_token_balance_is_zero(self):
@@ -3811,6 +4127,9 @@ class MarketDataTests(unittest.TestCase):
             "app.bot.callbacks.auth_service.get_valid_access_token",
             return_value="access-token",
         ), patch(
+            "app.bot.callbacks.trade_history_service.get_last_auto_trade_market",
+            return_value="step_500",
+        ), patch(
             "app.bot.callbacks.build_auto_trade_setup",
             scan,
         ), patch(
@@ -3819,7 +4138,7 @@ class MarketDataTests(unittest.TestCase):
         ):
             asyncio.run(_show_auto_trade_setup(update, update.callback_query))
 
-        scan.assert_called_once_with("indicator-scan-user")
+        scan.assert_called_once_with("indicator-scan-user", "step_500")
         self.assertIn("Step Index 100", update.callback_query.edited)
         self.assertIn("UP SETUP", update.callback_query.edited)
         choices = [
@@ -4766,6 +5085,36 @@ class MarketDataTests(unittest.TestCase):
         self.assertEqual(
             json.loads(requests[1].content),
             {"p_telegram_user_id": "12345"},
+        )
+
+    def test_trade_history_service_fetches_latest_user_market(self):
+        requests = []
+
+        def respond(request):
+            requests.append(request)
+            return httpx.Response(
+                200,
+                json=[{"market_symbol": "step_300"}],
+                request=request,
+            )
+
+        service = TradeHistoryService(
+            supabase_url="https://project.supabase.co",
+            service_role_key="test-service-role-key",
+            transport=httpx.MockTransport(respond),
+        )
+
+        self.assertEqual(service.get_last_auto_trade_market("12345"), "step_300")
+        self.assertEqual(requests[0].method, "GET")
+        self.assertEqual(requests[0].url.path, "/rest/v1/auto_trade_sessions")
+        self.assertEqual(
+            dict(requests[0].url.params),
+            {
+                "select": "market_symbol",
+                "telegram_user_id": "eq.12345",
+                "order": "started_at.desc,id.desc",
+                "limit": "1",
+            },
         )
 
     def test_per_user_auto_trade_session_limit_uses_shared_supabase_rpcs(self):

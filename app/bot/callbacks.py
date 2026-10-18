@@ -530,6 +530,20 @@ async def _prompt_connect(update, query) -> None:
     )
 
 
+async def _build_next_auto_trade_setup(user_id: str | int) -> dict:
+    previous_market = await asyncio.to_thread(
+        trade_history_service.get_last_auto_trade_market,
+        user_id,
+    )
+    if previous_market is None:
+        return await asyncio.to_thread(build_auto_trade_setup, user_id)
+    return await asyncio.to_thread(
+        build_auto_trade_setup,
+        user_id,
+        previous_market,
+    )
+
+
 async def _show_auto_trade_setup(update, query, context=None) -> None:
     del context
     user_id = update.effective_user.id
@@ -539,7 +553,7 @@ async def _show_auto_trade_setup(update, query, context=None) -> None:
         return
 
     try:
-        setup = await asyncio.to_thread(build_auto_trade_setup, user_id)
+        setup = await _build_next_auto_trade_setup(user_id)
     except Exception:
         logger.exception("Could not retrieve Deriv data for the Auto Trade scan")
         await _send_scan_message(
@@ -814,11 +828,18 @@ async def _handle_auto_trade_entry(
         )
         return
     if limit_status["locked"]:
-        await _show_auto_trade_limit_notice(
-            query,
-            limit_status["retry_after_seconds"],
+        retry_after_seconds = limit_status["retry_after_seconds"]
+        if retry_after_seconds > 0:
+            await _show_auto_trade_limit_notice(
+                query,
+                retry_after_seconds,
+            )
+            return
+        logger.warning(
+            "Auto Trade limit returned an expired countdown for user %s; "
+            "allowing setup and relying on the atomic confirmation check",
+            user_id,
         )
-        return
 
     answer = getattr(query, "answer", None)
     if answer is not None:
@@ -1520,48 +1541,72 @@ async def _monitor_settlement(
     preload_proposals: list[dict] | None = None,
 ) -> dict:
     user_key = str(user_id)
-    access_token = auth_service.get_valid_access_token(user_key)
+    retry_number = 0
 
-    if not access_token:
-        raise RuntimeError("DERIV_NOT_AUTHENTICATED_DURING_MONITORING")
+    while True:
+        try:
+            access_token = auth_service.get_valid_access_token(user_key)
+            if not access_token:
+                raise RuntimeError("DERIV_NOT_AUTHENTICATED_DURING_MONITORING")
 
-    account = await account_service.get_trade_account(
-        user_key,
-        account_mode=state.account_mode,
-    )
+            account = await account_service.get_trade_account(
+                user_key,
+                account_mode=state.account_mode,
+            )
 
-    if str(account.get("account_type") or "").lower() != state.account_mode:
-        raise RuntimeError("ACCOUNT_MODE_VERIFICATION_FAILED_DURING_MONITORING")
+            if str(account.get("account_type") or "").lower() != state.account_mode:
+                raise RuntimeError(
+                    "ACCOUNT_MODE_VERIFICATION_FAILED_DURING_MONITORING"
+                )
 
-    ws_url = await account_service.request_account_otp_url(
-        access_token=access_token,
-        account_id=account["account_id"],
-    )
+            ws_url = await account_service.request_account_otp_url(
+                access_token=access_token,
+                account_id=account["account_id"],
+            )
+            prepared_account = {
+                **account,
+                "ws_url": ws_url,
+            }
 
-    prepared_account = {
-        **account,
-        "ws_url": ws_url,
-    }
+            async def handle_settlement(
+                settlement,
+                websocket,
+                prepared_proposals,
+            ):
+                if on_settlement is None:
+                    return None
+                return await on_settlement(
+                    settlement,
+                    websocket,
+                    prepared_account,
+                    prepared_proposals,
+                )
 
-    async def handle_settlement(settlement, websocket, prepared_proposals):
-        if on_settlement is None:
-            return None
-        return await on_settlement(
-            settlement,
-            websocket,
-            prepared_account,
-            prepared_proposals,
-        )
-
-    return await trade_execution_service.monitor_contract(
-        contract_id=state.contract_id,
-        ws_url=ws_url,
-        timeout_seconds=75,
-        market_symbol=state.market_symbol or state.symbol,
-        on_countdown=on_countdown,
-        on_settlement=handle_settlement if on_settlement is not None else None,
-        preload_proposals=preload_proposals,
-    )
+            return await trade_execution_service.monitor_contract(
+                contract_id=state.contract_id,
+                ws_url=ws_url,
+                timeout_seconds=75,
+                market_symbol=state.market_symbol or state.symbol,
+                on_countdown=on_countdown,
+                on_settlement=(
+                    handle_settlement if on_settlement is not None else None
+                ),
+                preload_proposals=preload_proposals,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            retry_number += 1
+            retry_delay = min(30, 2 ** min(retry_number, 5))
+            logger.exception(
+                "Settlement verification failed for contract %s; "
+                "retrying with a fresh Deriv connection in %s seconds "
+                "(attempt %s)",
+                state.contract_id,
+                retry_delay,
+                retry_number,
+            )
+            await asyncio.sleep(retry_delay)
 
 
 async def _run_auto_trade_loop(update, state) -> None:
@@ -1695,7 +1740,7 @@ async def _run_auto_trade_loop(update, state) -> None:
         )
         if not record["won"] and record["next_status"] == "running":
             result_text += (
-                "\n\n🔄 Smart Scaling activated\n"
+                "\n\n🔄 Smart Scaling Activated\n"
                 f"Next stake: ${record['next_stake']:.2f}"
             )
         elif record["won"]:
@@ -2345,7 +2390,7 @@ async def handle_custom_stake_input(update, context=None) -> None:
         }
     else:
         try:
-            setup = await asyncio.to_thread(build_auto_trade_setup, user.id)
+            setup = await _build_next_auto_trade_setup(user.id)
         except Exception:
             logger.exception("Could not retrieve setup for custom-stake Auto Trade")
             await reply(
@@ -2736,7 +2781,10 @@ async def _dispatch_callback(update, context) -> None:
                 show_alert=True,
             )
             return
-        if limit_status["locked"]:
+        if (
+            limit_status["locked"]
+            and limit_status["retry_after_seconds"] > 0
+        ):
             await _show_auto_trade_limit_notice(
                 query,
                 limit_status["retry_after_seconds"],
@@ -2831,25 +2879,74 @@ async def _dispatch_callback(update, context) -> None:
                 )
                 return
 
+            session_record = {
+                "session_id": state.session_id,
+                "telegram_user_id": user_id,
+                "account_mode": state.account_mode,
+                "market_symbol": state.symbol,
+                "direction": state.direction,
+                "initial_stake": state.base_stake,
+                "target_winning_cycles": state.max_cycles,
+            }
             session_start = await asyncio.to_thread(
                 trade_history_service.start_auto_trade_session,
-                {
-                    "session_id": state.session_id,
-                    "telegram_user_id": user_id,
-                    "account_mode": state.account_mode,
-                    "market_symbol": state.symbol,
-                    "direction": state.direction,
-                    "initial_stake": state.base_stake,
-                    "target_winning_cycles": state.max_cycles,
-                },
+                session_record,
             )
+            if session_start.get("same_market"):
+                auto_trade_service.cancel_run(user_id)
+                previous_market = friendly_market_name(
+                    session_start.get("previous_market_symbol")
+                    or state.symbol
+                )
+                await _safe_edit_message(
+                    query,
+                    "⚠️ The previous session used "
+                    f"{previous_market}. To alternate markets, this session "
+                    "must use a different one. Scan for a fresh setup; no trade "
+                    "has been placed.",
+                )
+                return
+            if (
+                not session_start["started"]
+                and session_start["retry_after_seconds"] <= 0
+            ):
+                logger.warning(
+                    "Auto Trade session start returned an expired cooldown "
+                    "for user %s; rechecking the atomic start",
+                    user_id,
+                )
+                session_start = await asyncio.to_thread(
+                    trade_history_service.start_auto_trade_session,
+                    session_record,
+                )
+                if session_start.get("same_market"):
+                    auto_trade_service.cancel_run(user_id)
+                    previous_market = friendly_market_name(
+                        session_start.get("previous_market_symbol")
+                        or state.symbol
+                    )
+                    await _safe_edit_message(
+                        query,
+                        "⚠️ The previous session used "
+                        f"{previous_market}. To alternate markets, this session "
+                        "must use a different one. Scan for a fresh setup; no trade "
+                        "has been placed.",
+                    )
+                    return
             if not session_start["started"]:
                 auto_trade_service.cancel_run(user_id)
-                await _show_auto_trade_limit_notice(
-                    query,
-                    session_start["retry_after_seconds"],
-                    callback_already_answered=True,
-                )
+                if session_start["retry_after_seconds"] > 0:
+                    await _show_auto_trade_limit_notice(
+                        query,
+                        session_start["retry_after_seconds"],
+                        callback_already_answered=True,
+                    )
+                else:
+                    await _safe_edit_message(
+                        query,
+                        "⚠️ Auto Trade availability is updating. Please start "
+                        "Auto Trade again in a moment; no trade has been placed.",
+                    )
                 return
         except Exception:
             logger.exception("Could not create Supabase Auto Trade session")
@@ -2948,10 +3045,7 @@ async def _dispatch_callback(update, context) -> None:
 
         if not selected_symbol or not selected_direction:
             try:
-                indicator_setup = await asyncio.to_thread(
-                    build_auto_trade_setup,
-                    user_id,
-                )
+                indicator_setup = await _build_next_auto_trade_setup(user_id)
             except Exception:
                 logger.exception("Could not retrieve setup for stake selection")
                 await _safe_edit_message(
