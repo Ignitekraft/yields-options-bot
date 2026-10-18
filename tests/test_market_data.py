@@ -907,6 +907,76 @@ class MarketDataTests(unittest.TestCase):
         self.assertEqual(result["entry_tick"], 100)
         self.assertEqual(result["exit_tick"], 101)
 
+    def test_monitor_contract_publishes_final_expiry_countdown(self):
+        service = TradeExecutionService()
+        countdowns = []
+
+        class FakeWebSocket:
+            def __init__(self):
+                self.responses = iter(
+                    [
+                        json.dumps(
+                            {
+                                "proposal_open_contract": {
+                                    "contract_id": 123456789,
+                                    "is_sold": False,
+                                    "date_expiry": 1003,
+                                }
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "proposal_open_contract": {
+                                    "contract_id": 123456789,
+                                    "is_sold": True,
+                                    "profit": 1.0,
+                                    "payout": 2.0,
+                                    "buy_price": 1.0,
+                                    "sell_price": 2.0,
+                                    "entry_tick": 100,
+                                    "exit_tick": 101,
+                                }
+                            }
+                        ),
+                    ]
+                )
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return None
+
+            async def send(self, _payload):
+                return None
+
+            async def recv(self):
+                response = next(self.responses)
+                if response.find('"is_sold": true') >= 0:
+                    await asyncio.sleep(0)
+                return response
+
+        async def on_countdown(seconds):
+            countdowns.append(seconds)
+
+        with patch(
+            "app.services.trade_execution_service.websockets.connect",
+            return_value=FakeWebSocket(),
+        ), patch(
+            "app.services.trade_execution_service.time.time",
+            return_value=1000,
+        ):
+            asyncio.run(
+                service.monitor_contract(
+                    "123456789",
+                    "wss://example.com",
+                    timeout_seconds=1,
+                    on_countdown=on_countdown,
+                )
+            )
+
+        self.assertEqual(countdowns, [3])
+
     def test_monitor_contract_uses_live_ticks_when_contract_ticks_are_missing(self):
         service = TradeExecutionService()
 
@@ -1709,16 +1779,19 @@ class MarketDataTests(unittest.TestCase):
         ):
             asyncio.run(_run_auto_trade(update, state))
 
-        self.assertEqual(state.status, "failed")
+        self.assertEqual(state.status, "unknown_buy_outcome")
         self.assertEqual(len(query.message.photos), 1)
-        self.assertIn("temporary problem interrupted Auto Trade", query.message.photos[0]["caption"])
+        self.assertEqual(
+            query.message.photos[0]["caption"],
+            "A temporary problem interrupted Auto Trade.",
+        )
         self.assertEqual(query.message.replies, [])
         end_message.assert_awaited_once_with(
             "auto-trade-error-user",
             state,
-            "A temporary problem interrupted Auto Trade. No further trades "
-            "were placed. Please check your Deriv account before starting "
-            "another session.",
+            "The purchase outcome is uncertain. Auto Trade stopped to avoid "
+            "placing a duplicate trade. Please check your Deriv account before "
+            "trying again.",
         )
 
     def test_completed_auto_trade_sends_victory_receipt_after_cycle_report(self):
@@ -1946,6 +2019,7 @@ class MarketDataTests(unittest.TestCase):
             account_mode="demo",
         )
         service.confirm_run("immediate-user")
+        events = []
 
         class FakeQuery:
             def __init__(self):
@@ -1964,26 +2038,80 @@ class MarketDataTests(unittest.TestCase):
 
         update = FakeUpdate()
 
+        async def fake_execute_trade(_user_id, trade_state):
+            events.append("purchase_attempt")
+            if events.count("purchase_attempt") == 1:
+                trade_state.contract_id = "first-contract"
+                trade_state.status = "monitoring"
+                return {"status": "accepted"}
+            return {"status": "rejected", "reason": "stop"}
+
+        def record_settled_trade(trade):
+            events.append(("settled_trade", trade))
+
+        async def save_session_summary(*_args, **_kwargs):
+            events.append("session_summary")
+
+        async def safe_edit_message(*_args, **_kwargs):
+            events.append("report")
+
         with patch(
+            "app.bot.callbacks.auto_trade_service",
+            service,
+        ), patch(
             "app.bot.callbacks._monitor_settlement",
-            new=AsyncMock(return_value={"profit": 1.0, "status": "settled"}),
+            new=AsyncMock(
+                return_value={
+                    "profit": -2.0,
+                    "status": "settled",
+                    "contract_id": "first-contract",
+                    "entry_tick": 100,
+                    "exit_tick": 99,
+                }
+            ),
         ), patch(
             "app.bot.callbacks.execute_trade",
-            new=AsyncMock(return_value={"status": "rejected", "reason": "stop"}),
+            new=AsyncMock(side_effect=fake_execute_trade),
+        ), patch(
+            "app.bot.callbacks.account_mode_service.get_mode",
+            return_value="demo",
         ), patch(
             "app.bot.callbacks.trade_history_service",
             SimpleNamespace(
                 reserve_token=lambda *_: {"ok": True, "token_balance": 10},
                 refund_token=lambda *_: {"ok": True, "token_balance": 10},
                 update_session=lambda *_: None,
+                record_settled_trade=record_settled_trade,
             ),
         ), patch(
             "app.bot.callbacks.asyncio.sleep",
             side_effect=AssertionError("post-settlement sleep should not delay the next trade"),
+        ), patch(
+            "app.bot.callbacks._save_session_summary",
+            new=AsyncMock(side_effect=save_session_summary),
+        ), patch(
+            "app.bot.callbacks._safe_edit_message",
+            new=AsyncMock(side_effect=safe_edit_message),
+        ), patch(
+            "app.bot.callbacks._send_session_end_message",
+            new=AsyncMock(),
         ):
             asyncio.run(_run_auto_trade(update, service.get_run("immediate-user")))
 
-        self.assertTrue(True)
+        purchase_attempts = [
+            index for index, event in enumerate(events) if event == "purchase_attempt"
+        ]
+        self.assertGreaterEqual(len(purchase_attempts), 2, events)
+        second_purchase = purchase_attempts[1]
+        persisted_trade_index = next(
+            index
+            for index, event in enumerate(events)
+            if isinstance(event, tuple) and event[0] == "settled_trade"
+        )
+        self.assertLess(second_purchase, persisted_trade_index)
+        persisted_trade = events[persisted_trade_index][1]
+        self.assertEqual(persisted_trade["contract_id"], "first-contract")
+        self.assertEqual(persisted_trade["stake"], 2.0)
 
     def test_start_screen_uses_live_balance_values(self):
         auth = AuthService()

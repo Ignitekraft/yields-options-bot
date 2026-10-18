@@ -1432,7 +1432,11 @@ async def _update_cycle_report(query, text: str, message=None):
     return None
 
 
-async def _monitor_settlement(user_id: str | int, state) -> dict:
+async def _monitor_settlement(
+    user_id: str | int,
+    state,
+    on_countdown=None,
+) -> dict:
     user_key = str(user_id)
     access_token = auth_service.get_valid_access_token(user_key)
 
@@ -1457,6 +1461,7 @@ async def _monitor_settlement(user_id: str | int, state) -> dict:
         ws_url=ws_url,
         timeout_seconds=75,
         market_symbol=state.market_symbol or state.symbol,
+        on_countdown=on_countdown,
     )
 
 
@@ -1468,6 +1473,100 @@ async def _run_auto_trade_loop(update, state) -> None:
     cycle_report_message = None
     cycle_steps: list[str] = []
     session_status_message_updated = False
+    pending_settlement: dict | None = None
+    active_pending_step: str | None = None
+
+    def create_settlement_countdown_callback():
+        last_rendered_countdown = 31
+        edit_lock = asyncio.Lock()
+
+        async def update_countdown(seconds_remaining: int) -> None:
+            nonlocal last_rendered_countdown
+            async with edit_lock:
+                current = auto_trade_service.get_run(user_id)
+                if (
+                    current is None
+                    or current.status != "monitoring"
+                    or seconds_remaining >= last_rendered_countdown
+                ):
+                    return
+                message = cycle_report_message
+                edit_text = getattr(message, "edit_text", None)
+                if edit_text is None:
+                    return
+                report = _cycle_report_text(
+                    current.cycle,
+                    cycle_steps,
+                    active_pending_step,
+                )
+                await edit_text(
+                    f"{report}\n\n⏳ Contract settles in {seconds_remaining}s",
+                    parse_mode="HTML",
+                )
+                last_rendered_countdown = seconds_remaining
+
+        return update_countdown
+
+    async def flush_pending_settlement(current) -> None:
+        nonlocal pending_settlement
+        nonlocal report_cycle
+        nonlocal cycle_report_message
+        nonlocal cycle_steps
+        if pending_settlement is None:
+            return
+
+        record = pending_settlement
+        pending_settlement = None
+        history_saved = False
+        try:
+            await asyncio.to_thread(
+                trade_history_service.record_settled_trade,
+                record["trade"],
+            )
+            history_saved = True
+        except Exception:
+            logger.exception("Could not save settled trade to Supabase trade history")
+
+        trade_cycle = record["cycle"]
+        if report_cycle != trade_cycle:
+            report_cycle = trade_cycle
+            cycle_report_message = None
+            cycle_steps = []
+
+        profit = record["profit"]
+        profit_text = (
+            f"+${profit:.2f}" if profit > 0 else f"-${abs(profit):.2f}"
+        )
+        step_details = (
+            f"{'🟢' if record['won'] else '🔴'} "
+            f"Invest: ${record['stake']:.2f} → {profit_text}\n"
+            f"📊 Price: {_format_trade_tick(record['entry_tick'])} → "
+            f"{_format_trade_tick(record['exit_tick'])}"
+        )
+        result_text = (
+            f"⚡ Cycle {trade_cycle} Step {record['step']}\n"
+            f"<pre>{html.escape(step_details)}</pre>"
+        )
+        if not record["won"] and current.status == "running":
+            result_text += (
+                "\n\n🔄 Smart Scaling activated\n"
+                f"Next stake: ${current.current_stake:.2f}"
+            )
+        elif record["won"]:
+            result_text += "\n\n✅ Cycle completed."
+        if not history_saved:
+            result_text += "\n\n⚠️ This settled trade could not be saved to Stats."
+
+        cycle_steps.append(result_text)
+        cycle_report_message = await _update_cycle_report(
+            query,
+            _cycle_report_text(trade_cycle, cycle_steps),
+            cycle_report_message,
+        )
+        await _save_session_summary(
+            current,
+            "completed" if current.status == "completed" else "running",
+        )
 
     while True:
         current = auto_trade_service.get_run(user_id)
@@ -1477,6 +1576,7 @@ async def _run_auto_trade_loop(update, state) -> None:
             return
 
         if current.status == "cancelled":
+            await flush_pending_settlement(current)
             await _save_session_summary(current, "cancelled")
             await _send_session_end_message(
                 query,
@@ -1487,6 +1587,7 @@ async def _run_auto_trade_loop(update, state) -> None:
             return
 
         if current.status == "completed":
+            await flush_pending_settlement(current)
             await _save_session_summary(current, "completed")
             await _send_session_end_message(
                 query,
@@ -1496,6 +1597,7 @@ async def _run_auto_trade_loop(update, state) -> None:
             return
 
         if current.status not in {"running", "monitoring"}:
+            await flush_pending_settlement(current)
             await _save_session_summary(current, "failed")
             await _send_session_end_message(
                 query,
@@ -1507,7 +1609,11 @@ async def _run_auto_trade_loop(update, state) -> None:
 
         if current.status == "monitoring":
             try:
-                settlement = await _monitor_settlement(user_id, current)
+                settlement = await _monitor_settlement(
+                    user_id,
+                    current,
+                    on_countdown=create_settlement_countdown_callback(),
+                )
             except Exception:
                 logger.exception(
                     "Could not verify settlement for contract %s",
@@ -1560,88 +1666,45 @@ async def _run_auto_trade_loop(update, state) -> None:
             except (TypeError, ValueError):
                 pass
 
-            history_saved = False
-            try:
-                await asyncio.to_thread(
-                    trade_history_service.record_settled_trade,
-                    {
-                        "telegram_user_id": user_id,
-                        "contract_id": settlement.get("contract_id") or current.contract_id,
-                        "session_id": current.session_id,
-                        "account_mode": current.account_mode,
-                        "market_symbol": current.market_symbol or current.symbol,
-                        "direction": current.direction,
-                        "stake": current.current_stake,
-                        "profit": profit,
-                        "direction_accurate": direction_accurate,
-                        "tokens_spent": 1,
-                    },
-                )
-                history_saved = True
-            except Exception:
-                logger.exception("Could not save settled trade to Supabase trade history")
-
             trade_cycle = current.cycle
             trade_step = current.martingale_step
             trade_stake = current.current_stake
+            trade_contract_id = current.contract_id
             settled_contracts.append(settlement)
             current = auto_trade_service.advance_after_result(
                 user_id,
                 won=won,
                 profit=profit,
             )
-            await _save_session_summary(
-                current,
-                (
-                    "completed"
-                    if current.status == "completed"
-                    else "running"
-                ),
-            )
-
-            if report_cycle != trade_cycle:
-                report_cycle = trade_cycle
-                cycle_report_message = None
-                cycle_steps = []
-
-            result_emoji = "🟢" if won else "🔴"
-            profit_text = (
-                f"+${profit:.2f}" if profit > 0 else f"-${abs(profit):.2f}"
-            )
-            step_details = (
-                f"{result_emoji} Invest: ${trade_stake:.2f} → {profit_text}\n"
-                f"📊 Price: {_format_trade_tick(entry_tick)} → "
-                f"{_format_trade_tick(exit_tick)}"
-            )
-            result_text = (
-                f"⚡ Cycle {trade_cycle} Step {trade_step}\n"
-                f"<pre>{html.escape(step_details)}</pre>"
-            )
-            if not won and current.status == "running":
-                result_text += (
-                    "\n\n🔄 Smart Scaling activated\n"
-                    f"Next stake: ${current.current_stake:.2f}"
-                )
-            elif won:
-                result_text += "\n\n✅ Cycle completed."
-
-            if not history_saved:
-                result_text += "\n\n⚠️ This settled trade could not be saved to Stats."
-            cycle_steps.append(result_text)
-            cycle_report_message = await _update_cycle_report(
-                query,
-                _cycle_report_text(trade_cycle, cycle_steps),
-                cycle_report_message,
-            )
+            pending_settlement = {
+                "cycle": trade_cycle,
+                "step": trade_step,
+                "stake": trade_stake,
+                "profit": profit,
+                "won": won,
+                "entry_tick": entry_tick,
+                "exit_tick": exit_tick,
+                "trade": {
+                    "telegram_user_id": user_id,
+                    "contract_id": settlement.get("contract_id") or trade_contract_id,
+                    "session_id": current.session_id,
+                    "account_mode": current.account_mode,
+                    "market_symbol": current.market_symbol or current.symbol,
+                    "direction": current.direction,
+                    "stake": trade_stake,
+                    "profit": profit,
+                    "direction_accurate": direction_accurate,
+                    "tokens_spent": 1,
+                },
+            }
 
             if current.status != "running":
                 continue
 
-            continue
-
         # Check the selected mode again before every purchase.
         if account_mode_service.get_mode(user_id) != current.account_mode:
             current = auto_trade_service.finish_run(user_id, "account_mode_changed") or current
+            await flush_pending_settlement(current)
             await _save_session_summary(current, "stopped")
             await _send_session_end_message(
                 query,
@@ -1651,11 +1714,20 @@ async def _run_auto_trade_loop(update, state) -> None:
             )
             return
 
-        result = await execute_trade(user_id, current)
+        try:
+            result = await execute_trade(user_id, current)
+        except Exception:
+            logger.exception("Auto Trade purchase attempt failed unexpectedly")
+            result = {
+                "status": "unknown_buy_outcome",
+                "reason": "AUTO_TRADE_EXECUTION_INTERRUPTED",
+            }
 
         if result.get("status") != "accepted":
             status = result.get("status")
             reason = result.get("reason", "Unknown error")
+            current = auto_trade_service.get_run(user_id) or current
+            await flush_pending_settlement(current)
 
             logger.warning(
                 "Auto Trade stopped before placing the next trade "
@@ -1694,6 +1766,8 @@ async def _run_auto_trade_loop(update, state) -> None:
                 )
             return
 
+        await flush_pending_settlement(current)
+
         market_label = friendly_market_name(current.market_symbol or current.symbol)
         if not session_status_message_updated:
             await _safe_edit_message(
@@ -1717,6 +1791,7 @@ async def _run_auto_trade_loop(update, state) -> None:
             f"${current.current_stake:.2f}. Waiting for the 30-second "
             "contract to settle."
         )
+        active_pending_step = pending_step
         cycle_report_message = await _update_cycle_report(
             query,
             _cycle_report_text(current.cycle, cycle_steps, pending_step),

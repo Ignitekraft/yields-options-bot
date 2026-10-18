@@ -5,7 +5,8 @@ import itertools
 import json
 import logging
 import math
-from typing import Any
+import time
+from typing import Any, Awaitable, Callable
 
 import websockets
 
@@ -684,6 +685,7 @@ class TradeExecutionService:
         ws_url: str,
         timeout_seconds: int = 75,
         market_symbol: str | None = None,
+        on_countdown: Callable[[int], Awaitable[None]] | None = None,
     ) -> dict[str, Any]:
         """Monitor a contract until Deriv reports it has settled."""
 
@@ -716,6 +718,7 @@ class TradeExecutionService:
             ping_interval=20,
         )
         async with connection as websocket:
+            countdown_tasks: set[asyncio.Task[None]] = set()
 
             await send_deriv_websocket_request(websocket, payload)
             if market_symbol and tick_req_id is not None:
@@ -742,6 +745,25 @@ class TradeExecutionService:
             )
             entry_price = None
             latest_tick = None
+            last_countdown: int | None = None
+
+            def schedule_countdown(seconds_remaining: int) -> None:
+                if on_countdown is None:
+                    return
+
+                async def notify() -> None:
+                    try:
+                        await on_countdown(seconds_remaining)
+                    except Exception:
+                        logger.exception(
+                            "Could not publish settlement countdown for "
+                            "contract %s",
+                            contract_id,
+                        )
+
+                task = asyncio.create_task(notify())
+                countdown_tasks.add(task)
+                task.add_done_callback(countdown_tasks.discard)
 
             while True:
                 remaining = (
@@ -842,6 +864,21 @@ class TradeExecutionService:
                 ):
                     continue
 
+                if not bool(contract.get("is_sold")) and on_countdown is not None:
+                    expiry_value = contract.get("date_expiry")
+                    try:
+                        expiry_epoch = float(expiry_value)
+                    except (TypeError, ValueError):
+                        expiry_epoch = 0.0
+                    if math.isfinite(expiry_epoch) and expiry_epoch > 0:
+                        seconds_remaining = math.ceil(expiry_epoch - time.time())
+                        if (
+                            1 <= seconds_remaining <= 30
+                            and seconds_remaining != last_countdown
+                        ):
+                            schedule_countdown(seconds_remaining)
+                            last_countdown = seconds_remaining
+
                 if entry_price is None:
                     entry_price = self._contract_price(
                         contract,
@@ -856,6 +893,8 @@ class TradeExecutionService:
                 if bool(
                     contract.get("is_sold")
                 ):
+                    for task in countdown_tasks:
+                        task.cancel()
                     try:
                         profit = float(
                             contract.get(
