@@ -830,7 +830,13 @@ def friendly_market_name(symbol: str | None) -> str:
     return mapping.get(value, mapping.get(value.upper(), value))
 
 
-async def execute_trade(user_id: str | int, state=None) -> dict:
+async def execute_trade(
+    user_id: str | int,
+    state=None,
+    *,
+    prepared_account: dict | None = None,
+    websocket=None,
+) -> dict:
     state = state or auto_trade_service.get_run(user_id)
 
     if state is None:
@@ -858,10 +864,12 @@ async def execute_trade(user_id: str | int, state=None) -> dict:
             state.status = "rejected"
             return {"status": "rejected", "reason": "ACCOUNT_MODE_CHANGED"}
 
-        account = await account_service.get_trade_account(
-            user_key,
-            account_mode=state.account_mode,
-        )
+        account = prepared_account
+        if account is None:
+            account = await account_service.get_trade_account(
+                user_key,
+                account_mode=state.account_mode,
+            )
 
         verified_mode = str(account.get("account_type") or "").lower()
         if verified_mode != state.account_mode:
@@ -876,10 +884,12 @@ async def execute_trade(user_id: str | int, state=None) -> dict:
             state.status = "rejected"
             return {"status": "rejected", "reason": "MISSING_OPTIONS_ACCOUNT_ID"}
 
-        ws_url = await account_service.request_account_otp_url(
-            access_token=access_token,
-            account_id=account_id,
-        )
+        ws_url = account.get("ws_url")
+        if not ws_url:
+            ws_url = await account_service.request_account_otp_url(
+                access_token=access_token,
+                account_id=account_id,
+            )
 
         try:
             reservation = await asyncio.to_thread(
@@ -915,6 +925,7 @@ async def execute_trade(user_id: str | int, state=None) -> dict:
             currency=currency,
             ws_url=ws_url,
             account_type=state.account_mode,
+            websocket=websocket,
         )
         purchase_confirmed = result.get("status") == "accepted"
 
@@ -1436,6 +1447,7 @@ async def _monitor_settlement(
     user_id: str | int,
     state,
     on_countdown=None,
+    on_settlement=None,
 ) -> dict:
     user_key = str(user_id)
     access_token = auth_service.get_valid_access_token(user_key)
@@ -1456,12 +1468,23 @@ async def _monitor_settlement(
         account_id=account["account_id"],
     )
 
+    prepared_account = {
+        **account,
+        "ws_url": ws_url,
+    }
+
+    async def handle_settlement(settlement, websocket):
+        if on_settlement is None:
+            return None
+        return await on_settlement(settlement, websocket, prepared_account)
+
     return await trade_execution_service.monitor_contract(
         contract_id=state.contract_id,
         ws_url=ws_url,
         timeout_seconds=75,
         market_symbol=state.market_symbol or state.symbol,
         on_countdown=on_countdown,
+        on_settlement=handle_settlement if on_settlement is not None else None,
     )
 
 
@@ -1568,6 +1591,72 @@ async def _run_auto_trade_loop(update, state) -> None:
             "completed" if current.status == "completed" else "running",
         )
 
+    def apply_settlement_result(settlement):
+        nonlocal pending_settlement
+
+        try:
+            profit = float(settlement.get("profit") or 0.0)
+        except (TypeError, ValueError):
+            failed_run = auto_trade_service.finish_run(
+                user_id,
+                "settlement_data_error",
+            )
+            return failed_run, "Settlement data could not be validated. No further trade was placed."
+
+        current = auto_trade_service.get_run(user_id)
+        if current is None:
+            return None, "Auto Trade state was not found."
+
+        won = profit > 0
+        entry_tick = settlement.get("entry_tick")
+        exit_tick = settlement.get("exit_tick")
+        direction_accurate = None
+        try:
+            entry_value = float(entry_tick)
+            exit_value = float(exit_tick)
+            if current.direction == "BULLISH":
+                direction_accurate = exit_value > entry_value
+            elif current.direction == "BEARISH":
+                direction_accurate = exit_value < entry_value
+        except (TypeError, ValueError):
+            pass
+
+        trade_cycle = current.cycle
+        trade_step = current.martingale_step
+        trade_stake = current.current_stake
+        trade_contract_id = current.contract_id
+        was_cancelled = current.status == "cancelled"
+        settled_contracts.append(settlement)
+        current = auto_trade_service.advance_after_result(
+            user_id,
+            won=won,
+            profit=profit,
+        )
+        if was_cancelled:
+            current = auto_trade_service.finish_run(user_id, "cancelled") or current
+        pending_settlement = {
+            "cycle": trade_cycle,
+            "step": trade_step,
+            "stake": trade_stake,
+            "profit": profit,
+            "won": won,
+            "entry_tick": entry_tick,
+            "exit_tick": exit_tick,
+            "trade": {
+                "telegram_user_id": user_id,
+                "contract_id": settlement.get("contract_id") or trade_contract_id,
+                "session_id": current.session_id,
+                "account_mode": current.account_mode,
+                "market_symbol": current.market_symbol or current.symbol,
+                "direction": current.direction,
+                "stake": trade_stake,
+                "profit": profit,
+                "direction_accurate": direction_accurate,
+                "tokens_spent": 1,
+            },
+        }
+        return current, None
+
     while True:
         current = auto_trade_service.get_run(user_id)
 
@@ -1607,12 +1696,47 @@ async def _run_auto_trade_loop(update, state) -> None:
             )
             return
 
+        immediate_trade_result = None
+        settlement_processed = False
+        settlement_error = None
         if current.status == "monitoring":
+            async def buy_next_after_settlement(
+                settlement,
+                websocket,
+                prepared_account,
+            ):
+                nonlocal immediate_trade_result
+                nonlocal settlement_processed
+                nonlocal settlement_error
+                settlement_processed = True
+                settled_state, settlement_error = apply_settlement_result(settlement)
+                if settled_state is None or settled_state.status != "running":
+                    return None
+                if account_mode_service.get_mode(user_id) != settled_state.account_mode:
+                    return None
+                try:
+                    immediate_trade_result = await execute_trade(
+                        user_id,
+                        settled_state,
+                        prepared_account=prepared_account,
+                        websocket=websocket,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Immediate next Auto Trade purchase failed unexpectedly"
+                    )
+                    immediate_trade_result = {
+                        "status": "unknown_buy_outcome",
+                        "reason": "AUTO_TRADE_EXECUTION_INTERRUPTED",
+                    }
+                return immediate_trade_result
+
             try:
                 settlement = await _monitor_settlement(
                     user_id,
                     current,
                     on_countdown=create_settlement_countdown_callback(),
+                    on_settlement=buy_next_after_settlement,
                 )
             except Exception:
                 logger.exception(
@@ -1639,70 +1763,27 @@ async def _run_auto_trade_loop(update, state) -> None:
                 )
                 return
 
-            try:
-                profit = float(settlement.get("profit") or 0.0)
-            except (TypeError, ValueError):
-                current = auto_trade_service.finish_run(user_id, "settlement_data_error") or current
+            if not settlement_processed:
+                current, settlement_error = apply_settlement_result(settlement)
+            if settlement_error:
+                current = auto_trade_service.get_run(user_id) or current
                 await _save_session_summary(current, "failed")
                 await _send_session_end_message(
                     query,
                     user_id,
                     current,
-                    "Settlement data could not be validated. No further trade was placed.",
+                    settlement_error,
                 )
                 return
 
-            won = profit > 0
-            entry_tick = settlement.get("entry_tick")
-            exit_tick = settlement.get("exit_tick")
-            direction_accurate = None
-            try:
-                entry_value = float(entry_tick)
-                exit_value = float(exit_tick)
-                if current.direction == "BULLISH":
-                    direction_accurate = exit_value > entry_value
-                elif current.direction == "BEARISH":
-                    direction_accurate = exit_value < entry_value
-            except (TypeError, ValueError):
-                pass
-
-            trade_cycle = current.cycle
-            trade_step = current.martingale_step
-            trade_stake = current.current_stake
-            trade_contract_id = current.contract_id
-            settled_contracts.append(settlement)
-            current = auto_trade_service.advance_after_result(
-                user_id,
-                won=won,
-                profit=profit,
-            )
-            pending_settlement = {
-                "cycle": trade_cycle,
-                "step": trade_step,
-                "stake": trade_stake,
-                "profit": profit,
-                "won": won,
-                "entry_tick": entry_tick,
-                "exit_tick": exit_tick,
-                "trade": {
-                    "telegram_user_id": user_id,
-                    "contract_id": settlement.get("contract_id") or trade_contract_id,
-                    "session_id": current.session_id,
-                    "account_mode": current.account_mode,
-                    "market_symbol": current.market_symbol or current.symbol,
-                    "direction": current.direction,
-                    "stake": trade_stake,
-                    "profit": profit,
-                    "direction_accurate": direction_accurate,
-                    "tokens_spent": 1,
-                },
-            }
-
-            if current.status != "running":
+            if current.status != "running" and immediate_trade_result is None:
                 continue
 
         # Check the selected mode again before every purchase.
-        if account_mode_service.get_mode(user_id) != current.account_mode:
+        if (
+            immediate_trade_result is None
+            and account_mode_service.get_mode(user_id) != current.account_mode
+        ):
             current = auto_trade_service.finish_run(user_id, "account_mode_changed") or current
             await flush_pending_settlement(current)
             await _save_session_summary(current, "stopped")
@@ -1715,7 +1796,7 @@ async def _run_auto_trade_loop(update, state) -> None:
             return
 
         try:
-            result = await execute_trade(user_id, current)
+            result = immediate_trade_result or await execute_trade(user_id, current)
         except Exception:
             logger.exception("Auto Trade purchase attempt failed unexpectedly")
             result = {

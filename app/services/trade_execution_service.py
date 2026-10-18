@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 import itertools
 import json
 import logging
@@ -189,8 +190,9 @@ class TradeExecutionService:
         stake: float,
         expiry_seconds: int = 30,
         currency: str = "USD",
+        subscribe: bool = True,
     ) -> dict[str, Any]:
-        return {
+        payload = {
             "proposal": 1,
             "amount": cls.validate_stake(stake),
             "basis": "stake",
@@ -199,9 +201,11 @@ class TradeExecutionService:
             "duration": cls.validate_expiry(expiry_seconds),
             "duration_unit": "s",
             "underlying_symbol": cls.normalize_step_symbol(symbol),
-            "subscribe": 1,
             "req_id": cls.next_req_id(),
         }
+        if subscribe:
+            payload["subscribe"] = 1
+        return payload
 
     @staticmethod
     def _error_message(response: dict[str, Any]) -> str:
@@ -329,6 +333,7 @@ class TradeExecutionService:
         stake: float,
         expiry_seconds: int,
         currency: str,
+        subscribe: bool = True,
     ) -> dict[str, Any]:
         payload = cls.build_proposal_payload(
             symbol=symbol,
@@ -336,6 +341,7 @@ class TradeExecutionService:
             stake=stake,
             expiry_seconds=expiry_seconds,
             currency=currency,
+            subscribe=subscribe,
         )
 
         response = await cls._request(
@@ -454,6 +460,22 @@ class TradeExecutionService:
             ),
         }
 
+    @asynccontextmanager
+    async def _websocket_session(self, ws_url: str, websocket: Any | None):
+        if websocket is not None:
+            yield websocket
+            return
+
+        connection = await connect_async_with_retry(
+            websockets.connect,
+            ws_url,
+            open_timeout=15,
+            ping_timeout=20,
+            ping_interval=20,
+        )
+        async with connection as connected_websocket:
+            yield connected_websocket
+
     @classmethod
     @classmethod
     def _is_unknown_contract_proposal_error(
@@ -492,6 +514,7 @@ class TradeExecutionService:
         currency: str = "USD",
         ws_url: str | None = None,
         account_type: str | None = None,
+        websocket: Any | None = None,
     ) -> dict[str, Any]:
         """Place one Rise/Fall contract on the selected account."""
 
@@ -543,15 +566,9 @@ class TradeExecutionService:
             }
 
         last_error: Exception | None = None
+        reuse_websocket = websocket is not None
         try:
-            connection = await connect_async_with_retry(
-                websockets.connect,
-                ws_url,
-                open_timeout=15,
-                ping_timeout=20,
-                ping_interval=20,
-            )
-            async with connection as websocket:
+            async with self._websocket_session(ws_url, websocket) as websocket:
                 candidates = self.asset_candidates(symbol)
                 for candidate_symbol in candidates:
                     try:
@@ -563,6 +580,7 @@ class TradeExecutionService:
                                 stake=amount,
                                 expiry_seconds=expiry,
                                 currency=currency,
+                                subscribe=not reuse_websocket,
                             )
                         )
 
@@ -589,6 +607,7 @@ class TradeExecutionService:
                                     stake=amount,
                                     expiry_seconds=expiry,
                                     currency=currency,
+                                    subscribe=not reuse_websocket,
                                 )
                             )
 
@@ -686,6 +705,7 @@ class TradeExecutionService:
         timeout_seconds: int = 75,
         market_symbol: str | None = None,
         on_countdown: Callable[[int], Awaitable[None]] | None = None,
+        on_settlement: Callable[[dict[str, Any], Any], Awaitable[Any]] | None = None,
     ) -> dict[str, Any]:
         """Monitor a contract until Deriv reports it has settled."""
 
@@ -921,7 +941,7 @@ class TradeExecutionService:
                     ):
                         payout = 0.0
 
-                    return {
+                    settlement = {
                         "status": "settled",
                         "contract_id": str(
                             contract_id
@@ -962,6 +982,22 @@ class TradeExecutionService:
                         ),
                         "contract": contract,
                     }
+                    if on_settlement is not None:
+                        try:
+                            settlement["next_trade_result"] = await on_settlement(
+                                settlement,
+                                websocket,
+                            )
+                        except Exception:
+                            logger.exception(
+                                "Could not start the next trade on the settled "
+                                "contract connection"
+                            )
+                            settlement["next_trade_result"] = {
+                                "status": "unknown_buy_outcome",
+                                "reason": "AUTO_TRADE_EXECUTION_INTERRUPTED",
+                            }
+                    return settlement
 
     @staticmethod
     def _contract_price(contract: dict[str, Any], *keys: str) -> float | None:

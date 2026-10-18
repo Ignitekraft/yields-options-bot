@@ -21,6 +21,7 @@ from app.bot.callbacks import (
     _payout_failure_reason_for_user,
     _handle_auto_trade_entry,
     _run_auto_trade,
+    _run_auto_trade_loop,
     handle_custom_stake_input,
     parse_custom_stake,
     _send_low_token_message,
@@ -977,6 +978,58 @@ class MarketDataTests(unittest.TestCase):
 
         self.assertEqual(countdowns, [3])
 
+    def test_monitor_contract_runs_settlement_handoff_before_returning(self):
+        service = TradeExecutionService()
+        handoff_calls = []
+
+        class FakeWebSocket:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return None
+
+            async def send(self, _payload):
+                return None
+
+            async def recv(self):
+                return json.dumps(
+                    {
+                        "proposal_open_contract": {
+                            "contract_id": 123456789,
+                            "is_sold": True,
+                            "profit": 1.0,
+                            "entry_tick": 100,
+                            "exit_tick": 101,
+                        }
+                    }
+                )
+
+        websocket = FakeWebSocket()
+
+        async def on_settlement(settlement, connected_websocket):
+            handoff_calls.append((settlement["contract_id"], connected_websocket))
+            return {"status": "accepted"}
+
+        with patch(
+            "app.services.trade_execution_service.websockets.connect",
+            return_value=websocket,
+        ):
+            result = asyncio.run(
+                service.monitor_contract(
+                    "123456789",
+                    "wss://example.com",
+                    timeout_seconds=1,
+                    on_settlement=on_settlement,
+                )
+            )
+
+        self.assertEqual(handoff_calls, [("123456789", websocket)])
+        self.assertEqual(
+            result["next_trade_result"],
+            {"status": "accepted"},
+        )
+
     def test_monitor_contract_uses_live_ticks_when_contract_ticks_are_missing(self):
         service = TradeExecutionService()
 
@@ -1179,6 +1232,50 @@ class MarketDataTests(unittest.TestCase):
         self.assertEqual(result["status"], "accepted")
         self.assertIn(result["symbol"], {"STPRNG", "STPRNG2", "STPRNG3", "STPRNG4", "STPRNG5"})
         self.assertIn("contract_id", result)
+
+    def test_execute_trade_reuses_an_existing_authenticated_websocket(self):
+        service = TradeExecutionService()
+        websocket = object()
+        with patch.object(
+            service,
+            "_create_proposal_on_ws",
+            new=AsyncMock(return_value={
+                "proposal_id": "proposal-reused",
+                "ask_price": 1.0,
+            }),
+        ) as create_proposal, patch.object(
+            service,
+            "_buy_on_ws",
+            new=AsyncMock(return_value={
+                "contract_id": "contract-reused",
+                "buy_price": 1.0,
+                "balance_after": 99.0,
+                "shortcode": "CALL",
+            }),
+        ) as buy_contract, patch(
+            "app.services.trade_execution_service.websockets.connect",
+        ) as connect:
+            result = asyncio.run(
+                service.execute_trade(
+                    user_id="fast-user",
+                    market_symbol="step_100",
+                    direction="BULLISH",
+                    stake=1.0,
+                    account_id="demo-123",
+                    currency="USD",
+                    ws_url="wss://example.com",
+                    account_type="demo",
+                    websocket=websocket,
+                )
+            )
+
+        self.assertEqual(result["status"], "accepted")
+        connect.assert_not_called()
+        create_proposal.assert_awaited_once()
+        self.assertIs(create_proposal.await_args.kwargs["websocket"], websocket)
+        self.assertFalse(create_proposal.await_args.kwargs["subscribe"])
+        buy_contract.assert_awaited_once()
+        self.assertIs(buy_contract.await_args.kwargs["websocket"], websocket)
 
     def test_contract_buy_validation_error_is_human_readable(self):
         message = TradeExecutionService._error_message(
@@ -2112,6 +2209,100 @@ class MarketDataTests(unittest.TestCase):
         persisted_trade = events[persisted_trade_index][1]
         self.assertEqual(persisted_trade["contract_id"], "first-contract")
         self.assertEqual(persisted_trade["stake"], 2.0)
+
+    def test_auto_trade_buys_on_settlement_websocket_before_monitor_returns(self):
+        service = AutoTradeService()
+        state = service.start_run(
+            "same-socket-user",
+            "step_300",
+            "BULLISH",
+            2.0,
+            account_mode="demo",
+        )
+        service.confirm_run("same-socket-user")
+        events = []
+        websocket = object()
+        prepared_account = {
+            "account_id": "demo-123",
+            "account_type": "demo",
+            "currency": "USD",
+            "ws_url": "wss://example.com",
+        }
+        settlement = {
+            "status": "settled",
+            "contract_id": "first-contract",
+            "profit": -2.0,
+            "entry_tick": 100,
+            "exit_tick": 99,
+        }
+
+        class FakeQuery:
+            async def edit_message_text(self, *_args, **_kwargs):
+                return None
+
+        update = SimpleNamespace(
+            callback_query=FakeQuery(),
+            effective_user=SimpleNamespace(id="same-socket-user"),
+        )
+
+        async def fake_execute_trade(_user_id, trade_state, **kwargs):
+            events.append(("purchase", kwargs))
+            if len(events) == 1:
+                trade_state.contract_id = "first-contract"
+                trade_state.status = "monitoring"
+                return {"status": "accepted"}
+            trade_state.status = "rejected"
+            return {"status": "rejected", "reason": "test stop"}
+
+        async def fake_monitor(_user_id, _trade_state, **kwargs):
+            events.append("settlement_confirmed")
+            result = await kwargs["on_settlement"](
+                settlement,
+                websocket,
+                prepared_account,
+            )
+            events.append("monitor_returned")
+            return {**settlement, "next_trade_result": result}
+
+        with patch(
+            "app.bot.callbacks.auto_trade_service",
+            service,
+        ), patch(
+            "app.bot.callbacks._monitor_settlement",
+            new=AsyncMock(side_effect=fake_monitor),
+        ), patch(
+            "app.bot.callbacks.execute_trade",
+            new=AsyncMock(side_effect=fake_execute_trade),
+        ), patch(
+            "app.bot.callbacks.account_mode_service.get_mode",
+            return_value="demo",
+        ), patch(
+            "app.bot.callbacks.trade_history_service",
+            SimpleNamespace(record_settled_trade=lambda *_args: None),
+        ), patch(
+            "app.bot.callbacks._save_session_summary",
+            new=AsyncMock(),
+        ), patch(
+            "app.bot.callbacks._update_cycle_report",
+            new=AsyncMock(return_value=None),
+        ), patch(
+            "app.bot.callbacks._safe_edit_message",
+            new=AsyncMock(),
+        ), patch(
+            "app.bot.callbacks._send_session_end_message",
+            new=AsyncMock(),
+        ):
+            asyncio.run(_run_auto_trade_loop(update, state))
+
+        purchase_events = [event for event in events if isinstance(event, tuple)]
+        self.assertEqual(len(purchase_events), 2)
+        self.assertEqual(events[1], "settlement_confirmed")
+        self.assertEqual(events[3], "monitor_returned")
+        self.assertIs(purchase_events[1][1]["websocket"], websocket)
+        self.assertIs(
+            purchase_events[1][1]["prepared_account"],
+            prepared_account,
+        )
 
     def test_start_screen_uses_live_balance_values(self):
         auth = AuthService()
@@ -4311,6 +4502,77 @@ class MarketDataTests(unittest.TestCase):
             [("reserve-before-buy-user", state.session_id)],
         )
         deriv_trade.assert_awaited_once()
+
+    def test_execute_trade_uses_preverified_account_and_existing_websocket(self):
+        class FakeTradeHistory:
+            def reserve_token(self, *_args):
+                return {"ok": True, "token_balance": 4}
+
+        run_service = AutoTradeService()
+        state = run_service.start_run(
+            "reuse-account-user",
+            "step_300",
+            "BULLISH",
+            5.0,
+            account_mode="demo",
+        )
+        run_service.confirm_run("reuse-account-user")
+        prepared_account = {
+            "account_type": "demo",
+            "account_id": "demo-1",
+            "currency": "USD",
+            "ws_url": "wss://example.test",
+        }
+        websocket = object()
+
+        with patch(
+            "app.bot.callbacks.auto_trade_service",
+            run_service,
+        ), patch(
+            "app.bot.callbacks.auth_service.get_valid_access_token",
+            return_value="access-token",
+        ), patch(
+            "app.bot.callbacks.account_mode_service.get_mode",
+            return_value="demo",
+        ), patch(
+            "app.bot.callbacks.account_service.get_trade_account",
+            new=AsyncMock(side_effect=AssertionError("must reuse verified account")),
+        ) as resolve_account, patch(
+            "app.bot.callbacks.account_service.request_account_otp_url",
+            new=AsyncMock(side_effect=AssertionError("must reuse active socket")),
+        ) as request_otp, patch(
+            "app.bot.callbacks.trade_history_service",
+            FakeTradeHistory(),
+        ), patch(
+            "app.bot.callbacks.trade_execution_service.execute_trade",
+            new=AsyncMock(
+                return_value={
+                    "status": "accepted",
+                    "account_type": "demo",
+                    "contract_id": "fast-contract",
+                    "proposal_id": "fast-proposal",
+                    "underlying_symbol": "STPRNG3",
+                    "contract_type": "CALL",
+                }
+            ),
+        ) as deriv_trade:
+            result = asyncio.run(
+                execute_trade(
+                    "reuse-account-user",
+                    state,
+                    prepared_account=prepared_account,
+                    websocket=websocket,
+                )
+            )
+
+        self.assertEqual(result["status"], "accepted")
+        resolve_account.assert_not_awaited()
+        request_otp.assert_not_awaited()
+        self.assertIs(deriv_trade.await_args.kwargs["websocket"], websocket)
+        self.assertEqual(
+            deriv_trade.await_args.kwargs["ws_url"],
+            "wss://example.test",
+        )
 
     def test_trade_history_service_posts_idempotent_record_and_user_scoped_stats(self):
         requests = []
