@@ -690,7 +690,8 @@ async def handle_chart_screenshot(update, context=None) -> None:
         await message.reply_text(
             "⚠️ NO CLEAR SETUP\n\n"
             f"Market: {friendly_market_name(symbol)}\n"
-            f"AI confidence: {analysis.confidence:.0f}%\n"
+            f"AI evidence confidence: {analysis.confidence:.0f}% "
+            "(not a win probability)\n"
             f"Reason: {analysis.reasoning}\n\n"
             "No trade has been prepared. Send a clearer chart screenshot "
             "for another analysis."
@@ -719,8 +720,12 @@ async def handle_chart_screenshot(update, context=None) -> None:
         "📊 AI CHART ANALYSIS\n\n"
         f"Market: {setup['display_name']}\n"
         f"Direction: {direction_label}\n"
-        f"AI confidence: {analysis.confidence:.0f}%\n"
+        f"AI evidence confidence: {analysis.confidence:.0f}% "
+        "(not a win probability)\n"
         f"Reason: {analysis.reasoning}\n\n"
+        "This setup is based on the screenshot for the first 30-second "
+        "contract only; a five-win session takes at least 2 minutes 30 seconds "
+        "and can take longer after losses.\n\n"
         "This is an AI interpretation of your screenshot, not a guarantee. "
         "Choose your stake to continue.",
         reply_markup=TelegramKeyboard.stake_keyboard(
@@ -1791,7 +1796,8 @@ async def _prepare_trade_confirmation(
     analysis_summary = ""
     if setup.get("analysis_provider"):
         analysis_summary = (
-            f"AI confidence: {float(setup['confidence']):.0f}%\n"
+            f"AI evidence confidence: {float(setup['confidence']):.0f}% "
+            "(not a win probability)\n"
             f"AI assessment: {setup['reasoning']}\n"
         )
 
@@ -1800,6 +1806,9 @@ async def _prepare_trade_confirmation(
         f"Market: {setup.get('display_name', setup['symbol'])}\n"
         f"Direction: {setup['direction']}\n"
         f"{analysis_summary}"
+        "Chart analysis applies to the first 30-second contract only; the "
+        "five-winning-cycle target takes at least 2 minutes 30 seconds and "
+        "losses add recovery trades and time.\n"
         f"Account mode: {account_mode.upper()}\n"
         f"Initial stake: {stake_value:,.2f} {currency}"
         f"{stake_description}\n"

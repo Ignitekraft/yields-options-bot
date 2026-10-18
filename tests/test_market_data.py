@@ -3351,10 +3351,21 @@ class MarketDataTests(unittest.TestCase):
             request_parts[1]["inline_data"]["mime_type"],
             "image/jpeg",
         )
+        instructions = kwargs["json"]["systemInstruction"]["parts"][0]["text"]
         self.assertIn(
             "market_mismatch",
-            kwargs["json"]["systemInstruction"]["parts"][0]["text"],
+            instructions,
         )
+        self.assertIn("30 seconds after entry", instructions)
+        self.assertIn("at least 150 seconds", instructions)
+        self.assertIn("most recent visible price action", instructions)
+        self.assertIn("not a calibrated win probability", instructions)
+        self.assertIn(
+            "Return NO_TRADE for a genuinely choppy/ranging market",
+            instructions,
+        )
+        self.assertIn("not forced to alternate", instructions)
+        self.assertIn("Do not require unusually strong", instructions)
 
     def test_gemini_chart_provider_rejects_mismatched_market_and_bad_output(self):
         from app.services.chart_analysis import _parse_analysis_result
@@ -3526,7 +3537,8 @@ class MarketDataTests(unittest.TestCase):
             "BULLISH",
         )
         text, kwargs = message.replies[0]
-        self.assertIn("AI confidence: 78%", text)
+        self.assertIn("AI evidence confidence: 78%", text)
+        self.assertIn("first 30-second contract only", text)
         self.assertIn("Choose your stake", text)
         callbacks = [
             button.callback_data
