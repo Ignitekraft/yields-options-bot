@@ -169,18 +169,19 @@ class TradeExecutionService:
         return round(value, 2)
 
     @staticmethod
-    def validate_expiry(expiry_seconds: int) -> int:
+    def validate_expiry_duration(expiry_duration: int) -> int:
         try:
-            value = int(expiry_seconds)
+            value = int(expiry_duration)
         except (TypeError, ValueError) as exc:
             raise ValueError("INVALID_EXPIRY") from exc
 
-        if value != settings.default_expiry_seconds:
+        if value != settings.default_expiry_duration:
             raise ValueError(
-                f"YIELDS_EXPIRY_MUST_BE_{settings.default_expiry_seconds}_SECONDS"
+                f"YIELDS_EXPIRY_MUST_BE_{settings.default_expiry_duration}_"
+                f"{'TICKS' if settings.default_expiry_unit == 't' else 'SECONDS'}"
             )
 
-        return settings.default_expiry_seconds
+        return settings.default_expiry_duration
 
     @classmethod
     def build_proposal_payload(
@@ -188,18 +189,25 @@ class TradeExecutionService:
         symbol: str,
         direction: str,
         stake: float,
-        expiry_seconds: int = settings.default_expiry_seconds,
+        expiry_duration: int = settings.default_expiry_duration,
+        expiry_unit: str = settings.default_expiry_unit,
         currency: str = "USD",
         subscribe: bool = True,
     ) -> dict[str, Any]:
+        normalized_expiry_unit = str(expiry_unit or "").strip().lower()
+        if normalized_expiry_unit != settings.default_expiry_unit:
+            raise ValueError(
+                "YIELDS_EXPIRY_UNIT_MUST_BE_"
+                f"{settings.default_expiry_unit.upper()}"
+            )
         payload = {
             "proposal": 1,
             "amount": cls.validate_stake(stake),
             "basis": "stake",
             "contract_type": cls.resolve_contract_type(direction),
             "currency": str(currency or "USD").upper(),
-            "duration": cls.validate_expiry(expiry_seconds),
-            "duration_unit": "s",
+            "duration": cls.validate_expiry_duration(expiry_duration),
+            "duration_unit": normalized_expiry_unit,
             "underlying_symbol": cls.normalize_step_symbol(symbol),
             "req_id": cls.next_req_id(),
         }
@@ -331,7 +339,8 @@ class TradeExecutionService:
         symbol: str,
         direction: str,
         stake: float,
-        expiry_seconds: int,
+        expiry_duration: int,
+        expiry_unit: str,
         currency: str,
         subscribe: bool = True,
     ) -> dict[str, Any]:
@@ -339,7 +348,8 @@ class TradeExecutionService:
             symbol=symbol,
             direction=direction,
             stake=stake,
-            expiry_seconds=expiry_seconds,
+            expiry_duration=expiry_duration,
+            expiry_unit=expiry_unit,
             currency=currency,
             subscribe=subscribe,
         )
@@ -563,7 +573,9 @@ class TradeExecutionService:
             )
 
             amount = self.validate_stake(stake)
-            expiry = self.validate_expiry(settings.default_expiry_seconds)
+            expiry_duration = self.validate_expiry_duration(
+                settings.default_expiry_duration
+            )
 
         except ValueError as exc:
             return {
@@ -594,7 +606,8 @@ class TradeExecutionService:
                                 symbol=candidate_symbol,
                                 direction=contract_type,
                                 stake=amount,
-                                expiry_seconds=expiry,
+                                expiry_duration=expiry_duration,
+                                expiry_unit=settings.default_expiry_unit,
                                 currency=currency,
                                 subscribe=not reuse_websocket,
                             )
@@ -625,7 +638,8 @@ class TradeExecutionService:
                                     symbol=candidate_symbol,
                                     direction=contract_type,
                                     stake=amount,
-                                    expiry_seconds=expiry,
+                                    expiry_duration=expiry_duration,
+                                    expiry_unit=settings.default_expiry_unit,
                                     currency=currency,
                                     subscribe=not reuse_websocket,
                                 )
@@ -647,7 +661,8 @@ class TradeExecutionService:
                             "direction": direction,
                             "contract_type": contract_type,
                             "stake": amount,
-                            "expiry_seconds": expiry,
+                            "expiry_duration": expiry_duration,
+                            "expiry_unit": settings.default_expiry_unit,
                             "proposal_id": proposal_id,
                             "contract_id": buy[
                                 "contract_id"
@@ -791,7 +806,8 @@ class TradeExecutionService:
                         symbol=str(preload["symbol"]),
                         direction=str(preload["direction"]),
                         stake=float(preload["stake"]),
-                        expiry_seconds=settings.default_expiry_seconds,
+                        expiry_duration=settings.default_expiry_duration,
+                        expiry_unit=settings.default_expiry_unit,
                         currency=str(preload.get("currency") or "USD"),
                         subscribe=True,
                     )
@@ -962,7 +978,11 @@ class TradeExecutionService:
                 ):
                     continue
 
-                if not bool(contract.get("is_sold")) and on_countdown is not None:
+                if (
+                    settings.default_expiry_unit == "s"
+                    and not bool(contract.get("is_sold"))
+                    and on_countdown is not None
+                ):
                     expiry_value = contract.get("date_expiry")
                     try:
                         expiry_epoch = float(expiry_value)
@@ -971,7 +991,7 @@ class TradeExecutionService:
                     if math.isfinite(expiry_epoch) and expiry_epoch > 0:
                         seconds_remaining = math.ceil(expiry_epoch - time.time())
                         if (
-                            1 <= seconds_remaining <= settings.default_expiry_seconds
+                            1 <= seconds_remaining <= settings.default_expiry_duration
                             and seconds_remaining != last_countdown
                         ):
                             schedule_countdown(seconds_remaining)

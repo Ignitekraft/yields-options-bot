@@ -29,7 +29,7 @@ class AuthenticatedDerivWebSocket:
                 "contract_type": kwargs.get("contract_type", "CALL"),
                 "currency": kwargs.get("currency", "USD"),
                 "duration": int(kwargs.get("duration", 5)),
-                "duration_unit": kwargs.get("duration_unit", "s"),
+                "duration_unit": kwargs.get("duration_unit", "t"),
                 "symbol": kwargs.get("symbol"),
             })
         elif action == "buy":

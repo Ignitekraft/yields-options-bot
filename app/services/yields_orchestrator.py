@@ -77,8 +77,8 @@ class YieldsOrchestrator:
             symbol=symbol,
             amount=amount,
             contract_type=contract_type,
-            duration=settings.default_expiry_seconds,
-            duration_unit="s",
+            duration=settings.default_expiry_duration,
+            duration_unit=settings.default_expiry_unit,
         )
 
         return {

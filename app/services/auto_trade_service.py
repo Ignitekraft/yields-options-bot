@@ -28,7 +28,8 @@ class TradeRunState:
     martingale_step: int = 1
     max_cycles: int = settings.auto_trade_cycles
     status: str = "pending"
-    expiry_seconds: int = settings.default_expiry_seconds
+    expiry_duration: int = settings.default_expiry_duration
+    expiry_unit: str = settings.default_expiry_unit
     account_mode: str = "demo"
     currency: str = "USD"
     starting_balance: float | None = None

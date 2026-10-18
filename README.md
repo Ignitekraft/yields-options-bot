@@ -52,7 +52,7 @@ slope, 3-bar momentum, price relative to the short- and higher-timeframe EMAs,
 and RSI. The weighted score selects bullish, bearish, or neutral direction;
 ATR and momentum are reported as context rather than hard eligibility gates.
 Markets with insufficient or stale history remain excluded. This scoring
-approach does not guarantee a profitable 5-second contract and has not been
+approach does not guarantee a profitable 5-tick contract and has not been
 validated as profitable by a historical backtest. Live data errors stop a
 market scan instead of producing a signal from sample data. Public market data
 uses Deriv's unauthenticated public WebSocket. Deriv's documented WebSocket

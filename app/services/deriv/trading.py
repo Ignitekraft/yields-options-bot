@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from app.config import settings
+
 
 class DerivTradingService:
     """Minimal authenticated Deriv trading helper for proposal, buy, and open-contract monitoring."""
@@ -10,7 +12,17 @@ class DerivTradingService:
     def __init__(self, websocket_client: Any | None = None):
         self.websocket_client = websocket_client
 
-    def build_contract_request(self, symbol: str, direction: str, stake: float, expiry_seconds: int = 30) -> dict[str, Any]:
+    def build_contract_request(
+        self,
+        symbol: str,
+        direction: str,
+        stake: float,
+        expiry_duration: int = settings.default_expiry_duration,
+    ) -> dict[str, Any]:
+        if expiry_duration != settings.default_expiry_duration:
+            raise ValueError(
+                f"YIELDS_EXPIRY_MUST_BE_{settings.default_expiry_duration}_TICKS"
+            )
         normalized_direction = str(direction).upper()
         if normalized_direction in {"BULLISH", "CALL"}:
             contract_type = "CALL"
@@ -25,8 +37,8 @@ class DerivTradingService:
             "basis": "payout",
             "contract_type": contract_type,
             "currency": "USD",
-            "duration": int(expiry_seconds),
-            "duration_unit": "s",
+            "duration": int(expiry_duration),
+            "duration_unit": settings.default_expiry_unit,
             "symbol": symbol,
             "subscribe": 1,
         }
@@ -40,10 +52,21 @@ class DerivTradingService:
             return False
         return True
 
-    def create_proposal(self, symbol: str, direction: str, stake: float, expiry_seconds: int = 30) -> dict[str, Any]:
-        request = self.build_contract_request(symbol, direction, stake, expiry_seconds=expiry_seconds)
+    def create_proposal(
+        self,
+        symbol: str,
+        direction: str,
+        stake: float,
+        expiry_duration: int = settings.default_expiry_duration,
+    ) -> dict[str, Any]:
+        request = self.build_contract_request(
+            symbol,
+            direction,
+            stake,
+            expiry_duration=expiry_duration,
+        )
         request["proposal"] = 1
-        proposal_id = f"proposal-{symbol.lower()}-{int(stake)}-{expiry_seconds}"
+        proposal_id = f"proposal-{symbol.lower()}-{int(stake)}-{expiry_duration}"
         ask_price = max(0.01, round(float(stake) * 0.85, 2))
         return {
             "proposal_id": proposal_id,
@@ -51,8 +74,8 @@ class DerivTradingService:
             "contract_type": request["contract_type"],
             "amount": float(stake),
             "currency": request["currency"],
-            "duration": int(expiry_seconds),
-            "duration_unit": "s",
+            "duration": int(expiry_duration),
+            "duration_unit": settings.default_expiry_unit,
             "ask_price": ask_price,
             "status": "valid",
         }

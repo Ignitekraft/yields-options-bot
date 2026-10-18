@@ -466,6 +466,8 @@ def handle_faq() -> str:
         "  Only the fixed Step Index family: 100, 200, 300, 400, and 500.\n\n"
         "• What is Auto Trade?\n"
         "  It picks the strongest current setup, confirms your stake, and monitors each contract until settlement.\n\n"
+        "• How long is each Auto Trade contract?\n"
+        "  Each contract expires after five market ticks. The elapsed time varies with how quickly the market updates.\n\n"
         "• Does Auto Trade stop after consecutive losses?\n"
         "  Not currently. Smart Scaling can increase stakes quickly after "
         "losses; a session ends after the configured winning-cycle target, "

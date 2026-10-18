@@ -11,5 +11,6 @@ class SettingsService:
             "martingale_enabled": True,
             "multiplier": settings.martingale_multiplier,
             "max_cycles": settings.auto_trade_cycles,
-            "expiry_seconds": settings.default_expiry_seconds,
+            "expiry_duration": settings.default_expiry_duration,
+            "expiry_unit": settings.default_expiry_unit,
         }

@@ -778,9 +778,9 @@ async def handle_chart_screenshot(update, context=None) -> None:
         f"AI evidence confidence: {analysis.confidence:.0f}% "
         "(not a win probability)\n"
         f"Reason: {analysis.reasoning}\n\n"
-        "This setup is based on the screenshot for the first 5-second "
-        "contract only; a three-win session takes at least 15 seconds "
-        "and can take longer after losses.\n\n"
+        "This setup is based on the screenshot for the first 5-tick "
+        "contract only. A three-win session needs at least 15 ticks; "
+        "elapsed time varies with market ticks and losses.\n\n"
         "This is an AI interpretation of your screenshot, not a guarantee. "
         "Choose your stake to continue.",
         reply_markup=TelegramKeyboard.stake_keyboard(
@@ -1909,11 +1909,17 @@ async def _run_auto_trade_loop(update, state) -> None:
                 }
                 for stake in next_stakes
             ]
+            if settings.default_expiry_unit == "t":
+                start_next_token_reservation()
             try:
                 settlement = await _monitor_settlement(
                     user_id,
                     current,
-                    on_countdown=create_settlement_countdown_callback(),
+                    on_countdown=(
+                        create_settlement_countdown_callback()
+                        if settings.default_expiry_unit == "s"
+                        else None
+                    ),
                     on_settlement=buy_next_after_settlement,
                     preload_proposals=preload_proposals,
                 )
@@ -2053,8 +2059,9 @@ async def _run_auto_trade_loop(update, state) -> None:
         pending_step = (
             f"Step {current.martingale_step}\n⏳ Purchased for "
             f"${current.current_stake:.2f}. Waiting for the "
-            f"{current.expiry_seconds}-second "
-            "contract to settle."
+            f"{current.expiry_duration} "
+            f"{'ticks' if current.expiry_unit == 't' else 'seconds'} "
+            "to settle."
         )
         active_pending_step = pending_step
         cycle_report_message = await _update_cycle_report(
@@ -2138,14 +2145,14 @@ async def _prepare_trade_confirmation(
         f"Market: {setup.get('display_name', setup['symbol'])}\n"
         f"Direction: {setup['direction']}\n"
         "Indicator scan selected this setup; it does not guarantee a win. "
-        f"The {settings.auto_trade_cycles}-winning-cycle target takes at least "
-        f"{settings.auto_trade_cycles * settings.default_expiry_seconds} seconds "
-        "if every trade wins immediately; losses add recovery trades and time.\n"
+        f"Auto Trade stops after {settings.auto_trade_cycles} winning cycles; "
+        "losses add recovery trades and time.\n"
         f"Account mode: {account_mode.upper()}\n"
         f"Initial stake: {stake_value:,.2f} {currency}"
         f"{stake_description}\n"
         f"Available tokens: {token_balance}\n"
-        f"Expiry: {settings.default_expiry_seconds} seconds\n"
+        f"Expiry: {settings.default_expiry_duration} "
+        f"{'ticks' if settings.default_expiry_unit == 't' else 'seconds'}\n"
         f"Target: {settings.auto_trade_cycles} winning cycles\n"
         "There is no consecutive-loss stop right now. Smart Scaling raises "
         "the next stake after each loss, so it can grow quickly and may exceed "
@@ -2509,7 +2516,7 @@ async def _dispatch_callback(update, context) -> None:
             "• Smart Scaling increases the next stake after a loss\n"
             "• There is currently no consecutive-loss stop; higher stakes can "
             "grow quickly\n"
-            f"• The run stops after {current.max_cycles} winning cycles, "
+            f"• The run stops after {settings.auto_trade_cycles} winning cycles, "
             "when tokens or balance "
             "run out, or if Deriv rejects a trade"
         )

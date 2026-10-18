@@ -82,8 +82,8 @@ class TradingService:
         amount: float = 10.0,
         contract_type: str = "CALL",
         currency: str = "USD",
-        duration: int = settings.default_expiry_seconds,
-        duration_unit: str = "s",
+        duration: int = settings.default_expiry_duration,
+        duration_unit: str = settings.default_expiry_unit,
         multiplier: int | None = None,
     ) -> dict[str, object]:
         """
@@ -94,14 +94,16 @@ class TradingService:
         """
         del multiplier
 
-        if duration != settings.default_expiry_seconds:
+        if duration != settings.default_expiry_duration:
             raise ValueError(
-                f"YIELDS_EXPIRY_MUST_BE_{settings.default_expiry_seconds}_SECONDS"
+                f"YIELDS_EXPIRY_MUST_BE_{settings.default_expiry_duration}_"
+                f"{'TICKS' if settings.default_expiry_unit == 't' else 'SECONDS'}"
             )
 
-        if duration_unit != "s":
+        if duration_unit != settings.default_expiry_unit:
             raise ValueError(
-                "YIELDS_EXPIRY_UNIT_MUST_BE_SECONDS"
+                "YIELDS_EXPIRY_UNIT_MUST_BE_"
+                f"{settings.default_expiry_unit.upper()}"
             )
 
         resolved_symbol = self.normalize_step_symbol(
@@ -121,7 +123,8 @@ class TradingService:
                 symbol=resolved_symbol,
                 direction=resolved_contract_type,
                 stake=stake,
-                expiry_seconds=settings.default_expiry_seconds,
+                expiry_duration=settings.default_expiry_duration,
+                expiry_unit=settings.default_expiry_unit,
                 currency=currency,
             )
         )
@@ -133,8 +136,8 @@ class TradingService:
             "contract_type": resolved_contract_type,
             "amount": stake,
             "currency": str(currency).upper(),
-            "duration": settings.default_expiry_seconds,
-            "duration_unit": "s",
+            "duration": settings.default_expiry_duration,
+            "duration_unit": settings.default_expiry_unit,
             "request": payload,
         }
 
@@ -175,7 +178,7 @@ class TradingService:
         symbol: str,
         contract_type: str,
         stake_amount: float,
-        duration_seconds: int = settings.default_expiry_seconds,
+        duration_seconds: int = settings.default_expiry_duration,
         cycles: int = 5,
     ) -> list[dict[str, Any]]:
         """
