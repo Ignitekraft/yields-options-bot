@@ -182,9 +182,9 @@ class TradingService:
         Legacy compatibility method.
 
         This method deliberately does NOT implement the Yields Auto Trade
-        five-winning-cycle state machine.
+        winning-cycle state machine.
 
-        The proper Auto Trade controller must decide:
+        The Auto Trade controller must decide:
             win  -> next cycle + reset stake
             loss -> same cycle + martingale
         and then call execute_trade() for the next contract.

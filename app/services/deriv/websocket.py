@@ -28,7 +28,7 @@ class AuthenticatedDerivWebSocket:
                 "basis": "payout",
                 "contract_type": kwargs.get("contract_type", "CALL"),
                 "currency": kwargs.get("currency", "USD"),
-                "duration": int(kwargs.get("duration", 15)),
+                "duration": int(kwargs.get("duration", 5)),
                 "duration_unit": kwargs.get("duration_unit", "s"),
                 "symbol": kwargs.get("symbol"),
             })

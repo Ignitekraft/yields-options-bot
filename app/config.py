@@ -51,8 +51,8 @@ class Settings:
         "step_400",
         "step_500",
     )
-    default_expiry_seconds: int = 15
-    auto_trade_cycles: int = int(os.getenv("AUTO_TRADE_CYCLES", "5"))
+    default_expiry_seconds: int = 5
+    auto_trade_cycles: int = 3
     auto_trade_multiplier: float = float(os.getenv("AUTO_TRADE_MULTIPLIER", "2.25"))
     martingale_multiplier: float = float(os.getenv("MARTINGALE_MULTIPLIER", "2.3"))
 
