@@ -43,15 +43,12 @@ is stale.
 
 The scanner computes a weighted directional score from EMA alignment, EMA
 slope, 3-bar momentum, price relative to the short- and higher-timeframe EMAs,
-and RSI. A setup is eligible only when its score reaches the minimum threshold,
-volatility and momentum filters pass, and short-term trend, slope, momentum,
-price position, and higher-timeframe direction agree. If no market passes, the
-scan returns no trade rather than promoting the strongest weak signal. These
-filters also avoid chasing bullish entries at an overbought RSI and bearish
-entries at an oversold RSI. They improve selectivity, not predicted
-probability: they do not guarantee a profitable 30-second contract and have
-not been validated as profitable by a historical backtest. Live data errors stop a market scan instead of producing
-a signal from sample data. Public market data uses Deriv's unauthenticated public
+and RSI. The weighted score selects bullish, bearish, or neutral direction;
+ATR and momentum are reported as context rather than hard eligibility gates.
+Markets with insufficient or stale history remain excluded. This scoring
+approach does not guarantee a profitable 30-second contract and has not been
+validated as profitable by a historical backtest. Live data errors stop a
+market scan instead of producing a signal from sample data. Public market data uses Deriv's unauthenticated public
 WebSocket. Deriv's documented WebSocket request budgets and REST limits are
 enforced centrally. Connection handshakes also have a separate four-second
 minimum interval with jitter as a defensive measure; this is not a published

@@ -266,7 +266,7 @@ class MarketDataTests(unittest.TestCase):
         token_balance.assert_not_awaited()
         scan_setup.assert_not_awaited()
 
-    def test_unhandled_telegram_errors_use_a_generic_user_message(self):
+    def test_unhandled_telegram_errors_hide_technical_details(self):
         reply_text = AsyncMock()
         update = SimpleNamespace(
             effective_message=SimpleNamespace(reply_text=reply_text),
@@ -279,9 +279,70 @@ class MarketDataTests(unittest.TestCase):
         asyncio.run(_handle_unexpected_error(update, context))
 
         shown_message = reply_text.await_args.args[0]
-        self.assertIn("could not be completed", shown_message)
+        self.assertIn("couldn't be processed", shown_message)
         self.assertNotIn("DATABASE_PASSWORD", shown_message)
         self.assertNotIn("private", shown_message)
+
+    def test_unhandled_callback_errors_show_alert_without_chat_message(self):
+        answer = AsyncMock()
+        reply_text = AsyncMock()
+        update = SimpleNamespace(
+            effective_message=SimpleNamespace(reply_text=reply_text),
+            callback_query=SimpleNamespace(
+                data="AUTO_TRADE_CONFIRM",
+                answer=answer,
+            ),
+        )
+        context = SimpleNamespace(error=RuntimeError("private technical detail"))
+
+        asyncio.run(_handle_unexpected_error(update, context))
+
+        answer.assert_awaited_once_with(
+            "Auto Trade couldn't finish that step. Check your Deriv account "
+            "before trying again.",
+            show_alert=True,
+        )
+        reply_text.assert_not_awaited()
+
+    def test_failed_callback_alert_does_not_post_a_separate_chat_message(self):
+        answer = AsyncMock(side_effect=RuntimeError("query is no longer valid"))
+        reply_text = AsyncMock()
+        update = SimpleNamespace(
+            effective_message=SimpleNamespace(reply_text=reply_text),
+            callback_query=SimpleNamespace(data="AUTO_TRADE_CONFIRM", answer=answer),
+        )
+
+        asyncio.run(
+            _handle_unexpected_error(
+                update,
+                SimpleNamespace(error=RuntimeError("trade callback failed")),
+            )
+        )
+
+        answer.assert_awaited_once()
+        reply_text.assert_not_awaited()
+
+    def test_auto_trade_callback_failure_is_contained_with_a_friendly_alert(self):
+        answer = AsyncMock()
+        update = SimpleNamespace(
+            callback_query=SimpleNamespace(
+                data="AUTO_TRADE_CONFIRM",
+                answer=answer,
+            ),
+            effective_user=SimpleNamespace(id="callback-error-user"),
+        )
+
+        with patch(
+            "app.bot.callbacks._dispatch_callback",
+            new=AsyncMock(side_effect=RuntimeError("private technical detail")),
+        ):
+            asyncio.run(dispatch_callback(update, SimpleNamespace()))
+
+        answer.assert_awaited_once_with(
+            "Auto Trade couldn't finish that step. Check your Deriv account "
+            "before trying again.",
+            show_alert=True,
+        )
 
     def test_oauth_errors_are_friendly_and_not_reflected_as_html(self):
         denied = asyncio.run(
@@ -491,7 +552,7 @@ class MarketDataTests(unittest.TestCase):
         self.assertLess(bearish.indicators["directional_score"], 0)
         self.assertIn("directional bias", bullish.indicators["signal_reason"])
 
-    def test_scanner_rejects_weak_momentum_and_abnormal_volatility(self):
+    def test_scanner_reports_weak_momentum_and_abnormal_volatility_as_context(self):
         scanner = YieldsScanner()
 
         weak_momentum_ticks = _sample_deriv_ticks()
@@ -502,10 +563,12 @@ class MarketDataTests(unittest.TestCase):
             "Step Index 100",
             weak_momentum_ticks,
         )
-        self.assertEqual(weak_momentum.trend, "neutral")
-        self.assertFalse(weak_momentum.indicators["entry_eligible"])
+        self.assertNotEqual(weak_momentum.trend, "neutral")
         self.assertFalse(weak_momentum.indicators["momentum_confirmed"])
-        self.assertIn("recent momentum is too weak", weak_momentum.indicators["signal_reason"])
+        self.assertNotIn(
+            "recent momentum is too weak",
+            weak_momentum.indicators["signal_reason"],
+        )
 
         volatility_spike_ticks = _sample_deriv_ticks()
         volatility_spike_ticks[-1]["quote"] += 1.0
@@ -514,15 +577,10 @@ class MarketDataTests(unittest.TestCase):
             "Step Index 100",
             volatility_spike_ticks,
         )
-        self.assertEqual(volatility_spike.trend, "neutral")
-        self.assertFalse(volatility_spike.indicators["entry_eligible"])
+        self.assertNotEqual(volatility_spike.trend, "neutral")
         self.assertFalse(volatility_spike.indicators["volatility_in_range"])
-        self.assertIn(
+        self.assertNotIn(
             "volatility outside the accepted range",
-            volatility_spike.indicators["signal_reason"],
-        )
-        self.assertIn(
-            "RSI is overbought for a bullish entry",
             volatility_spike.indicators["signal_reason"],
         )
 
@@ -4182,14 +4240,12 @@ class MarketDataTests(unittest.TestCase):
         state.tokens_spent = 10
 
         with patch(
-            "app.bot.callbacks.account_service.get_live_balances",
+            "app.bot.callbacks.account_service.get_current_live_balance",
             new=AsyncMock(
                 return_value={
-                    "demo": {
-                        "available": True,
-                        "balance": 172.09,
-                        "currency": "USD",
-                    },
+                    "available": True,
+                    "balance": 172.09,
+                    "currency": "USD",
                 }
             ),
         ), patch(
@@ -4216,11 +4272,9 @@ class MarketDataTests(unittest.TestCase):
         )
         state.status = "completed"
         balances = {
-            "demo": {
-                "available": True,
-                "balance": 321.45,
-                "currency": "USD",
-            },
+            "available": True,
+            "balance": 321.45,
+            "currency": "USD",
         }
         history = SimpleNamespace(
             update_balance_snapshots=Mock(
@@ -4230,7 +4284,7 @@ class MarketDataTests(unittest.TestCase):
         )
 
         with patch(
-            "app.bot.callbacks.account_service.get_live_balances",
+            "app.bot.callbacks.account_service.get_current_live_balance",
             new=AsyncMock(return_value=balances),
         ), patch(
             "app.bot.callbacks.trade_history_service",
@@ -4241,9 +4295,9 @@ class MarketDataTests(unittest.TestCase):
             )
 
         self.assertIn("Balance: 321.45 USD", text)
-        self.assertNotIn("Balance: Unavailable", text)
+        self.assertNotIn("Live balance temporarily unavailable", text)
 
-    def test_session_end_uses_last_known_or_estimated_balance_if_live_fetch_fails(self):
+    def test_session_end_never_substitutes_cached_or_estimated_balance(self):
         service = AutoTradeService()
         cached_state = service.start_run(
             "receipt-cached-balance-user",
@@ -4266,7 +4320,7 @@ class MarketDataTests(unittest.TestCase):
 
         async def make_text(user_id, state, profile):
             with patch(
-                "app.bot.callbacks.account_service.get_live_balances",
+                "app.bot.callbacks.account_service.get_current_live_balance",
                 new=AsyncMock(side_effect=RuntimeError("Deriv unavailable")),
             ), patch(
                 "app.bot.callbacks.trade_history_service",
@@ -4295,8 +4349,10 @@ class MarketDataTests(unittest.TestCase):
             )
         )
 
-        self.assertIn("Balance: Last known: 210.00 USD", cached_text)
-        self.assertIn("Balance: Estimated: 87.50 USD", estimated_text)
+        for text in (cached_text, estimated_text):
+            self.assertIn("Balance: Live balance temporarily unavailable", text)
+            self.assertNotIn("Last known:", text)
+            self.assertNotIn("Estimated:", text)
 
     def test_deriv_oauth_success_message_includes_welcome_gift_offer(self):
         class FakeBot:
@@ -4509,6 +4565,50 @@ class MarketDataTests(unittest.TestCase):
 
         self.assertEqual(buy["status"], "accepted")
         self.assertIn("contract_id", buy)
+
+    def test_current_live_balance_uses_selected_account_and_live_value(self):
+        auth = Mock()
+        auth.get_valid_access_token.return_value = "access-token"
+        service = AccountService(auth)
+        account = {
+            "account_id": "demo-123",
+            "account_type": "demo",
+            "currency": "USD",
+            "balance": 999.0,
+        }
+        service.get_trade_account = AsyncMock(return_value=account)
+        service._read_live_balance = AsyncMock(return_value=123.45)
+
+        result = asyncio.run(
+            service.get_current_live_balance("live-user", "demo")
+        )
+
+        service.get_trade_account.assert_awaited_once_with("live-user", "demo")
+        service._read_live_balance.assert_awaited_once_with(
+            access_token="access-token",
+            account_id="demo-123",
+        )
+        self.assertEqual(result["balance"], 123.45)
+        self.assertEqual(result["currency"], "USD")
+
+    def test_current_live_balance_does_not_fall_back_to_account_list_value(self):
+        auth = Mock()
+        auth.get_valid_access_token.return_value = "access-token"
+        service = AccountService(auth)
+        service.get_trade_account = AsyncMock(
+            return_value={
+                "account_id": "demo-123",
+                "account_type": "demo",
+                "currency": "USD",
+                "balance": 999.0,
+            }
+        )
+        service._read_live_balance = AsyncMock(return_value=None)
+
+        with self.assertRaisesRegex(ValueError, "LIVE_BALANCE_UNAVAILABLE"):
+            asyncio.run(
+                service.get_current_live_balance("live-user", "demo")
+            )
 
     def test_trading_service_uses_deriv_websocket_protocol(self):
         class MockAuthService:

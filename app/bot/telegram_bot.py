@@ -128,29 +128,32 @@ async def _handle_unexpected_error(update, context) -> None:
     else:
         logger.error("Unhandled Telegram update failure without exception details")
 
+    query = getattr(update, "callback_query", None)
+    answer = getattr(query, "answer", None)
+    if answer is not None:
+        try:
+            data = str(getattr(query, "data", "") or "")
+            message = (
+                "Auto Trade couldn't finish that step. Check your Deriv "
+                "account before trying again."
+                if data == "START_AUTO_TRADE" or data.startswith("AUTO_TRADE")
+                else "That button couldn't be completed. Please try again."
+            )
+            await answer(message, show_alert=True)
+            return
+        except Exception:
+            logger.exception("Could not answer failed Telegram callback")
+        return
+
     message = getattr(update, "effective_message", None)
     reply_text = getattr(message, "reply_text", None)
     if reply_text is not None:
         try:
             await reply_text(
-                "⚠️ Sorry, that request could not be completed. Please try "
-                "again. If you were placing a trade, check your Deriv account "
-                "before retrying."
+                "⚠️ That message couldn't be processed. Please try again shortly."
             )
-            return
         except Exception:
             logger.exception("Could not send Telegram error notification")
-
-    query = getattr(update, "callback_query", None)
-    answer = getattr(query, "answer", None)
-    if answer is not None:
-        try:
-            await answer(
-                "Sorry, that request could not be completed. Please try again.",
-                show_alert=True,
-            )
-        except Exception:
-            logger.exception("Could not answer failed Telegram callback")
 
 
 def create_application():

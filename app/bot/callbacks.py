@@ -164,27 +164,29 @@ async def _session_end_message(
     reason: str | None = None,
 ) -> str:
     mode = str(state.account_mode or "demo").lower()
-    balance_text = "Unavailable"
+    balance_text = "Live balance temporarily unavailable"
     currency = str(getattr(state, "currency", "USD") or "USD").upper()
-    balances = None
+    balance_snapshot = None
     try:
         balances = await asyncio.wait_for(
-            account_service.get_live_balances(user_id),
-            timeout=15,
+            account_service.get_current_live_balance(user_id, mode),
+            timeout=90,
         )
-        account_balance = (balances.get(mode) or {})
-        if account_balance.get("available") and account_balance.get("balance") is not None:
-            currency = str(account_balance.get("currency") or "USD").upper()
-            balance_text = f"{float(account_balance['balance']):,.2f} {currency}"
+        if balances.get("available") and balances.get("balance") is not None:
+            currency = str(balances.get("currency") or "USD").upper()
+            balance_text = f"{float(balances['balance']):,.2f} {currency}"
+            balance_snapshot = {
+                mode: balances,
+            }
     except Exception:
         logger.exception("Could not fetch final Deriv balance for session receipt")
 
-    if balances is not None:
+    if balance_snapshot is not None:
         try:
             await asyncio.to_thread(
                 trade_history_service.update_balance_snapshots,
                 user_id,
-                balances,
+                balance_snapshot,
             )
         except Exception:
             logger.exception("Could not save final Deriv balance snapshot")
@@ -196,24 +198,8 @@ async def _session_end_message(
             user_id,
         )
         token_balance_text = str(int(profile.get("token_balance", 0)))
-        if balance_text == "Unavailable":
-            cached_balance = profile.get(f"{mode}_balance")
-            if cached_balance is not None:
-                currency = str(
-                    profile.get(f"{mode}_currency") or currency
-                ).upper()
-                balance_text = (
-                    f"Last known: {float(cached_balance):,.2f} {currency}"
-                )
     except Exception:
         logger.exception("Could not fetch remaining tokens for session receipt")
-
-    starting_balance = getattr(state, "starting_balance", None)
-    if balance_text == "Unavailable" and starting_balance is not None:
-        estimated_balance = starting_balance + float(
-            state.total_profit_loss or 0.0
-        )
-        balance_text = f"Estimated: {estimated_balance:,.2f} {currency}"
 
     profit = float(state.total_profit_loss or 0.0)
     profit_text = f"{'+' if profit >= 0 else '-'}${abs(profit):,.2f} {currency}"
@@ -1832,6 +1818,29 @@ async def handle_custom_stake_input(update, context=None) -> None:
 
 
 async def dispatch_callback(update, context) -> None:
+    query = getattr(update, "callback_query", None)
+    if query is None:
+        return
+
+    data = str(getattr(query, "data", "") or "")
+    try:
+        await _dispatch_callback(update, context)
+    except Exception:
+        if data == "START_AUTO_TRADE" or data.startswith("AUTO_TRADE"):
+            logger.exception("Unhandled Auto Trade callback failure")
+            try:
+                await query.answer(
+                    "Auto Trade couldn't finish that step. Check your Deriv "
+                    "account before trying again.",
+                    show_alert=True,
+                )
+            except Exception:
+                logger.exception("Could not show Auto Trade callback error")
+            return
+        raise
+
+
+async def _dispatch_callback(update, context) -> None:
     if update.callback_query is None:
         return
 

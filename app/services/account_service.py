@@ -381,6 +381,32 @@ class AccountService:
                 value = balance_data.get("balance")
                 return None if value is None else float(value)
 
+    async def get_current_live_balance(
+        self,
+        user_id: str | int,
+        account_mode: str,
+    ) -> dict[str, Any]:
+        """Fetch a fresh balance from exactly the selected Deriv account."""
+        account = await self.get_trade_account(user_id, account_mode)
+        access_token = self.auth_service.get_valid_access_token(str(user_id))
+        if not access_token:
+            raise ValueError("DERIV_NOT_AUTHENTICATED")
+
+        balance = await self._read_live_balance(
+            access_token=access_token,
+            account_id=account["account_id"],
+        )
+        if balance is None:
+            raise ValueError("LIVE_BALANCE_UNAVAILABLE")
+
+        return {
+            "available": True,
+            "balance": balance,
+            "currency": account["currency"],
+            "account_id": account["account_id"],
+            "status": "available",
+        }
+
     async def get_live_balances(
         self,
         user_id: str | int,
