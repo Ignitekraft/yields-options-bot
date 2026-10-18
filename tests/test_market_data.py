@@ -491,6 +491,41 @@ class MarketDataTests(unittest.TestCase):
         self.assertLess(bearish.indicators["directional_score"], 0)
         self.assertIn("directional bias", bullish.indicators["signal_reason"])
 
+    def test_scanner_rejects_weak_momentum_and_abnormal_volatility(self):
+        scanner = YieldsScanner()
+
+        weak_momentum_ticks = _sample_deriv_ticks()
+        for tick in weak_momentum_ticks[-4:]:
+            tick["quote"] = weak_momentum_ticks[-5]["quote"]
+        weak_momentum = scanner.normalize_step_market(
+            "step_100",
+            "Step Index 100",
+            weak_momentum_ticks,
+        )
+        self.assertEqual(weak_momentum.trend, "neutral")
+        self.assertFalse(weak_momentum.indicators["entry_eligible"])
+        self.assertFalse(weak_momentum.indicators["momentum_confirmed"])
+        self.assertIn("recent momentum is too weak", weak_momentum.indicators["signal_reason"])
+
+        volatility_spike_ticks = _sample_deriv_ticks()
+        volatility_spike_ticks[-1]["quote"] += 1.0
+        volatility_spike = scanner.normalize_step_market(
+            "step_100",
+            "Step Index 100",
+            volatility_spike_ticks,
+        )
+        self.assertEqual(volatility_spike.trend, "neutral")
+        self.assertFalse(volatility_spike.indicators["entry_eligible"])
+        self.assertFalse(volatility_spike.indicators["volatility_in_range"])
+        self.assertIn(
+            "volatility outside the accepted range",
+            volatility_spike.indicators["signal_reason"],
+        )
+        self.assertIn(
+            "RSI is overbought for a bullish entry",
+            volatility_spike.indicators["signal_reason"],
+        )
+
     def test_scanner_refuses_short_or_stale_deriv_history(self):
         scanner = YieldsScanner()
         insufficient = scanner.normalize_step_market(
@@ -1308,7 +1343,7 @@ class MarketDataTests(unittest.TestCase):
         self.assertEqual(replacement.symbol, "step_300")
         self.assertEqual(replacement.status, "awaiting_confirmation")
 
-    def test_auto_trade_stops_after_five_consecutive_losses(self):
+    def test_auto_trade_continues_smart_scaling_after_five_consecutive_losses(self):
         service = AutoTradeService()
         state = service.start_run(
             "martingale-user",
@@ -1340,8 +1375,8 @@ class MarketDataTests(unittest.TestCase):
         self.assertEqual(state.current_stake, 55.96)
 
         state = service.advance_after_result("martingale-user", won=False, profit=-55.96)
-        self.assertEqual(state.status, "loss_limit")
-        self.assertEqual(state.current_stake, 55.96)
+        self.assertEqual(state.status, "running")
+        self.assertEqual(state.current_stake, 128.71)
         self.assertEqual(state.losses, 5)
         self.assertEqual(state.consecutive_losses, 5)
 
@@ -1419,13 +1454,14 @@ class MarketDataTests(unittest.TestCase):
         self.assertEqual(state.current_stake, 10.0)
         self.assertEqual(state.status, "completed")
 
-    def test_auto_trade_keeps_cycle_reports_and_stops_after_five_consecutive_losses(self):
+    def test_auto_trade_keeps_scaling_after_five_losses_until_cycle_win(self):
         service = AutoTradeService()
         state = service.start_run(
             "five-loss-report-user",
             "step_100",
             "BEARISH",
             10.0,
+            max_cycles=1,
             account_mode="demo",
         )
         service.confirm_run("five-loss-report-user")
@@ -1480,12 +1516,10 @@ class MarketDataTests(unittest.TestCase):
             [
                 {"status": "settled", "profit": -10.0, "entry_tick": 100.0, "exit_tick": 99.0},
                 {"status": "settled", "profit": -23.0, "entry_tick": 100.0, "exit_tick": 99.0},
-                {"status": "settled", "profit": 5.0, "entry_tick": 99.0, "exit_tick": 100.0},
-                {"status": "settled", "profit": -10.0, "entry_tick": 100.0, "exit_tick": 99.0},
-                {"status": "settled", "profit": -23.0, "entry_tick": 100.0, "exit_tick": 99.0},
                 {"status": "settled", "profit": -52.9, "entry_tick": 100.0, "exit_tick": 99.0},
                 {"status": "settled", "profit": -121.67, "entry_tick": 100.0, "exit_tick": 99.0},
                 {"status": "settled", "profit": -279.84, "entry_tick": 100.0, "exit_tick": 99.0},
+                {"status": "settled", "profit": 5.0, "entry_tick": 99.0, "exit_tick": 100.0},
             ]
         )
 
@@ -1509,7 +1543,7 @@ class MarketDataTests(unittest.TestCase):
             new=AsyncMock(),
         ), patch(
             "app.bot.callbacks._session_end_message",
-            new=AsyncMock(return_value="Session stopped after five losses."),
+            new=AsyncMock(return_value="🏆 Victory! Session completed."),
         ), patch(
             "app.bot.callbacks._safe_edit_message",
             new=AsyncMock(),
@@ -1518,15 +1552,15 @@ class MarketDataTests(unittest.TestCase):
 
         self.assertEqual(
             executed_stakes,
-            [10.0, 23.0, 52.9, 10.0, 23.0, 52.9, 121.67, 279.84],
+            [10.0, 23.0, 52.9, 121.67, 279.84, 643.63],
         )
-        self.assertEqual(len(cycle_reports), 2)
+        self.assertEqual(len(cycle_reports), 1)
         self.assertTrue(
             all(parse_mode == "HTML" for report in cycle_reports for parse_mode in report.parse_modes)
         )
         self.assertIn("Cycle 1", cycle_reports[0].text)
-        self.assertEqual(cycle_reports[0].text.count("Step "), 3)
-        self.assertIn("⚡ Cycle 1 Step 1", cycle_reports[0].text)
+        self.assertEqual(cycle_reports[0].text.count("Step "), 6)
+        self.assertIn("⚡ Cycle 1 Step 6", cycle_reports[0].text)
         self.assertIn(
             "<pre>🔴 Invest: $10.00 → -$10.00\n"
             "📊 Price: 100.0000 → 99.0000</pre>",
@@ -1534,21 +1568,12 @@ class MarketDataTests(unittest.TestCase):
         )
         self.assertEqual(
             cycle_reports[0].text.count("Smart Scaling activated"),
-            2,
+            5,
         )
         self.assertNotIn("Smart Scaling activated</pre>", cycle_reports[0].text)
-        self.assertIn("Cycle 2", cycle_reports[1].text)
-        self.assertEqual(cycle_reports[1].text.count("Step "), 5)
-        self.assertEqual(
-            cycle_reports[1].text.count("Smart Scaling activated"),
-            4,
-        )
-        self.assertIn(
-            "stopped after 5 consecutive losses",
-            cycle_reports[1].text,
-        )
-        self.assertEqual(state.status, "loss_limit")
-        self.assertEqual(state.consecutive_losses, 5)
+        self.assertNotIn("stopped after 5 consecutive losses", cycle_reports[0].text)
+        self.assertEqual(state.status, "completed")
+        self.assertEqual(state.consecutive_losses, 0)
         self.assertEqual(len(end_photos), 1)
         self.assertEqual(
             end_photos[0]["photo"],
@@ -1557,7 +1582,70 @@ class MarketDataTests(unittest.TestCase):
         )
         self.assertEqual(
             end_photos[0]["caption"],
-            "Session stopped after five losses.",
+            "🏆 Victory! Session completed.",
+        )
+
+    def test_unexpected_auto_trade_error_is_reported_without_bubbling(self):
+        service = AutoTradeService()
+        state = service.start_run(
+            "auto-trade-error-user",
+            "step_100",
+            "BULLISH",
+            10.0,
+            account_mode="demo",
+        )
+        service.confirm_run("auto-trade-error-user")
+
+        class FakeMessage:
+            def __init__(self):
+                self.photos = []
+                self.replies = []
+
+            async def reply_photo(self, **kwargs):
+                self.photos.append(kwargs)
+
+            async def reply_text(self, text, **_kwargs):
+                self.replies.append(text)
+
+        query = SimpleNamespace(message=FakeMessage())
+        update = SimpleNamespace(
+            callback_query=query,
+            effective_user=SimpleNamespace(id="auto-trade-error-user"),
+        )
+        end_message = AsyncMock(
+            return_value="A temporary problem interrupted Auto Trade."
+        )
+
+        with patch(
+            "app.bot.callbacks.auto_trade_service",
+            service,
+        ), patch(
+            "app.bot.callbacks.account_mode_service.get_mode",
+            return_value="demo",
+        ), patch(
+            "app.bot.callbacks.execute_trade",
+            new=AsyncMock(side_effect=RuntimeError("internal failure")),
+        ), patch(
+            "app.bot.callbacks._save_session_summary",
+            new=AsyncMock(),
+        ), patch(
+            "app.bot.callbacks._session_end_message",
+            new=end_message,
+        ), patch(
+            "app.bot.callbacks.logger.exception",
+        ):
+            asyncio.run(_run_auto_trade(update, state))
+
+        self.assertEqual(state.status, "failed")
+        self.assertEqual(len(query.message.photos), 1)
+        self.assertIn("temporary problem interrupted Auto Trade", query.message.photos[0]["caption"])
+        self.assertEqual(query.message.replies, [])
+        end_message.assert_awaited_once_with(
+            "auto-trade-error-user",
+            state,
+            "A temporary problem interrupted Auto Trade. No further trades "
+            "were placed. Please check your Deriv account before starting "
+            "another session.",
         )
 
     def test_completed_auto_trade_sends_victory_receipt_after_cycle_report(self):
@@ -1675,7 +1763,7 @@ class MarketDataTests(unittest.TestCase):
                 await _send_session_end_message(query, "user", state)
             return message
 
-        bullish = asyncio.run(run_case("BULLISH", "loss_limit"))
+        bullish = asyncio.run(run_case("BULLISH", "stopped"))
         self.assertEqual(
             bullish.photos[0]["photo"],
             "https://hvvwkijquaoqsbzhpyim.supabase.co/storage/v1/object/public/"
@@ -1690,7 +1778,7 @@ class MarketDataTests(unittest.TestCase):
             "Bot%20images/Bullish%20and%20Bearish%20Market%20Setups%202.jpg",
         )
 
-        fallback = asyncio.run(run_case("BEARISH", "loss_limit", fail_photo=True))
+        fallback = asyncio.run(run_case("BEARISH", "stopped", fail_photo=True))
         self.assertEqual(fallback.replies, ["Victory!"])
         self.assertEqual(fallback.edits, [])
 
@@ -1709,7 +1797,7 @@ class MarketDataTests(unittest.TestCase):
             def __init__(self, text):
                 self.text = text
 
-            async def edit_text(self, text):
+            async def edit_text(self, text, **_kwargs):
                 self.text = text
 
         class FakeMessage:
@@ -4074,9 +4162,10 @@ class MarketDataTests(unittest.TestCase):
         self.assertIn("+$5.19", text)
         self.assertIn("Token balance: 43", text)
         self.assertIn("5/13 sessions", text)
-        self.assertIn("Win rate: 100.0%", text)
-        self.assertIn("Direction accuracy: 52.0%", text)
+        self.assertIn("Session win rate: 100.0%", text)
+        self.assertIn("Direction accuracy (contracts): 52.0%", text)
         self.assertIn("Net PnL: +$166.22", text)
+        self.assertIn("Net PnL shows overall profit or loss.", text)
 
     def test_session_end_receipt_includes_balance_result_market_and_tokens(self):
         state = AutoTradeService().start_run(
@@ -4116,6 +4205,98 @@ class MarketDataTests(unittest.TestCase):
         self.assertIn("Balance: 172.09 USD", text)
         self.assertIn("Tokens used: 10", text)
         self.assertIn("Tokens remaining: 40", text)
+
+    def test_session_end_keeps_live_balance_when_snapshot_save_fails(self):
+        state = AutoTradeService().start_run(
+            "receipt-snapshot-failure-user",
+            "step_500",
+            "BULLISH",
+            5.0,
+            account_mode="demo",
+        )
+        state.status = "completed"
+        balances = {
+            "demo": {
+                "available": True,
+                "balance": 321.45,
+                "currency": "USD",
+            },
+        }
+        history = SimpleNamespace(
+            update_balance_snapshots=Mock(
+                side_effect=RuntimeError("storage unavailable"),
+            ),
+            get_user=Mock(return_value={"token_balance": 12}),
+        )
+
+        with patch(
+            "app.bot.callbacks.account_service.get_live_balances",
+            new=AsyncMock(return_value=balances),
+        ), patch(
+            "app.bot.callbacks.trade_history_service",
+            history,
+        ):
+            text = asyncio.run(
+                _session_end_message("receipt-snapshot-failure-user", state)
+            )
+
+        self.assertIn("Balance: 321.45 USD", text)
+        self.assertNotIn("Balance: Unavailable", text)
+
+    def test_session_end_uses_last_known_or_estimated_balance_if_live_fetch_fails(self):
+        service = AutoTradeService()
+        cached_state = service.start_run(
+            "receipt-cached-balance-user",
+            "step_500",
+            "BEARISH",
+            5.0,
+            account_mode="demo",
+        )
+        cached_state.status = "stopped"
+        estimated_state = service.start_run(
+            "receipt-estimated-balance-user",
+            "step_500",
+            "BEARISH",
+            5.0,
+            account_mode="demo",
+        )
+        estimated_state.status = "stopped"
+        estimated_state.starting_balance = 100.0
+        estimated_state.total_profit_loss = -12.5
+
+        async def make_text(user_id, state, profile):
+            with patch(
+                "app.bot.callbacks.account_service.get_live_balances",
+                new=AsyncMock(side_effect=RuntimeError("Deriv unavailable")),
+            ), patch(
+                "app.bot.callbacks.trade_history_service",
+                SimpleNamespace(get_user=Mock(return_value=profile)),
+            ), patch(
+                "app.bot.callbacks.logger.exception",
+            ):
+                return await _session_end_message(user_id, state)
+
+        cached_text = asyncio.run(
+            make_text(
+                "receipt-cached-balance-user",
+                cached_state,
+                {
+                    "token_balance": 12,
+                    "demo_balance": 210.0,
+                    "demo_currency": "USD",
+                },
+            )
+        )
+        estimated_text = asyncio.run(
+            make_text(
+                "receipt-estimated-balance-user",
+                estimated_state,
+                {"token_balance": 12},
+            )
+        )
+
+        self.assertIn("Balance: Last known: 210.00 USD", cached_text)
+        self.assertIn("Balance: Estimated: 87.50 USD", estimated_text)
 
     def test_deriv_oauth_success_message_includes_welcome_gift_offer(self):
         class FakeBot:

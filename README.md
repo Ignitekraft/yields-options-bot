@@ -43,12 +43,15 @@ is stale.
 
 The scanner computes a weighted directional score from EMA alignment, EMA
 slope, 3-bar momentum, price relative to the short- and higher-timeframe EMAs,
-and RSI. It presents the available market with the strongest non-neutral
-directional score, rather than requiring every indicator to agree. ATR and
-momentum are included as context instead of hard vetoes. The score is an
-indicator balance, not a probability or guarantee of a profitable 30-second
-contract. Live data errors stop a market scan instead of producing a signal
-from sample data. Public market data uses Deriv's unauthenticated public
+and RSI. A setup is eligible only when its score reaches the minimum threshold,
+volatility and momentum filters pass, and short-term trend, slope, momentum,
+price position, and higher-timeframe direction agree. If no market passes, the
+scan returns no trade rather than promoting the strongest weak signal. These
+filters also avoid chasing bullish entries at an overbought RSI and bearish
+entries at an oversold RSI. They improve selectivity, not predicted
+probability: they do not guarantee a profitable 30-second contract and have
+not been validated as profitable by a historical backtest. Live data errors stop a market scan instead of producing
+a signal from sample data. Public market data uses Deriv's unauthenticated public
 WebSocket. Deriv's documented WebSocket request budgets and REST limits are
 enforced centrally. Connection handshakes also have a separate four-second
 minimum interval with jitter as a defensive measure; this is not a published
@@ -66,7 +69,10 @@ selected account balance, calculated to the nearest cent. Users can also
 choose Custom amount and enter a stake directly; the amount must be positive,
 have no more than two decimal places, and not exceed the selected account
 balance. The selected market and direction remain pinned from analysis through
-confirmation.
+confirmation. Auto Trade currently has no consecutive-loss stop: Smart Scaling
+can increase the next stake substantially after repeated losses. A session ends
+after its target of five winning cycles, token depletion, insufficient balance,
+or an execution/settlement failure.
 
 ## Deriv rate limiting
 

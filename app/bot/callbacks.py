@@ -166,22 +166,28 @@ async def _session_end_message(
     mode = str(state.account_mode or "demo").lower()
     balance_text = "Unavailable"
     currency = str(getattr(state, "currency", "USD") or "USD").upper()
+    balances = None
     try:
         balances = await asyncio.wait_for(
             account_service.get_live_balances(user_id),
             timeout=15,
-        )
-        await asyncio.to_thread(
-            trade_history_service.update_balance_snapshots,
-            user_id,
-            balances,
         )
         account_balance = (balances.get(mode) or {})
         if account_balance.get("available") and account_balance.get("balance") is not None:
             currency = str(account_balance.get("currency") or "USD").upper()
             balance_text = f"{float(account_balance['balance']):,.2f} {currency}"
     except Exception:
-        logger.warning("Could not fetch final Deriv balance for session receipt")
+        logger.exception("Could not fetch final Deriv balance for session receipt")
+
+    if balances is not None:
+        try:
+            await asyncio.to_thread(
+                trade_history_service.update_balance_snapshots,
+                user_id,
+                balances,
+            )
+        except Exception:
+            logger.exception("Could not save final Deriv balance snapshot")
 
     token_balance_text = "Unavailable"
     try:
@@ -190,8 +196,24 @@ async def _session_end_message(
             user_id,
         )
         token_balance_text = str(int(profile.get("token_balance", 0)))
+        if balance_text == "Unavailable":
+            cached_balance = profile.get(f"{mode}_balance")
+            if cached_balance is not None:
+                currency = str(
+                    profile.get(f"{mode}_currency") or currency
+                ).upper()
+                balance_text = (
+                    f"Last known: {float(cached_balance):,.2f} {currency}"
+                )
     except Exception:
-        logger.warning("Could not fetch remaining tokens for session receipt")
+        logger.exception("Could not fetch remaining tokens for session receipt")
+
+    starting_balance = getattr(state, "starting_balance", None)
+    if balance_text == "Unavailable" and starting_balance is not None:
+        estimated_balance = starting_balance + float(
+            state.total_profit_loss or 0.0
+        )
+        balance_text = f"Estimated: {estimated_balance:,.2f} {currency}"
 
     profit = float(state.total_profit_loss or 0.0)
     profit_text = f"{'+' if profit >= 0 else '-'}${abs(profit):,.2f} {currency}"
@@ -242,7 +264,14 @@ async def _send_session_end_message(
     state,
     reason: str | None = None,
 ) -> None:
-    text = await _session_end_message(user_id, state, reason)
+    try:
+        text = await _session_end_message(user_id, state, reason)
+    except Exception:
+        logger.exception("Could not build Auto Trade session-end receipt")
+        text = (
+            "🏁 Session ended\n\n"
+            "Auto Trade has stopped safely. No further trades will be placed."
+        )
     message = getattr(query, "message", None)
     reply_photo = getattr(message, "reply_photo", None)
     photo_url = VICTORY_SETUP_IMAGE_URLS.get(
@@ -1266,7 +1295,7 @@ async def _monitor_settlement(user_id: str | int, state) -> dict:
     )
 
 
-async def _run_auto_trade(update, state) -> None:
+async def _run_auto_trade_loop(update, state) -> None:
     query = update.callback_query
     user_id = update.effective_user.id
     settled_contracts: list[dict] = []
@@ -1298,18 +1327,6 @@ async def _run_auto_trade(update, state) -> None:
                 query,
                 user_id,
                 current,
-            )
-            return
-
-        if current.status == "loss_limit":
-            await _save_session_summary(current, "stopped")
-            await _send_session_end_message(
-                query,
-                user_id,
-                current,
-                "Auto Trade stopped after "
-                f"{auto_trade_service.MAX_CONSECUTIVE_LOSSES} consecutive losses "
-                "to limit further exposure.",
             )
             return
 
@@ -1413,8 +1430,6 @@ async def _run_auto_trade(update, state) -> None:
                 (
                     "completed"
                     if current.status == "completed"
-                    else "stopped"
-                    if current.status == "loss_limit"
                     else "running"
                 ),
             )
@@ -1441,12 +1456,6 @@ async def _run_auto_trade(update, state) -> None:
                 result_text += (
                     "\n\n🔄 Smart Scaling activated\n"
                     f"Next stake: ${current.current_stake:.2f}"
-                )
-            elif current.status == "loss_limit":
-                result_text += (
-                    "\n\n⛔ Auto Trade stopped after "
-                    f"{auto_trade_service.MAX_CONSECUTIVE_LOSSES} consecutive losses "
-                    "to limit further exposure."
                 )
             elif won:
                 result_text += "\n\n✅ Cycle completed."
@@ -1529,8 +1538,8 @@ async def _run_auto_trade(update, state) -> None:
                 f"Market: {market_label}\n"
                 f"Direction: {current.direction}\n"
                 f"Target: {current.max_cycles} winning cycles\n"
-                f"Safety Stop: {auto_trade_service.MAX_CONSECUTIVE_LOSSES} "
-                "consecutive losses.",
+                "Smart Scaling continues after losses until the target wins, "
+                "available balance/tokens, or a Deriv rejection stops the run.",
             )
             session_status_message_updated = True
 
@@ -1550,6 +1559,25 @@ async def _run_auto_trade(update, state) -> None:
         )
 
 
+async def _run_auto_trade(update, state) -> None:
+    try:
+        await _run_auto_trade_loop(update, state)
+    except Exception:
+        logger.exception("Unexpected failure during Auto Trade session")
+        user_id = update.effective_user.id
+        current = auto_trade_service.get_run(user_id) or state
+        current = auto_trade_service.finish_run(user_id, "failed") or current
+        await _save_session_summary(current, "failed")
+        await _send_session_end_message(
+            update.callback_query,
+            user_id,
+            current,
+            "A temporary problem interrupted Auto Trade. No further trades "
+            "were placed. Please check your Deriv account before starting "
+            "another session.",
+        )
+
+
 async def _prepare_trade_confirmation(
     update,
     query,
@@ -1560,6 +1588,7 @@ async def _prepare_trade_confirmation(
     account_mode: str,
     token_balance: int,
     stake_description: str,
+    account_balance: object | None = None,
     stake_percentage_key: str | None = None,
 ) -> bool:
     user_id = update.effective_user.id
@@ -1586,6 +1615,12 @@ async def _prepare_trade_confirmation(
         if state is not None:
             state.currency = currency
             state.stake_percentage_key = stake_percentage_key
+            try:
+                starting_balance = float(account_balance)
+                if starting_balance >= 0:
+                    state.starting_balance = starting_balance
+            except (TypeError, ValueError):
+                state.starting_balance = None
     except (RuntimeError, ValueError) as exc:
         logger.warning("Auto Trade preparation was rejected: %s", exc)
         await report(
@@ -1603,8 +1638,9 @@ async def _prepare_trade_confirmation(
         f"Available tokens: {token_balance}\n"
         "Expiry: 30 seconds\n"
         "Target: 5 winning cycles\n"
-        f"Safety Stop: {auto_trade_service.MAX_CONSECUTIVE_LOSSES} "
-        "consecutive losses\n\n"
+        "There is no consecutive-loss stop right now. Smart Scaling raises "
+        "the next stake after each loss, so it can grow quickly and may exceed "
+        "your available balance.\n\n"
         "A loss stays in the current cycle and increases the next stake "
         "through Smart Scaling to help recover. "
         "A settled win advances the cycle and resets the stake.\n\n"
@@ -1789,6 +1825,7 @@ async def handle_custom_stake_input(update, context=None) -> None:
         account_mode=account_mode,
         token_balance=token_balance,
         stake_description=" (custom amount)",
+        account_balance=balance,
     )
     if confirmed:
         auto_trade_service.clear_custom_stake_request(user.id)
@@ -1919,8 +1956,10 @@ async def dispatch_callback(update, context) -> None:
             "• Auto Trade executes the selected Rise/Fall setup\n"
             "• Each cycle reports its trade steps and results\n"
             "• Smart Scaling increases the next stake after a loss\n"
-            "• The run stops after five winning cycles or "
-            f"{auto_trade_service.MAX_CONSECUTIVE_LOSSES} consecutive losses"
+            "• There is currently no consecutive-loss stop; higher stakes can "
+            "grow quickly\n"
+            "• The run stops after five winning cycles, when tokens or balance "
+            "run out, or if Deriv rejects a trade"
         )
         return
 
@@ -2181,6 +2220,7 @@ async def dispatch_callback(update, context) -> None:
                     user_id,
                     account_mode=state.account_mode,
                 )
+                state.starting_balance = float(selected_account.get("balance"))
                 refreshed_stake = calculate_relative_stake(
                     selected_account.get("balance"),
                     state.stake_percentage_key,
@@ -2430,6 +2470,7 @@ async def dispatch_callback(update, context) -> None:
                 f"{float(account_balance):,.2f} {currency} balance)"
             ),
             stake_percentage_key=percentage_key,
+            account_balance=account_balance,
         )
         return
 

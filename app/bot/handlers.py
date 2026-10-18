@@ -466,6 +466,10 @@ def handle_faq() -> str:
         "  Only the fixed Step Index family: 100, 200, 300, 400, and 500.\n\n"
         "• What is Auto Trade?\n"
         "  It picks the strongest current setup, confirms your stake, and monitors each contract until settlement.\n\n"
+        "• Does Auto Trade stop after consecutive losses?\n"
+        "  Not currently. Smart Scaling can increase stakes quickly after "
+        "losses; a session ends after five winning cycles, when funds/tokens "
+        "run out, or if Deriv rejects a trade.\n\n"
         "• Can I switch between Demo and Real?\n"
         "  Yes. Use the Account Mode panel and confirm before switching.\n\n"
         "• How do I reconnect?\n"
@@ -504,9 +508,10 @@ def _stats_mode_text(label: str, icon: str, stats: dict) -> str:
     wins = int(stats.get("wins") or 0)
     return (
         f"{icon} {label}\n"
-        f"🏁 Win rate: {float(stats.get('win_rate') or 0):.1f}% "
+        f"🏁 Session win rate: {float(stats.get('win_rate') or 0):.1f}% "
         f"({wins}/{session_count} sessions)\n"
-        f"🎯 Direction accuracy: {float(stats.get('accuracy') or 0):.1f}%\n"
+        f"🎯 Direction accuracy (contracts): "
+        f"{float(stats.get('accuracy') or 0):.1f}%\n"
         f"💵 Net PnL: {_format_pnl(stats.get('net_pnl'))}\n"
         f"💎 Tokens spent: {int(stats.get('tokens_spent') or 0)}"
     )
@@ -561,6 +566,8 @@ async def handle_stats(telegram_user_id: str | int) -> str:
         "----\n\n"
         f"{_stats_mode_text('Real', '💰', stats.get('real') or {})}\n\n"
         f"{_stats_mode_text('Demo', '🎮', stats.get('demo') or {})}"
+        "\n\nSession win rate counts profitable sessions; Net PnL shows "
+        "overall profit or loss."
         f"{HELP_FOOTER}"
     )
 

@@ -20,6 +20,7 @@ ATR_BASELINE_BARS = 60
 ATR_MIN_RATIO = 0.5
 ATR_MAX_RATIO = 2.5
 MOMENTUM_MIN_ATR_RATIO = 0.15
+MIN_DIRECTIONAL_SCORE = 35.0
 RSI_PERIOD = 7
 RSI_LOWER_VETO = 20.0
 RSI_UPPER_VETO = 80.0
@@ -347,19 +348,47 @@ class YieldsScanner:
             score_components[name] * weight
             for name, weight in score_weights.items()
         )
+        directional_confidence = abs(directional_score) * 100.0
+        candidate_sign = 1.0 if directional_score > 0 else -1.0
+        failed_filters = []
+        if directional_confidence < MIN_DIRECTIONAL_SCORE:
+            failed_filters.append(
+                f"direction score below {MIN_DIRECTIONAL_SCORE:.0f}/100"
+            )
+        if not volatility_ok:
+            failed_filters.append("volatility outside the accepted range")
+        if not momentum_ok:
+            failed_filters.append("recent momentum is too weak")
+        if directional_score > 0 and rsi >= RSI_UPPER_VETO:
+            failed_filters.append("RSI is overbought for a bullish entry")
+        elif directional_score < 0 and rsi <= RSI_LOWER_VETO:
+            failed_filters.append("RSI is oversold for a bearish entry")
+        for name in (
+            "ema_alignment",
+            "ema_slope",
+            "momentum",
+            "price_vs_short_ema",
+            "price_vs_context_ema",
+            "higher_timeframe",
+        ):
+            if score_components[name] * candidate_sign <= 0:
+                failed_filters.append(
+                    f"{name.replace('_', ' ')} conflicts with the direction"
+                )
+
         direction = (
-            "bullish" if directional_score > 0.01
-            else "bearish" if directional_score < -0.01
+            ("bullish" if directional_score > 0 else "bearish")
+            if not failed_filters
             else "neutral"
         )
-        directional_confidence = abs(directional_score) * 100.0
         signal_reason = (
-            "Indicator balance does not show a reliable directional lean."
-            if direction == "neutral"
+            "No trade: " + "; ".join(failed_filters) + "."
+            if failed_filters
             else (
                 "Indicator balance leans "
                 f"{direction.upper()} ({directional_confidence:.0f}/100); "
-                "this is a directional bias, not a guarantee."
+                "trend, momentum, timeframe, and volatility filters agree. "
+                "This is a directional bias, not a guarantee."
             )
         )
 
@@ -387,6 +416,7 @@ class YieldsScanner:
             },
             "volatility_in_range": volatility_ok,
             "momentum_confirmed": momentum_ok,
+            "entry_eligible": not failed_filters,
             "signal_reason": signal_reason,
             "bars_5s": len(five_second_bars),
             "bars_1m": len(context_bars),

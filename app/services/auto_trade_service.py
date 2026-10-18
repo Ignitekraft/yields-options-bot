@@ -31,6 +31,7 @@ class TradeRunState:
     expiry_seconds: int = settings.default_expiry_seconds
     account_mode: str = "demo"
     currency: str = "USD"
+    starting_balance: float | None = None
     started_at: str = field(default_factory=_now)
     completed_at: str | None = None
     total_staked: float = 0.0
@@ -50,8 +51,6 @@ class TradeRunState:
 
 class AutoTradeService:
     """Thread-safe in-memory Auto Trade state registry."""
-
-    MAX_CONSECUTIVE_LOSSES = 5
 
     ACTIVE_STATUSES = {
         "pending",
@@ -269,12 +268,6 @@ class AutoTradeService:
 
             state.losses += 1
             state.consecutive_losses += 1
-            if state.consecutive_losses >= self.MAX_CONSECUTIVE_LOSSES:
-                state.status = "loss_limit"
-                state.completed_at = _now()
-                self._executing.discard(key)
-                return state
-
             state.martingale_step += 1
 
             multiplier = float(getattr(settings, "martingale_multiplier", 2.3))
