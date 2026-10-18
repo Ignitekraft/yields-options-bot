@@ -19,6 +19,6 @@ SCAN_MESSAGE = "📡 Scanning live market data through the Deriv public market f
 
 AUTO_TRADE_UNAVAILABLE_MESSAGE = "⚠️ Auto Trade is temporarily unavailable."
 AUTO_TRADE_RUNNING_MESSAGE = "⚠️ Auto Trade already running\n\nA live session is still active. Finish or stop it before starting a new one."
-AUTO_TRADE_NO_STRONG_SETUP = "⚠️ No strong setup right now\n\nYields scanned all 5 Step Indices, but none currently meet the minimum setup requirements.\n\nNo trade has been placed."
+AUTO_TRADE_NO_STRONG_SETUP = "⚠️ No clear chart setup\n\nThe selected chart did not provide a clear Rise/Fall direction. Send a clearer screenshot to try again.\n\nNo trade has been placed."
 AUTO_TRADE_STAKE_REQUIRED = "Choose your stake before continuing."
 AUTO_TRADE_CONFIRMATION = "⚡ Trade confirmation\n\nProceed with the selected trade?"

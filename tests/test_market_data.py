@@ -28,6 +28,7 @@ from app.bot.callbacks import (
     _show_auto_trade_setup,
     _setup_photo_url,
     _session_end_message,
+    handle_chart_screenshot,
     calculate_relative_stake,
     dispatch_callback,
     execute_trade,
@@ -56,6 +57,11 @@ from app.models.market import MarketSnapshot
 from app.services.account_service import AccountService
 from app.services.auth_service import AuthService
 from app.services.auto_trade_service import AutoTradeService
+from app.services.chart_analysis import (
+    ChartAnalysis,
+    ChartAnalysisError,
+    GeminiChartAnalysisProvider,
+)
 from app.services.deriv.auth import build_deriv_oauth_url
 from app.services.deriv.market_data import MarketDataService
 from app.services.deriv.websocket_connection import (
@@ -1186,6 +1192,15 @@ class MarketDataTests(unittest.TestCase):
             callback_query=query,
             effective_user=SimpleNamespace(id="custom-stake-prompt-user"),
         )
+        context = SimpleNamespace(
+            user_data={
+                "auto_trade_chart_setup": {
+                    "symbol": "step_100",
+                    "direction": "BULLISH",
+                },
+                "auto_trade_chart_setup_expires_at": time.monotonic() + 300,
+            }
+        )
         with patch(
             "app.bot.callbacks.auto_trade_service",
             service,
@@ -1196,7 +1211,7 @@ class MarketDataTests(unittest.TestCase):
             "app.bot.callbacks.account_mode_service.get_mode",
             return_value="demo",
         ):
-            asyncio.run(dispatch_callback(update, None))
+            asyncio.run(dispatch_callback(update, context))
 
         self.assertIn("Send your preferred stake amount", query.edited)
         self.assertEqual(
@@ -2885,8 +2900,14 @@ class MarketDataTests(unittest.TestCase):
                 ensure_user=lambda *_args, **_kwargs: {"token_balance": 50},
             ),
         ), patch(
-            "app.bot.callbacks.build_auto_trade_setup",
-        ) as build_setup:
+            "app.bot.callbacks._get_auto_trade_limit_status",
+            new=AsyncMock(
+                return_value={
+                    "locked": False,
+                    "retry_after_seconds": 0,
+                }
+            ),
+        ):
             asyncio.run(dispatch_callback(update, None))
 
         self.assertIn("50 tokens", update.callback_query.photo["caption"])
@@ -2896,7 +2917,6 @@ class MarketDataTests(unittest.TestCase):
             "https://hvvwkijquaoqsbzhpyim.supabase.co/storage/v1/object/public/"
             "Bot%20images/Low%20Tokens%20Warning%20Alert.png",
         )
-        build_setup.assert_not_called()
         rows = update.callback_query.photo["reply_markup"].inline_keyboard
         self.assertEqual(
             [[button.text for button in row] for row in rows],
@@ -3093,7 +3113,8 @@ class MarketDataTests(unittest.TestCase):
         asyncio.run(dispatch_callback(update, None))
 
         self.assertIn("How it works:", query.caption)
-        self.assertIn("AI ranks the 5 fixed Step Indices", query.caption)
+        self.assertIn("send its chart screenshot", query.caption)
+        self.assertIn("suggests Rise, Fall, or no trade", query.caption)
 
     def test_trade_anyway_rechecks_balance_before_continuing(self):
         class FakeQuery:
@@ -3118,6 +3139,14 @@ class MarketDataTests(unittest.TestCase):
         with patch(
             "app.bot.callbacks.auth_service.get_valid_access_token",
             return_value="access-token",
+        ), patch(
+            "app.bot.callbacks._get_auto_trade_limit_status",
+            new=AsyncMock(
+                return_value={
+                    "locked": False,
+                    "retry_after_seconds": 0,
+                }
+            ),
         ), patch(
             "app.bot.callbacks.trade_history_service",
             SimpleNamespace(
@@ -3149,6 +3178,14 @@ class MarketDataTests(unittest.TestCase):
         with patch(
             "app.bot.callbacks.auth_service.get_valid_access_token",
             return_value="access-token",
+        ), patch(
+            "app.bot.callbacks._get_auto_trade_limit_status",
+            new=AsyncMock(
+                return_value={
+                    "locked": False,
+                    "retry_after_seconds": 0,
+                }
+            ),
         ), patch(
             "app.bot.callbacks.trade_history_service",
             SimpleNamespace(
@@ -3191,6 +3228,14 @@ class MarketDataTests(unittest.TestCase):
             "app.bot.callbacks.auth_service.get_valid_access_token",
             return_value="access-token",
         ), patch(
+            "app.bot.callbacks._get_auto_trade_limit_status",
+            new=AsyncMock(
+                return_value={
+                    "locked": False,
+                    "retry_after_seconds": 0,
+                }
+            ),
+        ), patch(
             "app.bot.callbacks.trade_history_service",
             SimpleNamespace(
                 ensure_user=lambda *_args, **_kwargs: {"token_balance": 0},
@@ -3205,53 +3250,397 @@ class MarketDataTests(unittest.TestCase):
         self.assertIn("Low%20Tokens%20Warning%20Alert.png", update.callback_query.photo["photo"])
         show_setup.assert_not_awaited()
 
-    def test_auto_trade_setup_message_uses_a_single_scan_result(self):
+    def test_auto_trade_setup_requests_a_chart_market_without_scanning(self):
         class FakeQuery:
             def __init__(self):
                 self.edited = None
+                self.reply_markup = None
 
             async def edit_message_text(self, text, **kwargs):
                 self.edited = text
+                self.reply_markup = kwargs.get("reply_markup")
 
-        class FakeUpdate:
+        update = SimpleNamespace(
+            callback_query=FakeQuery(),
+            effective_user=SimpleNamespace(id="chart-market-user"),
+        )
+
+        with patch(
+            "app.bot.callbacks.auth_service.get_valid_access_token",
+            return_value="access-token",
+        ):
+            asyncio.run(_show_auto_trade_setup(update, update.callback_query))
+
+        self.assertIn("Choose one of the five Step Indices", update.callback_query.edited)
+        choices = [
+            button.callback_data
+            for row in update.callback_query.reply_markup.inline_keyboard
+            for button in row
+        ]
+        self.assertEqual(
+            choices[:5],
+            [
+                "AUTO_TRADE_CHART_step_100",
+                "AUTO_TRADE_CHART_step_200",
+                "AUTO_TRADE_CHART_step_300",
+                "AUTO_TRADE_CHART_step_400",
+                "AUTO_TRADE_CHART_step_500",
+            ],
+        )
+
+    def test_gemini_chart_provider_sends_image_and_parses_typed_setup(self):
+        class FakeResponse:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {
+                    "candidates": [
+                        {
+                            "content": {
+                                "parts": [
+                                    {
+                                        "text": json.dumps(
+                                            {
+                                                "direction": "BULLISH",
+                                                "confidence": 82,
+                                                "reasoning": "Price is making higher lows.",
+                                                "market_mismatch": False,
+                                            }
+                                        )
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }
+
+        class FakeClient:
+            request = None
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def post(self, url, **kwargs):
+                self.request = (url, kwargs)
+                return FakeResponse()
+
+        client = FakeClient()
+        with patch(
+            "app.services.chart_analysis.httpx.AsyncClient",
+            return_value=client,
+        ):
+            result = asyncio.run(
+                GeminiChartAnalysisProvider("test-key", "test-model").analyze_chart(
+                    b"chart-image",
+                    "Step Index 100",
+                )
+            )
+
+        self.assertEqual(result.direction, "BULLISH")
+        self.assertEqual(result.confidence, 82.0)
+        self.assertEqual(result.reasoning, "Price is making higher lows.")
+        url, kwargs = client.request
+        self.assertTrue(url.endswith("/test-model:generateContent"))
+        self.assertEqual(kwargs["headers"]["x-goog-api-key"], "test-key")
+        request_parts = kwargs["json"]["contents"][0]["parts"]
+        self.assertEqual(
+            request_parts[1]["inline_data"]["mime_type"],
+            "image/jpeg",
+        )
+        self.assertIn(
+            "market_mismatch",
+            kwargs["json"]["systemInstruction"]["parts"][0]["text"],
+        )
+
+    def test_gemini_chart_provider_rejects_mismatched_market_and_bad_output(self):
+        from app.services.chart_analysis import _parse_analysis_result
+
+        mismatch = _parse_analysis_result(
+            {
+                "direction": "BEARISH",
+                "confidence": 91,
+                "reasoning": "The chart shows a downtrend.",
+                "market_mismatch": True,
+            }
+        )
+        self.assertEqual(mismatch.direction, "NO_TRADE")
+        self.assertTrue(mismatch.market_mismatch)
+
+        with self.assertRaises(ValueError):
+            _parse_analysis_result(
+                {
+                    "direction": "BUY",
+                    "confidence": 90,
+                    "reasoning": "Direction unclear.",
+                    "market_mismatch": False,
+                }
+            )
+
+    def test_chart_market_selection_waits_for_photo_and_sets_expiry(self):
+        context = SimpleNamespace(user_data={})
+
+        class FakeQuery:
+            data = "AUTO_TRADE_CHART_step_300"
+
             def __init__(self):
-                self.callback_query = FakeQuery()
-                self.effective_user = type("User", (), {"id": "single-scan-user"})()
+                self.text = None
+                self.markup = None
 
-        setup = {
-            "symbol": "step_100",
-            "display_name": "Step Index 100",
-            "direction": "BULLISH",
-            "current_price": 120.0,
-            "indicators": {
-                "rsi7": 25.0,
-                "ema8_5s": 121.0,
-                "ema21_5s": 120.0,
-                "roc3_pct": 0.12,
-                "momentum_atr_ratio": 0.8,
-                "atr14_5s": 0.035,
-                "atr_ratio": 1.1,
-                "ema20_1m": 119.0,
-                "ema50_1m": 118.0,
-            },
-        }
-        update = FakeUpdate()
+            async def answer(self):
+                return None
+
+            async def edit_message_text(self, text, **kwargs):
+                self.text = text
+                self.markup = kwargs.get("reply_markup")
+
+        query = FakeQuery()
+        update = SimpleNamespace(
+            callback_query=query,
+            effective_user=SimpleNamespace(id="chart-selection-user"),
+        )
+        with patch(
+            "app.bot.callbacks.auth_service.get_valid_access_token",
+            return_value="access-token",
+        ):
+            asyncio.run(dispatch_callback(update, context))
+
+        self.assertEqual(
+            context.user_data["pending_chart_market_symbol"],
+            "step_300",
+        )
+        self.assertGreater(
+            context.user_data["pending_chart_market_expires_at"],
+            0,
+        )
+        self.assertIn("Step Index 300 chart", query.text)
+        self.assertIn("AI provider", query.text)
+
+    def test_expired_chart_setup_cannot_continue_to_stake_selection(self):
+        class FakeQuery:
+            data = "AUTO_TRADE_STAKE_0_1_step_100_BULLISH"
+
+            def __init__(self):
+                self.text = None
+
+            async def answer(self):
+                return None
+
+            async def edit_message_text(self, text, **_kwargs):
+                self.text = text
+
+        query = FakeQuery()
+        update = SimpleNamespace(
+            callback_query=query,
+            effective_user=SimpleNamespace(id="expired-chart-setup-user"),
+        )
+        context = SimpleNamespace(
+            user_data={
+                "auto_trade_chart_setup": {
+                    "symbol": "step_100",
+                    "direction": "BULLISH",
+                },
+                "auto_trade_chart_setup_expires_at": time.monotonic() - 1,
+            }
+        )
+        ensure_user = Mock(return_value={"token_balance": 10})
 
         with patch(
             "app.bot.callbacks.auth_service.get_valid_access_token",
             return_value="access-token",
         ), patch(
-            "app.bot.callbacks.build_auto_trade_setup",
-            return_value=setup,
-        ) as build_setup, patch(
-            "app.bot.callbacks._setup_photo_url",
-            return_value=None,
+            "app.bot.callbacks.trade_history_service.ensure_user",
+            ensure_user,
         ):
-            asyncio.run(_show_auto_trade_setup(update, update.callback_query))
+            asyncio.run(dispatch_callback(update, context))
 
-        build_setup.assert_called_once_with("single-scan-user")
-        self.assertIn("Trading pair: Step Index 100", update.callback_query.edited)
-        self.assertIn("<pre>", update.callback_query.edited)
+        self.assertIn("chart setup has expired", query.text)
+        ensure_user.assert_not_called()
+
+    def test_chart_screenshot_analysis_offers_stake_buttons(self):
+        class FakeFile:
+            async def download_as_bytearray(self):
+                return bytearray(b"chart-image")
+
+        class FakePhoto:
+            file_size = 11
+
+            async def get_file(self):
+                return FakeFile()
+
+        class FakeMessage:
+            photo = [FakePhoto()]
+
+            def __init__(self):
+                self.replies = []
+
+            async def reply_text(self, text, **kwargs):
+                self.replies.append((text, kwargs))
+
+        async def run_test():
+            message = FakeMessage()
+            user_data = {
+                "pending_chart_market_symbol": "step_100",
+                "pending_chart_market_expires_at": (
+                    asyncio.get_running_loop().time() + 300
+                ),
+            }
+            provider = SimpleNamespace(
+                analyze_chart=AsyncMock(
+                    return_value=ChartAnalysis(
+                        direction="BULLISH",
+                        confidence=78,
+                        reasoning="The visible chart forms higher lows.",
+                        market_mismatch=False,
+                    )
+                )
+            )
+            with patch(
+                "app.bot.callbacks.auth_service.get_valid_access_token",
+                return_value="access-token",
+            ), patch(
+                "app.bot.callbacks.create_chart_analysis_provider",
+                return_value=provider,
+            ):
+                await handle_chart_screenshot(
+                    SimpleNamespace(
+                        message=message,
+                        effective_user=SimpleNamespace(id="chart-photo-user"),
+                    ),
+                    SimpleNamespace(user_data=user_data),
+                )
+            return message, user_data, provider
+
+        message, user_data, provider = asyncio.run(run_test())
+
+        provider.analyze_chart.assert_awaited_once_with(
+            b"chart-image",
+            "Step Index 100",
+        )
+        self.assertNotIn("pending_chart_market_symbol", user_data)
+        self.assertEqual(
+            user_data["auto_trade_chart_setup"]["direction"],
+            "BULLISH",
+        )
+        text, kwargs = message.replies[0]
+        self.assertIn("AI confidence: 78%", text)
+        self.assertIn("Choose your stake", text)
+        callbacks = [
+            button.callback_data
+            for row in kwargs["reply_markup"].inline_keyboard
+            for button in row
+        ]
+        self.assertIn(
+            "AUTO_TRADE_STAKE_0_1_step_100_BULLISH",
+            callbacks,
+        )
+
+    def test_chart_no_trade_result_does_not_offer_stake_buttons(self):
+        class FakePhoto:
+            file_size = 10
+
+            async def get_file(self):
+                return SimpleNamespace(
+                    download_as_bytearray=AsyncMock(return_value=b"chart")
+                )
+
+        class FakeMessage:
+            photo = [FakePhoto()]
+
+            def __init__(self):
+                self.replies = []
+
+            async def reply_text(self, text, **kwargs):
+                self.replies.append((text, kwargs))
+
+        async def run_test():
+            message = FakeMessage()
+            user_data = {
+                "pending_chart_market_symbol": "step_200",
+                "pending_chart_market_expires_at": (
+                    asyncio.get_running_loop().time() + 300
+                ),
+            }
+            provider = SimpleNamespace(
+                analyze_chart=AsyncMock(
+                    return_value=ChartAnalysis(
+                        direction="NO_TRADE",
+                        confidence=44,
+                        reasoning="The chart is too unclear.",
+                        market_mismatch=False,
+                    )
+                )
+            )
+            with patch(
+                "app.bot.callbacks.auth_service.get_valid_access_token",
+                return_value="access-token",
+            ), patch(
+                "app.bot.callbacks.create_chart_analysis_provider",
+                return_value=provider,
+            ):
+                await handle_chart_screenshot(
+                    SimpleNamespace(
+                        message=message,
+                        effective_user=SimpleNamespace(id="unclear-chart-user"),
+                    ),
+                    SimpleNamespace(user_data=user_data),
+                )
+            return message, user_data
+
+        message, user_data = asyncio.run(run_test())
+
+        text, kwargs = message.replies[0]
+        self.assertIn("NO CLEAR SETUP", text)
+        self.assertNotIn("reply_markup", kwargs)
+        self.assertEqual(
+            user_data["pending_chart_market_symbol"],
+            "step_200",
+        )
+
+    def test_oversized_chart_screenshot_is_rejected_before_download(self):
+        class FakePhoto:
+            file_size = 9 * 1024 * 1024
+            get_file = AsyncMock()
+
+        class FakeMessage:
+            photo = [FakePhoto()]
+
+            def __init__(self):
+                self.reply_text = AsyncMock()
+
+        async def run_test():
+            message = FakeMessage()
+            user_data = {
+                "pending_chart_market_symbol": "step_100",
+                "pending_chart_market_expires_at": (
+                    asyncio.get_running_loop().time() + 300
+                ),
+            }
+            provider_factory = Mock()
+            with patch(
+                "app.bot.callbacks.auth_service.get_valid_access_token",
+                return_value="access-token",
+            ), patch(
+                "app.bot.callbacks.create_chart_analysis_provider",
+                provider_factory,
+            ):
+                await handle_chart_screenshot(
+                    SimpleNamespace(
+                        message=message,
+                        effective_user=SimpleNamespace(id="large-chart-user"),
+                    ),
+                    SimpleNamespace(user_data=user_data),
+                )
+            return message, provider_factory
+
+        message, provider_factory = asyncio.run(run_test())
+
+        self.assertIn("too large", message.reply_text.await_args.args[0])
+        FakePhoto.get_file.assert_not_awaited()
+        provider_factory.assert_not_called()
 
     def test_unauthenticated_user_is_prompted_to_connect_before_scanning(self):
         class FakeQuery:
@@ -3270,14 +3659,11 @@ class MarketDataTests(unittest.TestCase):
         with patch(
             "app.bot.callbacks.auth_service.get_valid_access_token",
             return_value=None,
-        ), patch(
-            "app.bot.callbacks.build_auto_trade_setup",
-        ) as build_setup:
+        ):
             asyncio.run(
                 _show_auto_trade_setup(update, update.callback_query)
             )
 
-        build_setup.assert_not_called()
         self.assertIn("Connect your Deriv account", update.callback_query.edited)
         self.assertEqual(
             update.callback_query.reply_markup.inline_keyboard[0][0].text,
@@ -3345,156 +3731,6 @@ class MarketDataTests(unittest.TestCase):
             [["💎 Get Tokens"], ["🏠 Main Menu"]],
         )
 
-    def test_no_trade_setup_hides_stake_buttons_and_explains_filter(self):
-        class FakeQuery:
-            def __init__(self):
-                self.edited = None
-                self.reply_markup = None
-
-            async def edit_message_text(self, text, **kwargs):
-                self.edited = text
-                self.reply_markup = kwargs.get("reply_markup")
-
-        update = SimpleNamespace(
-            effective_user=SimpleNamespace(id="no-trade-setup-user"),
-            callback_query=FakeQuery(),
-        )
-        setup = {
-            "symbol": "NO_SETUP",
-            "display_name": "Step Index 100",
-            "direction": "NO_TRADE",
-            "indicators": {
-                "signal_reason": "Current volatility is outside the normal range.",
-            },
-            "reasoning": "Current volatility is outside the normal range.",
-        }
-
-        with patch(
-            "app.bot.callbacks.auth_service.get_valid_access_token",
-            return_value="access-token",
-        ), patch(
-            "app.bot.callbacks.build_auto_trade_setup",
-            return_value=setup,
-        ), patch(
-            "app.bot.callbacks._setup_photo_url",
-            return_value=None,
-        ):
-            asyncio.run(_show_auto_trade_setup(update, update.callback_query))
-
-        self.assertIn("No trade:", update.callback_query.edited)
-        self.assertIn("volatility is outside", update.callback_query.edited)
-        self.assertEqual(
-            update.callback_query.reply_markup.inline_keyboard[0][0].text,
-            "🤖 Auto Trade",
-        )
-        self.assertNotIn(
-            "🟢 0.1%",
-            [
-                button.text
-                for row in update.callback_query.reply_markup.inline_keyboard
-                for button in row
-            ],
-        )
-
-    def test_scan_error_replaces_old_photo_with_plain_text(self):
-        class FakeMessage:
-            photo = ["previous-low-token-warning-photo"]
-
-            def __init__(self):
-                self.replies = []
-                self.deleted = False
-
-            async def reply_text(self, text, **kwargs):
-                self.replies.append((text, kwargs))
-
-            async def delete(self):
-                self.deleted = True
-
-        class FakeQuery:
-            def __init__(self):
-                self.message = FakeMessage()
-
-            async def answer(self, *_args, **_kwargs):
-                return None
-
-            async def edit_message_text(self, *_args, **_kwargs):
-                raise AssertionError("photo messages should be replaced, not edited")
-
-        query = FakeQuery()
-        update = SimpleNamespace(
-            effective_user=SimpleNamespace(id="scan-error-user"),
-            callback_query=query,
-        )
-
-        with patch(
-            "app.bot.callbacks.auth_service.get_valid_access_token",
-            return_value="access-token",
-        ), patch(
-            "app.bot.callbacks.build_auto_trade_setup",
-            side_effect=ValueError("Deriv history unavailable"),
-        ):
-            asyncio.run(_show_auto_trade_setup(update, query))
-
-        self.assertEqual(len(query.message.replies), 1)
-        text, _kwargs = query.message.replies[0]
-        self.assertIn("Live Deriv market data is temporarily unavailable", text)
-        self.assertNotIn("LOW TOKENS", text)
-        self.assertTrue(query.message.deleted)
-
-    def test_no_trade_result_does_not_reuse_low_token_photo(self):
-        class FakeMessage:
-            photo = ["previous-low-token-warning-photo"]
-
-            def __init__(self):
-                self.replies = []
-                self.deleted = False
-
-            async def reply_text(self, text, **kwargs):
-                self.replies.append((text, kwargs))
-
-            async def delete(self):
-                self.deleted = True
-
-        class FakeQuery:
-            def __init__(self):
-                self.message = FakeMessage()
-
-            async def answer(self, *_args, **_kwargs):
-                return None
-
-            async def edit_message_text(self, *_args, **_kwargs):
-                raise AssertionError("photo messages should be replaced, not edited")
-
-        query = FakeQuery()
-        update = SimpleNamespace(
-            effective_user=SimpleNamespace(id="no-result-user"),
-            callback_query=query,
-        )
-        setup = {
-            "symbol": "NO_SETUP",
-            "display_name": "Step Index 100",
-            "direction": "NO_TRADE",
-            "indicators": {
-                "signal_reason": "No market met the entry filters.",
-            },
-            "reasoning": "No market met the entry filters.",
-        }
-
-        with patch(
-            "app.bot.callbacks.auth_service.get_valid_access_token",
-            return_value="access-token",
-        ), patch(
-            "app.bot.callbacks.build_auto_trade_setup",
-            return_value=setup,
-        ):
-            asyncio.run(_show_auto_trade_setup(update, query))
-
-        self.assertEqual(len(query.message.replies), 1)
-        text, _kwargs = query.message.replies[0]
-        self.assertIn("No trade:", text)
-        self.assertNotIn("LOW TOKENS", text)
-        self.assertTrue(query.message.deleted)
-
     def test_stake_callback_falls_back_to_caption_edit_when_message_is_media(self):
         class FakeQuery:
             def __init__(self):
@@ -3519,16 +3755,21 @@ class MarketDataTests(unittest.TestCase):
                 self.effective_user = type("User", (), {"id": "stake-media-user"})()
 
         update = FakeUpdate()
+        context = SimpleNamespace(
+            user_data={
+                "auto_trade_chart_setup": {
+                    "symbol": "step_100",
+                    "display_name": "Step Index 100",
+                    "direction": "BULLISH",
+                    "confidence": 81,
+                    "reasoning": "The chart shows higher lows.",
+                    "analysis_provider": "GEMINI",
+                },
+                "auto_trade_chart_setup_expires_at": time.monotonic() + 300,
+            }
+        )
 
         with patch(
-            "app.bot.callbacks.build_auto_trade_setup",
-            return_value={
-                "symbol": "step_500",
-                "display_name": "Step Index 500",
-                "direction": "BULLISH",
-                "signal_strength": 0.92,
-            },
-        ) as build_setup, patch(
             "app.bot.callbacks.account_mode_service.get_mode",
             return_value="demo",
         ), patch(
@@ -3556,7 +3797,7 @@ class MarketDataTests(unittest.TestCase):
                 ensure_user=lambda *_args, **_kwargs: {"token_balance": 50},
             ),
         ):
-            asyncio.run(dispatch_callback(update, None))
+            asyncio.run(dispatch_callback(update, context))
 
         query = update.callback_query
         self.assertIsNotNone(query.text_text)
@@ -3567,7 +3808,6 @@ class MarketDataTests(unittest.TestCase):
             "Initial stake: 220.80 USD (0.1% of 220,800.00 USD balance)",
             query.caption_text,
         )
-        build_setup.assert_not_called()
         start_run.assert_called_once()
         self.assertEqual(start_run.call_args.kwargs["symbol"], "step_100")
         self.assertEqual(start_run.call_args.kwargs["direction"], "BULLISH")

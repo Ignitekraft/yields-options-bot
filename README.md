@@ -34,12 +34,26 @@ Implemented:
 
 ## Auto Trade market analysis
 
-Auto Trade reads recent real ticks and 60 one-minute candles per configured
-Step Index from Deriv's public `ticks_history` WebSocket endpoint. The scanner
+Auto Trade setup starts by asking the user to choose one of the five configured
+Step Indices and send a chart screenshot. The screenshot is analyzed by the
+configured vision provider (Gemini by default); a bullish/bearish result then
+continues through the existing stake selection, confirmation, and trade flow.
+Unclear charts and charts visibly labeled as a different market do not produce
+a trade setup. Screenshots are sent to the selected AI provider for analysis.
+The model output is not a guarantee or financial advice.
+
+Configure `CHART_ANALYSIS_PROVIDER=gemini`, `GEMINI_API_KEY`, and optionally
+`GEMINI_MODEL` in the bot environment. Keep the API key in the deployment's
+secret manager or an untracked `.env` file; never commit it. Provider access is
+isolated behind `ChartAnalysisProvider` so another provider can be added
+without changing the Telegram trade flow.
+
+The separate `/scan` command continues to analyze recent real ticks and
+one-minute candles from Deriv's public `ticks_history` WebSocket endpoint. It
 uses the ticks for 5-second EMA, slope, momentum, ATR, and RSI, and the candles
 for 1-minute EMA context. It does not synthesize or fall back to generated
-prices. A market is excluded when its history is too short or its latest tick
-is stale.
+prices. Markets are excluded when their history is too short or the latest
+tick is stale.
 
 The scanner computes a weighted directional score from EMA alignment, EMA
 slope, 3-bar momentum, price relative to the short- and higher-timeframe EMAs,
@@ -48,8 +62,9 @@ ATR and momentum are reported as context rather than hard eligibility gates.
 Markets with insufficient or stale history remain excluded. This scoring
 approach does not guarantee a profitable 30-second contract and has not been
 validated as profitable by a historical backtest. Live data errors stop a
-market scan instead of producing a signal from sample data. Public market data uses Deriv's unauthenticated public
-WebSocket. Deriv's documented WebSocket request budgets and REST limits are
+market scan instead of producing a signal from sample data. Public market data
+uses Deriv's unauthenticated public WebSocket. Deriv's documented WebSocket
+request budgets and REST limits are
 enforced centrally. Connection handshakes also have a separate four-second
 minimum interval with jitter as a defensive measure; this is not a published
 Deriv handshake limit. A Deriv HTTP 429 pauses outbound calls globally and uses
@@ -57,11 +72,10 @@ bounded exponential retries with `Retry-After` support for WebSocket
 handshakes. Repeated rate limits stop safely rather than continuing without a
 verified Deriv connection. This in-memory limiter covers one bot process; if
 deploying multiple workers or replicas, use a shared distributed limiter before
-increasing traffic. Deriv may still impose additional or changing limits. The
-Auto Trade product flow still requires the user to connect an account before
-scanning or trading.
-The scan requests tick and candle history over one public WebSocket connection
-for the configured markets. The stake buttons use 0.1%, 0.5%, or 1% of the
+increasing traffic. Deriv may still impose additional or changing limits.
+The `/scan` command requests tick and candle history over one public WebSocket
+connection for the configured markets. The Auto Trade stake buttons use 0.1%,
+0.5%, or 1% of the
 selected account balance, calculated to the nearest cent. Users can also
 choose Custom amount and enter a stake directly; the amount must be positive,
 have no more than two decimal places, and not exceed the selected account

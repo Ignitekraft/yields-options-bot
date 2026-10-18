@@ -219,10 +219,27 @@ class TelegramKeyboard:
     def auto_trade_keyboard() -> object:
         return TelegramKeyboard._keyboard(
             [
-                [("🚀 Start Scan", "AUTO_TRADE_START_SCAN")],
+                [("📷 Choose Chart Market", "AUTO_TRADE_START_SCAN")],
                 [("✕ Cancel", "AUTO_TRADE_CANCEL")],
             ]
         )
+
+    @staticmethod
+    def chart_market_keyboard(markets: tuple[str, ...]) -> object:
+        labels = {
+            "step_100": "Step Index 100",
+            "step_200": "Step Index 200",
+            "step_300": "Step Index 300",
+            "step_400": "Step Index 400",
+            "step_500": "Step Index 500",
+        }
+        rows = [
+            [(labels[symbol], f"AUTO_TRADE_CHART_{symbol}")]
+            for symbol in markets
+            if symbol in labels
+        ]
+        rows.append([("✕ Cancel", "AUTO_TRADE_CANCEL")])
+        return TelegramKeyboard._keyboard(rows)
 
     @staticmethod
     def stake_keyboard(

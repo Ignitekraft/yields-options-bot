@@ -6,6 +6,7 @@ import logging
 from app.bot.callbacks import (
     _auto_trade_locked_seconds,
     dispatch_callback,
+    handle_chart_screenshot,
     handle_admin_mark_failed_command,
     handle_admin_mark_paid_command,
     handle_admin_verify_purchase_command,
@@ -293,6 +294,12 @@ def create_application():
     if CallbackQueryHandler is not None:
         application.add_handler(CallbackQueryHandler(dispatch_callback))
     if MessageHandler is not None and filters is not None:
+        application.add_handler(
+            MessageHandler(
+                filters.PHOTO,
+                handle_chart_screenshot,
+            )
+        )
         application.add_handler(
             MessageHandler(
                 filters.TEXT & ~filters.COMMAND,

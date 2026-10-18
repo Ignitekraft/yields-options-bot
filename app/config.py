@@ -24,6 +24,12 @@ class Settings:
     supabase_url: str = os.getenv("SUPABASE_URL", "")
     supabase_service_role_key: str = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
     deriv_token_encryption_key: str = os.getenv("DERIV_TOKEN_ENCRYPTION_KEY", "")
+    chart_analysis_provider: str = os.getenv(
+        "CHART_ANALYSIS_PROVIDER",
+        "gemini",
+    )
+    gemini_api_key: str = os.getenv("GEMINI_API_KEY", "")
+    gemini_model: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
     whop_webhook_secret: str = os.getenv("WHOP_WEBHOOK_SECRET", "")
     whop_telegram_user_metadata_key: str = os.getenv(
         "WHOP_TELEGRAM_USER_METADATA_KEY",

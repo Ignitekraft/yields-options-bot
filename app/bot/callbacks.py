@@ -18,12 +18,10 @@ from app.bot.handlers import (
     account_service,
     auth_service,
     auto_trade_service,
-    build_auto_trade_setup,
     build_connect_prompt,
     build_menu_message,
     build_start_message,
     handle_account_mode_settings,
-    handle_auto_trade_start,
     handle_balance,
     handle_faq,
     handle_logout,
@@ -37,6 +35,12 @@ from app.bot.handlers import (
 )
 from app.bot.keyboards import TelegramKeyboard
 from app.config import settings
+from app.services.chart_analysis import (
+    MAX_SCREENSHOT_BYTES,
+    ChartAnalysis,
+    ChartAnalysisError,
+    create_chart_analysis_provider,
+)
 from app.services.trade_execution_service import (
     TradeExecutionService,
     UnknownBuyOutcome,
@@ -502,67 +506,237 @@ async def _prompt_connect(update, query) -> None:
     )
 
 
-async def _show_auto_trade_setup(update, query) -> None:
+async def _show_auto_trade_setup(update, query, context=None) -> None:
     user_id = update.effective_user.id
     connected = bool(auth_service.get_valid_access_token(str(user_id)))
     if not connected:
         await _prompt_connect(update, query)
         return
 
-    try:
-        setup = await asyncio.to_thread(build_auto_trade_setup, user_id)
-    except Exception:
-        logger.exception("Could not retrieve Deriv data for the Auto Trade scan")
-        await _send_scan_message(
-            query,
-            "⚠️ Live Deriv market data is temporarily unavailable. "
-            "No trade has been placed. Please try scanning again shortly.",
-            reply_markup=(
-                await _dashboard_keyboard_with_limit()
-                if connected
-                else TelegramKeyboard.start_keyboard()
-            ),
-        )
-        return
-
-    text = handle_auto_trade_start(user_id, setup=setup)
-    photo_url = _setup_photo_url(setup.get("direction"))
-    reply_markup = (
-        TelegramKeyboard.stake_keyboard(
-            setup.get("symbol"),
-            setup.get("direction"),
-        )
-        if setup.get("direction") in {"BULLISH", "BEARISH"} and connected
-        else (
-            await _dashboard_keyboard_with_limit()
-            if connected
-            else TelegramKeyboard.start_keyboard()
-        )
-    )
-
-    if InputMediaPhoto is not None and photo_url:
-        try:
-            await query.edit_message_media(
-                media=InputMediaPhoto(
-                    media=photo_url,
-                    caption=text,
-                    parse_mode=ParseMode.HTML if ParseMode else "HTML",
-                ),
-                reply_markup=reply_markup,
-            )
-            return
-        except Exception:
-            logger.exception("Could not update the Auto Trade setup image")
+    user_data = getattr(context, "user_data", None)
+    if isinstance(user_data, dict):
+        user_data.pop("pending_chart_market_symbol", None)
+        user_data.pop("pending_chart_market_expires_at", None)
+        user_data.pop("auto_trade_chart_setup", None)
+        user_data.pop("auto_trade_chart_setup_expires_at", None)
 
     await _send_scan_message(
         query,
-        text,
-        reply_markup=reply_markup,
-        parse_mode=ParseMode.HTML if ParseMode else "HTML",
+        "📊 CHART SCREENSHOT ANALYSIS\n\n"
+        "Choose one of the five Step Indices. Then send a clear, recent "
+        "screenshot of that market's chart. The image will be sent to the "
+        "configured AI provider for analysis. If the chart does not show a "
+        "clear direction, no trade setup will be offered.",
+        reply_markup=TelegramKeyboard.chart_market_keyboard(
+            settings.auto_trade_markets,
+        ),
     )
 
 
-async def _handle_auto_trade_entry(update, query, *, allow_low_balance: bool = False) -> None:
+def _current_chart_setup(context, symbol: str, direction: str) -> dict | None:
+    user_data = getattr(context, "user_data", None)
+    if not isinstance(user_data, dict):
+        return None
+    setup = user_data.get("auto_trade_chart_setup")
+    expires_at = user_data.get("auto_trade_chart_setup_expires_at")
+    if (
+        not isinstance(setup, dict)
+        or setup.get("symbol") != symbol
+        or setup.get("direction") != direction
+        or not isinstance(expires_at, (int, float))
+        or asyncio.get_running_loop().time() > expires_at
+    ):
+        return None
+    return setup
+
+
+async def _select_chart_market(update, query, context, symbol: str) -> None:
+    if symbol not in settings.auto_trade_markets:
+        await query.answer("Choose one of the listed Step Index markets.", show_alert=True)
+        return
+
+    user_id = update.effective_user.id
+    if not auth_service.get_valid_access_token(str(user_id)):
+        await _prompt_connect(update, query)
+        return
+
+    user_data = getattr(context, "user_data", None)
+    if not isinstance(user_data, dict):
+        await query.answer(
+            "Chart selection expired. Please restart Auto Trade.",
+            show_alert=True,
+        )
+        return
+
+    user_data.pop("auto_trade_chart_setup", None)
+    user_data.pop("auto_trade_chart_setup_expires_at", None)
+    user_data["pending_chart_market_symbol"] = symbol
+    user_data["pending_chart_market_expires_at"] = (
+        asyncio.get_running_loop().time() + 600
+    )
+    await _safe_edit_message(
+        query,
+        f"📷 Send a recent screenshot of the "
+        f"{friendly_market_name(symbol)} chart as a photo.\n\n"
+        "For best results, include the visible price action and timeframe. "
+        "Your screenshot will be shared with the configured AI provider "
+        "for analysis. No trade is placed until you choose a stake and "
+        "confirm.",
+        reply_markup=TelegramKeyboard.custom_stake_prompt_keyboard(),
+    )
+
+
+async def handle_chart_screenshot(update, context=None) -> None:
+    message = getattr(update, "message", None)
+    user = getattr(update, "effective_user", None)
+    user_data = getattr(context, "user_data", None)
+    if message is None or user is None or not isinstance(user_data, dict):
+        return
+
+    symbol = user_data.get("pending_chart_market_symbol")
+    if symbol not in settings.auto_trade_markets:
+        return
+    if not auth_service.get_valid_access_token(str(user.id)):
+        await message.reply_text(
+            "Connect your Deriv account before using chart-based Auto Trade."
+        )
+        user_data.pop("pending_chart_market_symbol", None)
+        user_data.pop("pending_chart_market_expires_at", None)
+        return
+
+    expires_at = user_data.get("pending_chart_market_expires_at")
+    if not isinstance(expires_at, (int, float)) or (
+        asyncio.get_running_loop().time() > expires_at
+    ):
+        user_data.pop("pending_chart_market_symbol", None)
+        user_data.pop("pending_chart_market_expires_at", None)
+        await message.reply_text(
+            "That chart request has expired. Start Auto Trade again to choose "
+            "a market and send a new screenshot."
+        )
+        return
+
+    photos = getattr(message, "photo", None) or []
+    if not photos:
+        await message.reply_text(
+            f"Please send the {friendly_market_name(symbol)} chart as a photo."
+        )
+        return
+
+    photo = photos[-1]
+    if getattr(photo, "file_size", None) and photo.file_size > MAX_SCREENSHOT_BYTES:
+        await message.reply_text(
+            "That screenshot is too large. Please send a chart image under 8 MB."
+        )
+        return
+
+    try:
+        telegram_file = await photo.get_file()
+        image = bytes(await telegram_file.download_as_bytearray())
+    except Exception:
+        logger.exception("Could not download user's Auto Trade chart screenshot")
+        await message.reply_text(
+            "I couldn't receive that screenshot. Please try sending it again."
+        )
+        return
+
+    if not image or len(image) > MAX_SCREENSHOT_BYTES:
+        await message.reply_text(
+            "That screenshot is too large or empty. Please send a chart image "
+            "under 8 MB."
+        )
+        return
+
+    try:
+        provider = create_chart_analysis_provider()
+        analysis = await asyncio.wait_for(
+            provider.analyze_chart(image, friendly_market_name(symbol)),
+            timeout=55,
+        )
+        if not isinstance(analysis, ChartAnalysis):
+            raise ChartAnalysisError("CHART_ANALYSIS_RESPONSE_INVALID")
+    except ChartAnalysisError as exc:
+        logger.warning("Auto Trade chart analysis was unavailable (%s)", exc)
+        await message.reply_text(
+            "Chart analysis is temporarily unavailable. No trade was prepared. "
+            "Please try again shortly."
+        )
+        return
+    except asyncio.TimeoutError:
+        logger.warning("Auto Trade chart analysis timed out")
+        await message.reply_text(
+            "Chart analysis took too long. No trade was prepared. Please try "
+            "sending the screenshot again."
+        )
+        return
+    except Exception:
+        logger.exception("Unexpected Auto Trade chart-analysis failure")
+        await message.reply_text(
+            "I couldn't analyze that chart right now. No trade was prepared. "
+            "Please try again."
+        )
+        return
+
+    if analysis.market_mismatch:
+        await message.reply_text(
+            "⚠️ NO CLEAR SETUP\n\n"
+            f"The screenshot appears to show a different market than "
+            f"{friendly_market_name(symbol)}. Please send the selected market's "
+            "chart. No trade has been prepared."
+        )
+        return
+
+    if analysis.direction == "NO_TRADE":
+        await message.reply_text(
+            "⚠️ NO CLEAR SETUP\n\n"
+            f"Market: {friendly_market_name(symbol)}\n"
+            f"AI confidence: {analysis.confidence:.0f}%\n"
+            f"Reason: {analysis.reasoning}\n\n"
+            "No trade has been prepared. Send a clearer chart screenshot "
+            "for another analysis."
+        )
+        return
+
+    setup = {
+        "symbol": symbol,
+        "display_name": friendly_market_name(symbol),
+        "direction": analysis.direction,
+        "confidence": analysis.confidence,
+        "reasoning": analysis.reasoning,
+        "analysis_provider": settings.chart_analysis_provider.upper(),
+    }
+    user_data.pop("pending_chart_market_symbol", None)
+    user_data.pop("pending_chart_market_expires_at", None)
+    user_data["auto_trade_chart_setup"] = setup
+    user_data["auto_trade_chart_setup_expires_at"] = (
+        asyncio.get_running_loop().time() + 600
+    )
+    direction_label = (
+        "BULLISH (Rise)" if analysis.direction == "BULLISH"
+        else "BEARISH (Fall)"
+    )
+    await message.reply_text(
+        "📊 AI CHART ANALYSIS\n\n"
+        f"Market: {setup['display_name']}\n"
+        f"Direction: {direction_label}\n"
+        f"AI confidence: {analysis.confidence:.0f}%\n"
+        f"Reason: {analysis.reasoning}\n\n"
+        "This is an AI interpretation of your screenshot, not a guarantee. "
+        "Choose your stake to continue.",
+        reply_markup=TelegramKeyboard.stake_keyboard(
+            symbol,
+            analysis.direction,
+        ),
+    )
+
+
+async def _handle_auto_trade_entry(
+    update,
+    query,
+    *,
+    allow_low_balance: bool = False,
+    context=None,
+) -> None:
     user_id = update.effective_user.id
     try:
         limit_status = await _get_auto_trade_limit_status()
@@ -620,7 +794,7 @@ async def _handle_auto_trade_entry(update, query, *, allow_low_balance: bool = F
         )
         return
 
-    await _show_auto_trade_setup(update, query)
+    await _show_auto_trade_setup(update, query, context)
 
 def _setup_photo_url(direction: str | None) -> str | None:
     direction_value = str(direction or "").strip().upper()
@@ -1614,10 +1788,18 @@ async def _prepare_trade_confirmation(
         )
         return False
 
+    analysis_summary = ""
+    if setup.get("analysis_provider"):
+        analysis_summary = (
+            f"AI confidence: {float(setup['confidence']):.0f}%\n"
+            f"AI assessment: {setup['reasoning']}\n"
+        )
+
     confirmation = (
         "⚡ TRADE CONFIRMATION\n\n"
         f"Market: {setup.get('display_name', setup['symbol'])}\n"
         f"Direction: {setup['direction']}\n"
+        f"{analysis_summary}"
         f"Account mode: {account_mode.upper()}\n"
         f"Initial stake: {stake_value:,.2f} {currency}"
         f"{stake_description}\n"
@@ -1645,9 +1827,20 @@ async def _prepare_trade_confirmation(
 
 
 async def handle_custom_stake_input(update, context=None) -> None:
-    del context
     message = update.message
     user = update.effective_user
+    user_data = getattr(context, "user_data", None)
+    if (
+        isinstance(user_data, dict)
+        and user_data.get("pending_chart_market_symbol")
+        in settings.auto_trade_markets
+    ):
+        await message.reply_text(
+            "Please send the chart screenshot as a photo, or tap Cancel to "
+            "stop this Auto Trade setup."
+        )
+        return
+
     profile = await _sync_profile(update)
     payout_step = profile.get("payout_input_step") if profile else None
     if payout_step == "country":
@@ -1700,6 +1893,19 @@ async def handle_custom_stake_input(update, context=None) -> None:
 
     request = auto_trade_service.get_custom_stake_request(user.id)
     if request is None:
+        return
+
+    user_data = getattr(context, "user_data", None)
+    if isinstance(user_data, dict) and _current_chart_setup(
+        context,
+        str(request.get("symbol") or ""),
+        str(request.get("direction") or ""),
+    ) is None:
+        auto_trade_service.clear_custom_stake_request(user.id)
+        await message.reply_text(
+            "⚠️ This chart setup has expired. Please restart Auto Trade and "
+            "send a new screenshot."
+        )
         return
 
     def reply(text: str, **kwargs):
@@ -1777,21 +1983,29 @@ async def handle_custom_stake_input(update, context=None) -> None:
     symbol = request.get("symbol")
     direction = request.get("direction")
     if symbol and direction:
-        setup = {
-            "symbol": symbol,
-            "display_name": friendly_market_name(symbol),
-            "direction": direction,
-        }
+        if isinstance(user_data, dict):
+            chart_setup = _current_chart_setup(context, symbol, direction)
+            if chart_setup is None:
+                auto_trade_service.clear_custom_stake_request(user.id)
+                await reply(
+                    "⚠️ This chart setup has expired. Please restart Auto Trade "
+                    "and send a new screenshot."
+                )
+                return
+            setup = dict(chart_setup)
+        else:
+            setup = {
+                "symbol": symbol,
+                "display_name": friendly_market_name(symbol),
+                "direction": direction,
+            }
     else:
-        try:
-            setup = await asyncio.to_thread(build_auto_trade_setup, user.id)
-        except Exception:
-            logger.exception("Could not retrieve setup for custom-stake Auto Trade")
-            await reply(
-                "⚠️ Live market data is temporarily unavailable. "
-                "No trade was placed. Please try again shortly."
-            )
-            return
+        auto_trade_service.clear_custom_stake_request(user.id)
+        await reply(
+            "⚠️ This chart setup has expired. Please restart Auto Trade and "
+            "send a new screenshot."
+        )
+        return
     if (
         setup.get("symbol") == "NO_SETUP"
         or setup.get("direction") not in {"BULLISH", "BEARISH"}
@@ -1960,8 +2174,9 @@ async def _dispatch_callback(update, context) -> None:
             "🤖 YIELDS\n\n"
             "AI-powered trading intelligence for Deriv.\n\n"
             "How it works:\n"
-            "• AI ranks the 5 fixed Step Indices\n"
-            "• You choose the stake\n"
+            "• Choose one of 5 Step Indices and send its chart screenshot\n"
+            "• AI analyzes the chart and suggests Rise, Fall, or no trade\n"
+            "• Choose the stake after a directional setup is found\n"
             "• Auto Trade executes the selected Rise/Fall setup\n"
             "• Each cycle reports its trade steps and results\n"
             "• Smart Scaling increases the next stake after a loss\n"
@@ -2159,7 +2374,12 @@ async def _dispatch_callback(update, context) -> None:
         return
 
     if data == "START_AUTO_TRADE":
-        await _handle_auto_trade_entry(update, query)
+        await _handle_auto_trade_entry(update, query, context=context)
+        return
+
+    if data.startswith("AUTO_TRADE_CHART_"):
+        symbol = data.removeprefix("AUTO_TRADE_CHART_")
+        await _select_chart_market(update, query, context, symbol)
         return
 
     if data == "AUTO_TRADE_LIMIT_INFO":
@@ -2179,19 +2399,30 @@ async def _dispatch_callback(update, context) -> None:
                 limit_status["retry_after_seconds"],
             )
         else:
-            await _handle_auto_trade_entry(update, query)
+            await _handle_auto_trade_entry(update, query, context=context)
         return
 
     if data == "AUTO_TRADE_START_SCAN":
-        await _handle_auto_trade_entry(update, query)
+        await _handle_auto_trade_entry(update, query, context=context)
         return
 
     if data == "AUTO_TRADE_TRADE_ANYWAY":
-        await _handle_auto_trade_entry(update, query, allow_low_balance=True)
+        await _handle_auto_trade_entry(
+            update,
+            query,
+            allow_low_balance=True,
+            context=context,
+        )
         return
 
     if data == "AUTO_TRADE_CANCEL":
         auto_trade_service.clear_custom_stake_request(user_id)
+        user_data = getattr(context, "user_data", None)
+        if isinstance(user_data, dict):
+            user_data.pop("pending_chart_market_symbol", None)
+            user_data.pop("pending_chart_market_expires_at", None)
+            user_data.pop("auto_trade_chart_setup", None)
+            user_data.pop("auto_trade_chart_setup_expires_at", None)
         state = auto_trade_service.cancel_run(user_id)
         if state is None:
             await _safe_edit_message(
@@ -2306,6 +2537,10 @@ async def _dispatch_callback(update, context) -> None:
             )
             return
 
+        user_data = getattr(context, "user_data", None)
+        if isinstance(user_data, dict):
+            user_data.pop("auto_trade_chart_setup", None)
+            user_data.pop("auto_trade_chart_setup_expires_at", None)
         await _run_auto_trade(update, state)
         return
 
@@ -2348,6 +2583,18 @@ async def _dispatch_callback(update, context) -> None:
                 )
                 return
 
+            if _current_chart_setup(
+                context,
+                selected_symbol,
+                selected_direction,
+            ) is None:
+                await _safe_edit_message(
+                    query,
+                    "⚠️ This chart setup has expired. Please restart Auto Trade "
+                    "and send a new screenshot.",
+                )
+                return
+
         mode = account_mode_service.get_mode(user_id)
         auto_trade_service.set_custom_stake_request(
             user_id,
@@ -2375,6 +2622,26 @@ async def _dispatch_callback(update, context) -> None:
         if percentage_key is None:
             await query.edit_message_text(
                 "⚠️ Invalid stake selection. Choose one of the available stake buttons."
+            )
+            return
+
+        if not selected_symbol or not selected_direction:
+            await _safe_edit_message(
+                query,
+                "⚠️ This chart setup has expired. Please restart Auto Trade "
+                "and send a new screenshot.",
+            )
+            return
+        chart_setup = _current_chart_setup(
+            context,
+            selected_symbol,
+            selected_direction,
+        )
+        if chart_setup is None:
+            await _safe_edit_message(
+                query,
+                "⚠️ This chart setup has expired. Please restart Auto Trade "
+                "and send a new screenshot.",
             )
             return
 
@@ -2433,38 +2700,7 @@ async def _dispatch_callback(update, context) -> None:
             return
 
         currency = str(selected_account.get("currency") or "USD").upper()
-        if selected_symbol and selected_direction:
-            setup = {
-                "symbol": selected_symbol,
-                "display_name": friendly_market_name(selected_symbol),
-                "direction": selected_direction,
-            }
-        else:
-            try:
-                setup = await asyncio.to_thread(
-                    build_auto_trade_setup,
-                    user_id,
-                )
-            except Exception:
-                logger.exception(
-                    "Could not retrieve Deriv data for stake selection"
-                )
-                await _safe_edit_message(
-                    query,
-                    "⚠️ Live Deriv market data is temporarily unavailable. "
-                    "No trade has been placed. Please try again shortly.",
-                )
-                return
-
-            if (
-                setup.get("symbol") == "NO_SETUP"
-                or setup.get("direction") not in {"BULLISH", "BEARISH"}
-            ):
-                await query.edit_message_text(
-                    "⚠️ No tradable setup is currently available.\n\n"
-                    "No trade has been placed."
-                )
-                return
+        setup = dict(chart_setup)
 
         await _prepare_trade_confirmation(
             update,
