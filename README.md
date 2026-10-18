@@ -74,7 +74,7 @@ $0.35, no more than 1% of the selected account balance, and have no more than
 two decimal places. The selected market and direction remain pinned from
 analysis through confirmation. Auto Trade currently has no consecutive-loss stop: Smart Scaling
 can increase the next stake substantially after repeated losses. Contracts
-expire after three ticks, and a session ends after its target of 10 winning cycles,
+expire after three ticks, and a session ends after its target of 3 winning cycles,
 token depletion, insufficient balance, or an execution/settlement failure.
 
 ## Deriv rate limiting

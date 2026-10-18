@@ -3899,7 +3899,7 @@ class MarketDataTests(unittest.TestCase):
             instructions,
         )
         self.assertIn("after 3 ticks", instructions)
-        self.assertIn("at least 30 ticks", instructions)
+        self.assertIn("at least 9 ticks", instructions)
         self.assertIn("most recent visible price action", instructions)
         self.assertIn("not a calibrated win probability", instructions)
         self.assertIn(
@@ -5799,10 +5799,10 @@ class MarketDataTests(unittest.TestCase):
         self.assertIn("Data available for 1/5 markets", message)
         self.assertIn("Step 500", message)
 
-    def test_fixed_expiry_is_three_ticks_and_session_target_is_ten_cycles(self):
+    def test_fixed_expiry_is_three_ticks_and_session_target_is_three_cycles(self):
         self.assertEqual(settings.default_expiry_duration, 3)
         self.assertEqual(settings.default_expiry_unit, "t")
-        self.assertEqual(settings.auto_trade_cycles, 10)
+        self.assertEqual(settings.auto_trade_cycles, 3)
         payload = TradeExecutionService.build_proposal_payload(
             "step_300",
             "BULLISH",
@@ -5825,12 +5825,12 @@ class MarketDataTests(unittest.TestCase):
                 expiry_unit="s",
             )
         run = AutoTradeService().start_run(
-            "ten-cycle-default-user",
+            "three-cycle-default-user",
             "step_300",
             "BULLISH",
             1.0,
         )
-        self.assertEqual(run.max_cycles, 10)
+        self.assertEqual(run.max_cycles, 3)
         self.assertEqual(run.expiry_duration, 3)
         self.assertEqual(run.expiry_unit, "t")
         with self.assertRaisesRegex(ValueError, "YIELDS_EXPIRY_MUST_BE_3_TICKS"):
