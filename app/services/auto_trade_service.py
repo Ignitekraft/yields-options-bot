@@ -9,6 +9,7 @@ from typing import Any
 from app.config import settings
 
 AUTO_TRADE_STALE_SECONDS = int(getattr(settings, "auto_trade_stale_seconds", 1800))
+MAX_CONSECUTIVE_LOSSES = 5
 
 
 def _now() -> str:
@@ -269,6 +270,12 @@ class AutoTradeService:
 
             state.losses += 1
             state.consecutive_losses += 1
+            if state.consecutive_losses >= MAX_CONSECUTIVE_LOSSES:
+                state.status = "stopped_consecutive_losses"
+                state.completed_at = _now()
+                self._executing.discard(key)
+                return state
+
             state.martingale_step += 1
 
             multiplier = float(getattr(settings, "martingale_multiplier", 2.3))

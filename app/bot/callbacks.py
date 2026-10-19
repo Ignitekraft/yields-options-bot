@@ -1738,7 +1738,12 @@ async def _run_auto_trade_loop(update, state) -> None:
             f"⚡ Cycle {trade_cycle} Step {record['step']}\n"
             f"<pre>{html.escape(step_details)}</pre>"
         )
-        if not record["won"] and record["next_status"] == "running":
+        if record["next_status"] == "stopped_consecutive_losses":
+            result_text += (
+                "\n\n🛑 Auto Trade stopped after 5 consecutive losses. "
+                "No further trade will be placed."
+            )
+        elif not record["won"] and record["next_status"] == "running":
             result_text += (
                 "\n\n🔄 Smart Scaling Activated\n"
                 f"Next stake: ${record['next_stake']:.2f}"
@@ -1756,7 +1761,13 @@ async def _run_auto_trade_loop(update, state) -> None:
         )
         await _save_session_summary(
             current,
-            "completed" if current.status == "completed" else "running",
+            (
+                "completed"
+                if current.status == "completed"
+                else "running"
+                if current.status in {"running", "monitoring"}
+                else "stopped"
+            ),
         )
 
     def apply_settlement_result(settlement):
@@ -1860,12 +1871,24 @@ async def _run_auto_trade_loop(update, state) -> None:
         if current.status not in {"running", "monitoring"}:
             await refund_unused_token_reservation()
             await flush_pending_settlement(current)
-            await _save_session_summary(current, "failed")
+            stopped_for_losses = current.status == "stopped_consecutive_losses"
+            await _save_session_summary(
+                current,
+                "stopped" if stopped_for_losses else "failed",
+            )
             await _send_session_end_message(
                 query,
                 user_id,
                 current,
-                f"Auto Trade stopped safely ({current.status.replace('_', ' ')}).",
+                (
+                    "Auto Trade stopped after 5 consecutive losses. "
+                    "No further trade was placed."
+                    if stopped_for_losses
+                    else (
+                        "Auto Trade stopped safely "
+                        f"({current.status.replace('_', ' ')})."
+                    )
+                ),
             )
             return
 
@@ -2098,7 +2121,8 @@ async def _run_auto_trade_loop(update, state) -> None:
                 f"Direction: {current.direction}\n"
                 f"Target: {current.max_cycles} winning cycles\n"
                 "Smart Scaling continues after losses until the target wins, "
-                "available balance/tokens, or a Deriv rejection stops the run.",
+                "5 consecutive losses, available balance/tokens, or a Deriv "
+                "rejection stops the run.",
             )
             session_status_message_updated = True
 
@@ -2212,9 +2236,9 @@ async def _prepare_trade_confirmation(
         f"Expiry: {settings.default_expiry_duration} "
         f"{expiry_unit}\n"
         f"Target: {settings.auto_trade_cycles} winning cycles\n"
-        "There is no consecutive-loss stop right now. Smart Scaling raises "
+        "Smart Scaling raises "
         "the next stake after each loss, so it can grow quickly and may exceed "
-        "your available balance.\n\n"
+        "your available balance. Auto Trade stops after 5 consecutive losses.\n\n"
         "A loss stays in the current cycle and increases the next stake "
         "through Smart Scaling to help recover. "
         "A settled win advances the cycle and resets the stake.\n\n"
@@ -2572,8 +2596,8 @@ async def _dispatch_callback(update, context) -> None:
             "• Auto Trade executes the selected Rise/Fall setup\n"
             "• Each cycle reports its trade steps and results\n"
             "• Smart Scaling increases the next stake after a loss\n"
-            "• There is currently no consecutive-loss stop; higher stakes can "
-            "grow quickly\n"
+            "• Auto Trade stops after 5 consecutive losses; higher stakes can "
+            "grow quickly before then\n"
             f"• The run stops after {settings.auto_trade_cycles} winning cycles, "
             "when tokens or balance "
             "run out, or if Deriv rejects a trade"

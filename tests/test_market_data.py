@@ -1747,7 +1747,7 @@ class MarketDataTests(unittest.TestCase):
         self.assertEqual(replacement.symbol, "step_300")
         self.assertEqual(replacement.status, "awaiting_confirmation")
 
-    def test_auto_trade_continues_smart_scaling_after_five_consecutive_losses(self):
+    def test_auto_trade_stops_after_five_consecutive_losses(self):
         service = AutoTradeService()
         state = service.start_run(
             "martingale-user",
@@ -1779,8 +1779,9 @@ class MarketDataTests(unittest.TestCase):
         self.assertEqual(state.current_stake, 55.96)
 
         state = service.advance_after_result("martingale-user", won=False, profit=-55.96)
-        self.assertEqual(state.status, "running")
-        self.assertEqual(state.current_stake, 128.71)
+        self.assertEqual(state.status, "stopped_consecutive_losses")
+        self.assertEqual(state.current_stake, 55.96)
+        self.assertEqual(state.martingale_step, 5)
         self.assertEqual(state.losses, 5)
         self.assertEqual(state.consecutive_losses, 5)
 
@@ -1879,7 +1880,7 @@ class MarketDataTests(unittest.TestCase):
         self.assertEqual(state.current_stake, 10.0)
         self.assertEqual(state.status, "completed")
 
-    def test_auto_trade_keeps_scaling_after_five_losses_until_cycle_win(self):
+    def test_auto_trade_stops_after_five_losses_without_sixth_purchase(self):
         service = AutoTradeService()
         state = service.start_run(
             "five-loss-report-user",
@@ -1948,13 +1949,13 @@ class MarketDataTests(unittest.TestCase):
                 {"status": "settled", "profit": -52.9, "entry_tick": 100.0, "exit_tick": 99.0},
                 {"status": "settled", "profit": -121.67, "entry_tick": 100.0, "exit_tick": 99.0},
                 {"status": "settled", "profit": -279.84, "entry_tick": 100.0, "exit_tick": 99.0},
-                {"status": "settled", "profit": 5.0, "entry_tick": 99.0, "exit_tick": 100.0},
             ]
         )
 
         async def fake_monitor(_user_id, _trade_state, **kwargs):
             settlement = next(settlements)
-            await kwargs["on_countdown"](8)
+            if kwargs["on_countdown"] is not None:
+                await kwargs["on_countdown"](8)
             await kwargs["on_settlement"](
                 settlement,
                 object(),
@@ -1975,6 +1976,10 @@ class MarketDataTests(unittest.TestCase):
         def refund_token(*_args):
             token_refunds.append(True)
             return {"ok": True, "token_balance": 10}
+
+        session_end_message = AsyncMock(
+            return_value="Auto Trade stopped after 5 consecutive losses."
+        )
 
         with patch(
             "app.bot.callbacks.auto_trade_service",
@@ -2000,7 +2005,7 @@ class MarketDataTests(unittest.TestCase):
             new=AsyncMock(),
         ), patch(
             "app.bot.callbacks._session_end_message",
-            new=AsyncMock(return_value="🏆 Victory! Session completed."),
+            new=session_end_message,
         ), patch(
             "app.bot.callbacks._safe_edit_message",
             new=AsyncMock(),
@@ -2009,29 +2014,29 @@ class MarketDataTests(unittest.TestCase):
 
         self.assertEqual(
             executed_stakes,
-            [10.0, 23.0, 52.9, 121.67, 279.84, 643.63],
+            [10.0, 23.0, 52.9, 121.67, 279.84],
         )
         self.assertEqual(len(cycle_reports), 1)
         self.assertTrue(
             all(parse_mode == "HTML" for report in cycle_reports for parse_mode in report.parse_modes)
         )
         self.assertIn("Cycle 1", cycle_reports[0].text)
-        self.assertEqual(cycle_reports[0].text.count("Step "), 6)
-        self.assertIn("⚡ Cycle 1 Step 6", cycle_reports[0].text)
+        self.assertEqual(cycle_reports[0].text.count("Step "), 5)
+        self.assertIn("⚡ Cycle 1 Step 5", cycle_reports[0].text)
         self.assertIn(
             "<pre>🔴 Invest: $10.00 → -$10.00\n"
             "📊 Price: 100.0000 → 99.0000</pre>",
             cycle_reports[0].text,
         )
         self.assertEqual(
-            cycle_reports[0].text.count("Smart Scaling activated"),
-            5,
+            cycle_reports[0].text.count("Smart Scaling Activated"),
+            4,
         )
-        self.assertNotIn("Smart Scaling activated</pre>", cycle_reports[0].text)
-        self.assertNotIn("stopped after 5 consecutive losses", cycle_reports[0].text)
-        self.assertEqual(state.status, "completed")
-        self.assertEqual(state.consecutive_losses, 0)
-        self.assertEqual(len(token_reservations), 6)
+        self.assertNotIn("Smart Scaling Activated</pre>", cycle_reports[0].text)
+        self.assertIn("stopped after 5 consecutive losses", cycle_reports[0].text)
+        self.assertEqual(state.status, "stopped_consecutive_losses")
+        self.assertEqual(state.consecutive_losses, 5)
+        self.assertEqual(len(token_reservations), 5)
         self.assertEqual(len(token_refunds), 1)
         self.assertEqual(len(end_photos), 1)
         self.assertEqual(
@@ -2041,7 +2046,13 @@ class MarketDataTests(unittest.TestCase):
         )
         self.assertEqual(
             end_photos[0]["caption"],
-            "🏆 Victory! Session completed.",
+            "Auto Trade stopped after 5 consecutive losses.",
+        )
+        session_end_message.assert_awaited_once_with(
+            "five-loss-report-user",
+            state,
+            "Auto Trade stopped after 5 consecutive losses. "
+            "No further trade was placed.",
         )
 
     def test_unexpected_auto_trade_error_is_reported_without_bubbling(self):

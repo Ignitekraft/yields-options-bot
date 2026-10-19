@@ -73,10 +73,10 @@ selected account balance, calculated to the nearest cent. Users can also
 choose Custom amount and enter a stake directly; the amount must be at least
 $0.35, no more than 1% of the selected account balance, and have no more than
 two decimal places. The selected market and direction remain pinned from
-analysis through confirmation. Auto Trade currently has no consecutive-loss stop: Smart Scaling
-can increase the next stake substantially after repeated losses. Contracts
-expire after five ticks, and a session ends after its target of 3 winning cycles,
-token depletion, insufficient balance, or an execution failure. After a
+analysis through confirmation. Contracts expire after five ticks, and Auto
+Trade stops after its target of 3 winning cycles, five consecutive losses,
+token depletion, insufficient balance, or an execution failure. Smart Scaling
+can increase the next stake substantially after repeated losses. After a
 contract is bought, settlement monitoring reconnects with a fresh account URL
 and retries transient errors until Deriv confirms the result; no next contract
 is purchased before that confirmation. This recovery depends on the bot process
