@@ -1740,7 +1740,7 @@ async def _run_auto_trade_loop(update, state) -> None:
         )
         if record["next_status"] == "stopped_consecutive_losses":
             result_text += (
-                "\n\n🛑 Auto Trade stopped after 5 consecutive losses. "
+                "\n\n🛑 Auto Trade stopped after 1 consecutive loss. "
                 "No further trade will be placed."
             )
         elif not record["won"] and record["next_status"] == "running":
@@ -1881,7 +1881,7 @@ async def _run_auto_trade_loop(update, state) -> None:
                 user_id,
                 current,
                 (
-                    "Auto Trade stopped after 5 consecutive losses. "
+                    "Auto Trade stopped after 1 consecutive loss. "
                     "No further trade was placed."
                     if stopped_for_losses
                     else (
@@ -2120,9 +2120,9 @@ async def _run_auto_trade_loop(update, state) -> None:
                 f"Market: {market_label}\n"
                 f"Direction: {current.direction}\n"
                 f"Target: {current.max_cycles} winning cycles\n"
-                "Smart Scaling continues after losses until the target wins, "
-                "5 consecutive losses, available balance/tokens, or a Deriv "
-                "rejection stops the run.",
+                "Smart Scaling factor: 2x. Auto Trade stops at its winning-cycle "
+                "target, after 1 consecutive loss, if balance/tokens run out, "
+                "or if Deriv rejects a trade.",
             )
             session_status_message_updated = True
 
@@ -2228,7 +2228,7 @@ async def _prepare_trade_confirmation(
         f"Direction: {setup['direction']}\n"
         "Indicator scan selected this setup; it does not guarantee a win. "
         f"Auto Trade stops after {settings.auto_trade_cycles} winning cycles; "
-        "losses add recovery trades and time.\n"
+        "it also stops after one consecutive loss.\n"
         f"Account mode: {account_mode.upper()}\n"
         f"Initial stake: {stake_value:,.2f} {currency}"
         f"{stake_description}\n"
@@ -2236,12 +2236,8 @@ async def _prepare_trade_confirmation(
         f"Expiry: {settings.default_expiry_duration} "
         f"{expiry_unit}\n"
         f"Target: {settings.auto_trade_cycles} winning cycles\n"
-        "Smart Scaling raises "
-        "the next stake after each loss, so it can grow quickly and may exceed "
-        "your available balance. Auto Trade stops after 5 consecutive losses.\n\n"
-        "A loss stays in the current cycle and increases the next stake "
-        "through Smart Scaling to help recover. "
-        "A settled win advances the cycle and resets the stake.\n\n"
+        "Smart Scaling factor: 2x. Auto Trade stops after 1 consecutive loss; "
+        "a settled win advances the cycle and resets the stake.\n\n"
         "Confirm to begin."
     )
     keyboard = TelegramKeyboard.confirmation_keyboard()
@@ -2595,9 +2591,8 @@ async def _dispatch_callback(update, context) -> None:
             "• Choose the stake after a directional setup is found\n"
             "• Auto Trade executes the selected Rise/Fall setup\n"
             "• Each cycle reports its trade steps and results\n"
-            "• Smart Scaling increases the next stake after a loss\n"
-            "• Auto Trade stops after 5 consecutive losses; higher stakes can "
-            "grow quickly before then\n"
+            "• Smart Scaling uses a 2x factor\n"
+            "• Auto Trade stops after 1 consecutive loss\n"
             f"• The run stops after {settings.auto_trade_cycles} winning cycles, "
             "when tokens or balance "
             "run out, or if Deriv rejects a trade"

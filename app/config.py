@@ -54,8 +54,8 @@ class Settings:
     default_expiry_duration: int = 5
     default_expiry_unit: str = "t"
     auto_trade_cycles: int = 3
-    auto_trade_multiplier: float = float(os.getenv("AUTO_TRADE_MULTIPLIER", "2.25"))
-    martingale_multiplier: float = float(os.getenv("MARTINGALE_MULTIPLIER", "2.3"))
+    auto_trade_multiplier: float = 2.0
+    martingale_multiplier: float = 2.0
 
 
 settings = Settings()

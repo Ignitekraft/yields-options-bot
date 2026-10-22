@@ -1747,7 +1747,13 @@ class MarketDataTests(unittest.TestCase):
         self.assertEqual(replacement.symbol, "step_300")
         self.assertEqual(replacement.status, "awaiting_confirmation")
 
-    def test_auto_trade_stops_after_five_consecutive_losses(self):
+    def test_auto_trade_stops_after_one_consecutive_loss(self):
+        self.assertEqual(settings.martingale_multiplier, 2.0)
+        self.assertEqual(
+            TradeExecutionService.calculate_next_stake(10.0, 2),
+            20.0,
+        )
+
         service = AutoTradeService()
         state = service.start_run(
             "martingale-user",
@@ -1758,139 +1764,23 @@ class MarketDataTests(unittest.TestCase):
         )
 
         state = service.advance_after_result("martingale-user", won=False, profit=-2.0)
-        self.assertEqual(state.status, "running")
-        self.assertEqual(state.current_stake, 4.6)
-        self.assertEqual(state.martingale_step, 2)
-        self.assertEqual(state.consecutive_losses, 1)
-
-        state = service.advance_after_result("martingale-user", won=False, profit=-4.6)
-        self.assertEqual(state.status, "running")
-        self.assertEqual(state.current_stake, 10.58)
-        self.assertEqual(state.consecutive_losses, 2)
-
-        state = service.advance_after_result("martingale-user", won=False, profit=-10.58)
-        self.assertEqual(state.status, "running")
-        self.assertEqual(state.consecutive_losses, 3)
-        self.assertEqual(state.current_stake, 24.33)
-
-        state = service.advance_after_result("martingale-user", won=False, profit=-24.33)
-        self.assertEqual(state.status, "running")
-        self.assertEqual(state.consecutive_losses, 4)
-        self.assertEqual(state.current_stake, 55.96)
-
-        state = service.advance_after_result("martingale-user", won=False, profit=-55.96)
         self.assertEqual(state.status, "stopped_consecutive_losses")
-        self.assertEqual(state.current_stake, 55.96)
-        self.assertEqual(state.martingale_step, 5)
-        self.assertEqual(state.losses, 5)
-        self.assertEqual(state.consecutive_losses, 5)
+        self.assertEqual(state.current_stake, 2.0)
+        self.assertEqual(state.martingale_step, 1)
+        self.assertEqual(state.consecutive_losses, 1)
+        self.assertEqual(state.losses, 1)
 
-    def test_auto_trade_multiplies_each_losing_stake_and_resets_after_win(self):
+    def test_auto_trade_stops_after_one_loss_without_second_purchase(self):
         service = AutoTradeService()
         state = service.start_run(
-            "martingale-progression-user",
-            "step_100",
-            "BULLISH",
-            10.0,
-            max_cycles=1,
-            account_mode="demo",
-        )
-        service.confirm_run("martingale-progression-user")
-        executed_stakes = []
-        settlements = iter(
-            [
-                {"status": "settled", "profit": -10.0},
-                {"status": "settled", "profit": -23.0},
-                {"status": "settled", "profit": 5.0},
-            ]
-        )
-
-        class FakeQuery:
-            async def edit_message_text(self, _text, **_kwargs):
-                return None
-
-        update = SimpleNamespace(
-            callback_query=FakeQuery(),
-            effective_user=SimpleNamespace(id="martingale-progression-user"),
-        )
-
-        async def fake_execute_trade(_user_id, trade_state, **kwargs):
-            executed_stakes.append(trade_state.current_stake)
-            if len(executed_stakes) > 1:
-                self.assertTrue(kwargs.get("token_pre_reserved"))
-            service.record_trade_stake(
-                trade_state.user_id,
-                trade_state.current_stake,
-            )
-            trade_state.contract_id = f"contract-{len(executed_stakes)}"
-            trade_state.market_symbol = "STPRNG"
-            trade_state.status = "monitoring"
-            return {"status": "accepted"}
-
-        async def fake_monitor(_user_id, _trade_state, **kwargs):
-            settlement = next(settlements)
-            await kwargs["on_settlement"](
-                settlement,
-                object(),
-                {
-                    "account_type": "demo",
-                    "account_id": "demo-1",
-                    "currency": "USD",
-                    "ws_url": "wss://example.test",
-                },
-                {},
-            )
-            return settlement
-
-        with patch(
-            "app.bot.callbacks.auto_trade_service",
-            service,
-        ), patch(
-            "app.bot.callbacks.account_mode_service.get_mode",
-            return_value="demo",
-        ), patch(
-            "app.bot.callbacks.execute_trade",
-            new=AsyncMock(side_effect=fake_execute_trade),
-        ), patch(
-            "app.bot.callbacks._monitor_settlement",
-            new=AsyncMock(side_effect=fake_monitor),
-        ), patch(
-            "app.bot.callbacks.trade_history_service",
-            SimpleNamespace(
-                reserve_token=lambda *_: {"ok": True, "token_balance": 10},
-                refund_token=lambda *_: {"ok": True, "token_balance": 10},
-                record_settled_trade=lambda *_args: None,
-            ),
-        ), patch(
-            "app.bot.callbacks._save_session_summary",
-            new=AsyncMock(),
-        ), patch(
-            "app.bot.callbacks._session_end_message",
-            new=AsyncMock(return_value="Session completed."),
-        ), patch(
-            "app.bot.callbacks._safe_edit_message",
-            new=AsyncMock(),
-        ):
-            asyncio.run(_run_auto_trade(update, state))
-
-        self.assertEqual(executed_stakes, [10.0, 23.0, 52.9])
-        self.assertEqual(state.losses, 2)
-        self.assertEqual(state.wins, 1)
-        self.assertEqual(state.consecutive_losses, 0)
-        self.assertEqual(state.current_stake, 10.0)
-        self.assertEqual(state.status, "completed")
-
-    def test_auto_trade_stops_after_five_losses_without_sixth_purchase(self):
-        service = AutoTradeService()
-        state = service.start_run(
-            "five-loss-report-user",
+            "one-loss-report-user",
             "step_100",
             "BEARISH",
             10.0,
             max_cycles=1,
             account_mode="demo",
         )
-        service.confirm_run("five-loss-report-user")
+        service.confirm_run("one-loss-report-user")
         executed_stakes = []
         cycle_reports = []
         end_photos = []
@@ -1926,7 +1816,7 @@ class MarketDataTests(unittest.TestCase):
 
         update = SimpleNamespace(
             callback_query=FakeQuery(),
-            effective_user=SimpleNamespace(id="five-loss-report-user"),
+            effective_user=SimpleNamespace(id="one-loss-report-user"),
         )
 
         async def fake_execute_trade(_user_id, trade_state, **kwargs):
@@ -1942,18 +1832,14 @@ class MarketDataTests(unittest.TestCase):
             trade_state.status = "monitoring"
             return {"status": "accepted"}
 
-        settlements = iter(
-            [
-                {"status": "settled", "profit": -10.0, "entry_tick": 100.0, "exit_tick": 99.0},
-                {"status": "settled", "profit": -23.0, "entry_tick": 100.0, "exit_tick": 99.0},
-                {"status": "settled", "profit": -52.9, "entry_tick": 100.0, "exit_tick": 99.0},
-                {"status": "settled", "profit": -121.67, "entry_tick": 100.0, "exit_tick": 99.0},
-                {"status": "settled", "profit": -279.84, "entry_tick": 100.0, "exit_tick": 99.0},
-            ]
-        )
+        settlement = {
+            "status": "settled",
+            "profit": -10.0,
+            "entry_tick": 100.0,
+            "exit_tick": 99.0,
+        }
 
         async def fake_monitor(_user_id, _trade_state, **kwargs):
-            settlement = next(settlements)
             if kwargs["on_countdown"] is not None:
                 await kwargs["on_countdown"](8)
             await kwargs["on_settlement"](
@@ -1978,7 +1864,7 @@ class MarketDataTests(unittest.TestCase):
             return {"ok": True, "token_balance": 10}
 
         session_end_message = AsyncMock(
-            return_value="Auto Trade stopped after 5 consecutive losses."
+            return_value="Auto Trade stopped after 1 consecutive loss."
         )
 
         with patch(
@@ -2014,15 +1900,15 @@ class MarketDataTests(unittest.TestCase):
 
         self.assertEqual(
             executed_stakes,
-            [10.0, 23.0, 52.9, 121.67, 279.84],
+            [10.0],
         )
         self.assertEqual(len(cycle_reports), 1)
         self.assertTrue(
             all(parse_mode == "HTML" for report in cycle_reports for parse_mode in report.parse_modes)
         )
         self.assertIn("Cycle 1", cycle_reports[0].text)
-        self.assertEqual(cycle_reports[0].text.count("Step "), 5)
-        self.assertIn("⚡ Cycle 1 Step 5", cycle_reports[0].text)
+        self.assertEqual(cycle_reports[0].text.count("Step "), 1)
+        self.assertIn("⚡ Cycle 1 Step 1", cycle_reports[0].text)
         self.assertIn(
             "<pre>🔴 Invest: $10.00 → -$10.00\n"
             "📊 Price: 100.0000 → 99.0000</pre>",
@@ -2030,13 +1916,13 @@ class MarketDataTests(unittest.TestCase):
         )
         self.assertEqual(
             cycle_reports[0].text.count("Smart Scaling Activated"),
-            4,
+            0,
         )
         self.assertNotIn("Smart Scaling Activated</pre>", cycle_reports[0].text)
-        self.assertIn("stopped after 5 consecutive losses", cycle_reports[0].text)
+        self.assertIn("stopped after 1 consecutive loss", cycle_reports[0].text)
         self.assertEqual(state.status, "stopped_consecutive_losses")
-        self.assertEqual(state.consecutive_losses, 5)
-        self.assertEqual(len(token_reservations), 5)
+        self.assertEqual(state.consecutive_losses, 1)
+        self.assertEqual(len(token_reservations), 1)
         self.assertEqual(len(token_refunds), 1)
         self.assertEqual(len(end_photos), 1)
         self.assertEqual(
@@ -2046,12 +1932,12 @@ class MarketDataTests(unittest.TestCase):
         )
         self.assertEqual(
             end_photos[0]["caption"],
-            "Auto Trade stopped after 5 consecutive losses.",
+            "Auto Trade stopped after 1 consecutive loss.",
         )
         session_end_message.assert_awaited_once_with(
-            "five-loss-report-user",
+            "one-loss-report-user",
             state,
-            "Auto Trade stopped after 5 consecutive losses. "
+            "Auto Trade stopped after 1 consecutive loss. "
             "No further trade was placed.",
         )
 
@@ -6163,6 +6049,8 @@ class MarketDataTests(unittest.TestCase):
         self.assertEqual(settings.default_expiry_duration, 5)
         self.assertEqual(settings.default_expiry_unit, "t")
         self.assertEqual(settings.auto_trade_cycles, 3)
+        self.assertEqual(settings.auto_trade_multiplier, 2.0)
+        self.assertEqual(settings.martingale_multiplier, 2.0)
         payload = TradeExecutionService.build_proposal_payload(
             "step_300",
             "BULLISH",

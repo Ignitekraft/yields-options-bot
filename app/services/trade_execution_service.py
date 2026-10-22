@@ -49,7 +49,7 @@ class TradeExecutionService:
 
     def __init__(self) -> None:
         self.martingale_multiplier = float(
-            getattr(settings, "martingale_multiplier", 2.3)
+            getattr(settings, "martingale_multiplier", 2.0)
         )
 
     @classmethod
@@ -1117,7 +1117,7 @@ class TradeExecutionService:
         cls,
         base_stake: float,
         martingale_step: int,
-        multiplier: float = 2.3,
+        multiplier: float = 2.0,
     ) -> float:
         base = cls.validate_stake(
             base_stake
