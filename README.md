@@ -26,7 +26,7 @@ Implemented:
 - Supabase stores Telegram user profiles, read-only Deriv balance snapshots, per-contract trade history, and end-of-session summaries.
 - `/stats` reports the last 10 finalized Auto Trade sessions; session win rate is based on positive session PnL, while direction accuracy is calculated from settled contract ticks.
 - One Yields Token is reserved for each contract purchase. Explicitly rejected purchases are refunded; an uncertain purchase outcome is not refunded to prevent an uncharged possible trade.
-- Auto Trade session starts are recorded in Supabase and limited to 3 per user before a 15-minute cooldown, enforced across bot workers. The cooldown begins when the third session starts. When the limit is reached, that user's Auto Trade button displays the remaining cooldown and explains the pause; the limit is atomically checked again when a session is confirmed.
+- Auto Trade session starts are recorded in Supabase and limited to 20 per user before a 15-minute cooldown, enforced across bot workers. The cooldown begins when the twentieth session starts. When the limit is reached, that user's Auto Trade button displays the remaining cooldown and explains the pause; the limit is atomically checked again when a session is confirmed.
 - Consecutive Auto Trade sessions for a user must use different markets. The previous session's market is excluded from the next scan, and Supabase atomically rejects a stale confirmation that would reuse it.
 - Users can claim a one-time gift of 200 Yields Tokens from the Telegram welcome flow. The claim is recorded on their persistent Supabase profile, including for users who received the former 150-token OAuth grant.
 - The dashboard's Get Tokens button and `/tokens` command show Whop packages for 50, 100, 200, and 500 tokens. The package selection screen links to each checkout and returns to the `/start` menu.
@@ -53,7 +53,7 @@ slope, 3-bar momentum, price relative to the short- and higher-timeframe EMAs,
 and RSI. The weighted score selects bullish, bearish, or neutral direction;
 ATR and momentum are reported as context rather than hard eligibility gates.
 Markets with insufficient or stale history remain excluded. This scoring
-approach does not guarantee a profitable five-tick contract and has not been
+approach does not guarantee a profitable three-tick contract and has not been
 validated as profitable by a historical backtest. Live data errors stop a
 market scan instead of producing a signal from sample data. Public market data
 uses Deriv's unauthenticated public WebSocket. Deriv's documented WebSocket
@@ -73,7 +73,7 @@ selected account balance, calculated to the nearest cent. Users can also
 choose Custom amount and enter a stake directly; the amount must be at least
 $0.35, no more than 1% of the selected account balance, and have no more than
 two decimal places. The selected market and direction remain pinned from
-analysis through confirmation. Contracts expire after five ticks, and Auto
+analysis through confirmation. Contracts expire after three ticks, and Auto
 Trade stops after its target of 3 winning cycles, one consecutive loss,
 token depletion, insufficient balance, or an execution failure. Smart Scaling
 uses a 2x multiplier. After a

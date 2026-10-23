@@ -491,7 +491,7 @@ async def _show_auto_trade_limit_notice(
     countdown = _format_auto_trade_countdown(seconds)
     notice = (
         "Auto Trade is temporarily paused for your account: you've started "
-        "3 sessions, so a 15-minute cooldown applies. "
+        "20 sessions, so a 15-minute cooldown applies. "
         f"New sessions are available in {countdown}."
     )
     if callback_already_answered:
