@@ -37,6 +37,10 @@ from app.bot.handlers import (
 )
 from app.bot.keyboards import TelegramKeyboard
 from app.config import settings
+from app.services.auto_trade_service import (
+    MAX_CONSECUTIVE_LOSSES,
+    opposite_direction,
+)
 from app.services.chart_analysis import (
     MAX_SCREENSHOT_BYTES,
     ChartAnalysis,
@@ -1736,20 +1740,28 @@ async def _run_auto_trade_loop(update, state) -> None:
         )
         result_text = (
             f"⚡ Cycle {trade_cycle} Step {record['step']}\n"
+            f"Direction: {html.escape(record['direction'])}\n"
             f"<pre>{html.escape(step_details)}</pre>"
         )
         if record["next_status"] == "stopped_consecutive_losses":
             result_text += (
-                "\n\n🛑 Auto Trade stopped after 1 consecutive loss. "
+                "\n\n🛑 Auto Trade stopped after "
+                f"{MAX_CONSECUTIVE_LOSSES} consecutive losses. "
                 "No further trade will be placed."
             )
         elif not record["won"] and record["next_status"] == "running":
             result_text += (
                 "\n\n🔄 Smart Scaling Activated\n"
-                f"Next stake: ${record['next_stake']:.2f}"
+                f"Next stake: ${record['next_stake']:.2f}\n"
+                f"Next direction: {record['next_direction']}"
             )
         elif record["won"]:
             result_text += "\n\n✅ Cycle completed."
+            if record["direction"] != record["next_direction"]:
+                result_text += (
+                    "\n↩️ Recovery complete. Direction reset to "
+                    f"{record['next_direction']}."
+                )
         if not history_saved:
             result_text += "\n\n⚠️ This settled trade could not be saved to Stats."
 
@@ -1787,15 +1799,16 @@ async def _run_auto_trade_loop(update, state) -> None:
             return None, "Auto Trade state was not found."
 
         won = profit > 0
+        trade_direction = current.direction
         entry_tick = settlement.get("entry_tick")
         exit_tick = settlement.get("exit_tick")
         direction_accurate = None
         try:
             entry_value = float(entry_tick)
             exit_value = float(exit_tick)
-            if current.direction == "BULLISH":
+            if TradeExecutionService.resolve_contract_type(trade_direction) == "CALL":
                 direction_accurate = exit_value > entry_value
-            elif current.direction == "BEARISH":
+            else:
                 direction_accurate = exit_value < entry_value
         except (TypeError, ValueError):
             pass
@@ -1821,6 +1834,8 @@ async def _run_auto_trade_loop(update, state) -> None:
             "won": won,
             "next_status": current.status,
             "next_stake": current.current_stake,
+            "direction": trade_direction,
+            "next_direction": current.direction,
             "entry_tick": entry_tick,
             "exit_tick": exit_tick,
             "trade": {
@@ -1829,7 +1844,7 @@ async def _run_auto_trade_loop(update, state) -> None:
                 "session_id": current.session_id,
                 "account_mode": current.account_mode,
                 "market_symbol": current.market_symbol or current.symbol,
-                "direction": current.direction,
+                "direction": trade_direction,
                 "stake": trade_stake,
                 "profit": profit,
                 "direction_accurate": direction_accurate,
@@ -1881,7 +1896,8 @@ async def _run_auto_trade_loop(update, state) -> None:
                 user_id,
                 current,
                 (
-                    "Auto Trade stopped after 1 consecutive loss. "
+                    f"Auto Trade stopped after {MAX_CONSECUTIVE_LOSSES} "
+                    "consecutive losses. "
                     "No further trade was placed."
                     if stopped_for_losses
                     else (
@@ -1966,21 +1982,26 @@ async def _run_auto_trade_loop(update, state) -> None:
                 )
                 return immediate_trade_result
 
-            next_stakes = {
-                round(current.base_stake, 2),
-                round(
-                    current.current_stake * settings.martingale_multiplier,
-                    2,
-                ),
-            }
             preload_proposals = [
                 {
                     "symbol": current.market_symbol or current.symbol,
-                    "direction": current.direction,
+                    "direction": direction,
                     "stake": stake,
                     "currency": current.currency,
                 }
-                for stake in next_stakes
+                for direction, stake in (
+                    (
+                        current.original_direction or current.direction,
+                        round(current.base_stake, 2),
+                    ),
+                    (
+                        opposite_direction(current.direction),
+                        round(
+                            current.current_stake * settings.martingale_multiplier,
+                            2,
+                        ),
+                    ),
+                )
             ]
             if settings.default_expiry_unit == "t":
                 start_next_token_reservation()
@@ -2120,8 +2141,10 @@ async def _run_auto_trade_loop(update, state) -> None:
                 f"Market: {market_label}\n"
                 f"Direction: {current.direction}\n"
                 f"Target: {current.max_cycles} winning cycles\n"
-                "Smart Scaling factor: 2x. Auto Trade stops at its winning-cycle "
-                "target, after 1 consecutive loss, if balance/tokens run out, "
+                f"Smart Scaling factor: {settings.martingale_multiplier:g}x. "
+                "Auto Trade stops at its winning-cycle target, after "
+                f"{MAX_CONSECUTIVE_LOSSES} consecutive losses, if "
+                "balance/tokens run out, "
                 "or if Deriv rejects a trade.",
             )
             session_status_message_updated = True
@@ -2131,7 +2154,8 @@ async def _run_auto_trade_loop(update, state) -> None:
             cycle_report_message = None
             cycle_steps = []
         pending_step = (
-            f"Step {current.martingale_step}\n⏳ Purchased for "
+            f"Step {current.martingale_step} — Direction: {current.direction}\n"
+            "⏳ Purchased for "
             f"${current.current_stake:.2f}. Waiting for the "
             f"{current.expiry_duration} "
             f"{'tick' if current.expiry_unit == 't' and current.expiry_duration == 1 else 'ticks' if current.expiry_unit == 't' else 'seconds'} "
@@ -2228,7 +2252,7 @@ async def _prepare_trade_confirmation(
         f"Direction: {setup['direction']}\n"
         "Indicator scan selected this setup; it does not guarantee a win. "
         f"Auto Trade stops after {settings.auto_trade_cycles} winning cycles; "
-        "it also stops after one consecutive loss.\n"
+        f"it also stops after {MAX_CONSECUTIVE_LOSSES} consecutive losses.\n"
         f"Account mode: {account_mode.upper()}\n"
         f"Initial stake: {stake_value:,.2f} {currency}"
         f"{stake_description}\n"
@@ -2236,7 +2260,8 @@ async def _prepare_trade_confirmation(
         f"Expiry: {settings.default_expiry_duration} "
         f"{expiry_unit}\n"
         f"Target: {settings.auto_trade_cycles} winning cycles\n"
-        "Smart Scaling factor: 2x. Auto Trade stops after 1 consecutive loss; "
+        f"Smart Scaling factor: {settings.martingale_multiplier:g}x. Auto Trade "
+        f"stops after {MAX_CONSECUTIVE_LOSSES} consecutive losses; "
         "a settled win advances the cycle and resets the stake.\n\n"
         "Confirm to begin."
     )
@@ -2591,8 +2616,8 @@ async def _dispatch_callback(update, context) -> None:
             "• Choose the stake after a directional setup is found\n"
             "• Auto Trade executes the selected Rise/Fall setup\n"
             "• Each cycle reports its trade steps and results\n"
-            "• Smart Scaling uses a 2x factor\n"
-            "• Auto Trade stops after 1 consecutive loss\n"
+            f"• Smart Scaling uses a {settings.martingale_multiplier:g}x factor\n"
+            f"• Auto Trade stops after {MAX_CONSECUTIVE_LOSSES} consecutive losses\n"
             f"• The run stops after {settings.auto_trade_cycles} winning cycles, "
             "when tokens or balance "
             "run out, or if Deriv rejects a trade"

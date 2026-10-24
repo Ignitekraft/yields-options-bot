@@ -49,7 +49,7 @@ class TradeExecutionService:
 
     def __init__(self) -> None:
         self.martingale_multiplier = float(
-            getattr(settings, "martingale_multiplier", 2.0)
+            getattr(settings, "martingale_multiplier", 2.3)
         )
 
     @classmethod
@@ -595,7 +595,7 @@ class TradeExecutionService:
                 for candidate_symbol in candidates:
                     try:
                         proposal_key = (
-                            f"{candidate_symbol}:{amount:.2f}"
+                            f"{candidate_symbol}:{contract_type}:{amount:.2f}"
                         )
                         proposal = (
                             (prepared_proposals or {}).get(proposal_key)
@@ -812,8 +812,9 @@ class TradeExecutionService:
                         subscribe=True,
                     )
                     proposal_request_keys[proposal_payload["req_id"]] = (
-                        f"{self.normalize_step_symbol(str(preload['symbol']))}:"
-                        f"{float(preload['stake']):.2f}"
+                        f"{proposal_payload['underlying_symbol']}:"
+                        f"{proposal_payload['contract_type']}:"
+                        f"{proposal_payload['amount']:.2f}"
                     )
                     await send_deriv_websocket_request(
                         websocket,
@@ -1117,7 +1118,7 @@ class TradeExecutionService:
         cls,
         base_stake: float,
         martingale_step: int,
-        multiplier: float = 2.0,
+        multiplier: float = 2.3,
     ) -> float:
         base = cls.validate_stake(
             base_stake

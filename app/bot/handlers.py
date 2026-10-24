@@ -9,7 +9,10 @@ from app.config import settings
 from app.services.account_service import AccountService
 from app.services.account_mode_service import AccountModeService
 from app.services.auth_service import AuthService
-from app.services.auto_trade_service import AutoTradeService
+from app.services.auto_trade_service import (
+    AutoTradeService,
+    MAX_CONSECUTIVE_LOSSES,
+)
 from app.services.deriv.auth import build_deriv_oauth_url
 from app.services.deriv.market_data import MarketDataService
 from app.services.scanner import YieldsScanner
@@ -502,8 +505,9 @@ def handle_faq() -> str:
         "• How long is each Auto Trade contract?\n"
         "  Each contract expires after five market ticks. The elapsed time varies with how quickly the market updates.\n\n"
         "• Does Auto Trade stop after consecutive losses?\n"
-        "  Yes. Auto Trade stops after 1 consecutive loss. Smart Scaling uses "
-        "a 2x factor; a session also ends after the configured winning-cycle "
+        f"  Yes. Auto Trade stops after {MAX_CONSECUTIVE_LOSSES} consecutive "
+        f"losses. Smart Scaling uses a {settings.martingale_multiplier:g}x "
+        "factor; a session also ends after the configured winning-cycle "
         "target, when funds/tokens "
         "run out, or if Deriv rejects a trade.\n\n"
         "• Can I switch between Demo and Real?\n"

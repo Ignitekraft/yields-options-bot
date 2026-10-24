@@ -9,7 +9,16 @@ from typing import Any
 from app.config import settings
 
 AUTO_TRADE_STALE_SECONDS = int(getattr(settings, "auto_trade_stale_seconds", 1800))
-MAX_CONSECUTIVE_LOSSES = 1
+MAX_CONSECUTIVE_LOSSES = 5
+
+
+def opposite_direction(direction: str) -> str:
+    normalized = str(direction or "").strip().upper()
+    if normalized in {"BULLISH", "RISE", "CALL"}:
+        return "BEARISH"
+    if normalized in {"BEARISH", "FALL", "PUT"}:
+        return "BULLISH"
+    raise ValueError(f"NO_VALID_TRADE_DIRECTION:{direction}")
 
 
 def _now() -> str:
@@ -23,6 +32,7 @@ class TradeRunState:
     direction: str
     base_stake: float
     current_stake: float
+    original_direction: str = ""
     session_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     stake_percentage_key: str | None = None
     cycle: int = 1
@@ -171,6 +181,7 @@ class AutoTradeService:
                 direction=str(direction).upper(),
                 base_stake=round(stake, 2),
                 current_stake=round(stake, 2),
+                original_direction=str(direction).upper(),
                 max_cycles=int(max_cycles),
                 status="awaiting_confirmation",
                 account_mode=mode,
@@ -256,6 +267,7 @@ class AutoTradeService:
                 state.consecutive_losses = 0
                 state.martingale_step = 1
                 state.current_stake = state.base_stake
+                state.direction = state.original_direction or state.direction
 
                 if state.cycle >= state.max_cycles:
                     state.status = "completed"
@@ -277,8 +289,9 @@ class AutoTradeService:
                 return state
 
             state.martingale_step += 1
+            state.direction = opposite_direction(state.direction)
 
-            multiplier = float(getattr(settings, "martingale_multiplier", 2.0))
+            multiplier = float(getattr(settings, "martingale_multiplier", 2.3))
             state.current_stake = round(
                 state.current_stake * multiplier,
                 2,
