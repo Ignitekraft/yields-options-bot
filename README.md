@@ -74,11 +74,13 @@ choose Custom amount and enter a stake directly; the amount must be at least
 $0.35, no more than 1% of the selected account balance, and have no more than
 two decimal places. The selected market and direction remain pinned from
 analysis through confirmation. Contracts expire after three ticks, and Auto
-Trade stops after its target of 3 winning cycles or five consecutive losses,
+Trade stops after its target of 10 winning cycles or five consecutive losses,
 token depletion, insufficient balance, or an execution failure. Smart Scaling
-uses a 2.3x multiplier and alternates direction after each loss, returning to
-the original direction after a winning recovery. After a
-contract is bought, settlement monitoring reconnects with a fresh account URL
+uses a 2x multiplier. During a losing streak, it allows two losses on the
+original direction before switching; a loss in the opposite direction returns
+to the original direction for two more losses. After a winning recovery, it
+resets to the original direction. After a contract is bought, settlement
+monitoring reconnects with a fresh account URL
 and retries transient errors until Deriv confirms the result; no next contract
 is purchased before that confirmation. This recovery depends on the bot process
 remaining running.

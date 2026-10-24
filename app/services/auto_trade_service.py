@@ -10,6 +10,7 @@ from app.config import settings
 
 AUTO_TRADE_STALE_SECONDS = int(getattr(settings, "auto_trade_stale_seconds", 1800))
 MAX_CONSECUTIVE_LOSSES = 5
+INITIAL_DIRECTION_LOSSES_BEFORE_SWITCH = 2
 
 
 def opposite_direction(direction: str) -> str:
@@ -19,6 +20,19 @@ def opposite_direction(direction: str) -> str:
     if normalized in {"BEARISH", "FALL", "PUT"}:
         return "BULLISH"
     raise ValueError(f"NO_VALID_TRADE_DIRECTION:{direction}")
+
+
+def next_direction_after_loss(
+    direction: str,
+    original_direction: str,
+    initial_direction_losses: int,
+) -> str:
+    original = original_direction or direction
+    if direction != original:
+        return original
+    if initial_direction_losses + 1 < INITIAL_DIRECTION_LOSSES_BEFORE_SWITCH:
+        return original
+    return opposite_direction(original)
 
 
 def _now() -> str:
@@ -33,6 +47,7 @@ class TradeRunState:
     base_stake: float
     current_stake: float
     original_direction: str = ""
+    initial_direction_losses: int = 0
     session_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     stake_percentage_key: str | None = None
     cycle: int = 1
@@ -268,6 +283,7 @@ class AutoTradeService:
                 state.martingale_step = 1
                 state.current_stake = state.base_stake
                 state.direction = state.original_direction or state.direction
+                state.initial_direction_losses = 0
 
                 if state.cycle >= state.max_cycles:
                     state.status = "completed"
@@ -289,9 +305,22 @@ class AutoTradeService:
                 return state
 
             state.martingale_step += 1
-            state.direction = opposite_direction(state.direction)
+            original_direction = state.original_direction or state.direction
+            previous_direction = state.direction
+            state.direction = next_direction_after_loss(
+                previous_direction,
+                original_direction,
+                state.initial_direction_losses,
+            )
+            if (
+                previous_direction == original_direction
+                and state.direction == original_direction
+            ):
+                state.initial_direction_losses += 1
+            else:
+                state.initial_direction_losses = 0
 
-            multiplier = float(getattr(settings, "martingale_multiplier", 2.3))
+            multiplier = float(getattr(settings, "martingale_multiplier", 2.0))
             state.current_stake = round(
                 state.current_stake * multiplier,
                 2,

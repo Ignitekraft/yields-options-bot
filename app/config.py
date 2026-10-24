@@ -53,9 +53,9 @@ class Settings:
     )
     default_expiry_duration: int = 3
     default_expiry_unit: str = "t"
-    auto_trade_cycles: int = 3
-    auto_trade_multiplier: float = 2.3
-    martingale_multiplier: float = 2.3
+    auto_trade_cycles: int = 10
+    auto_trade_multiplier: float = 2.0
+    martingale_multiplier: float = 2.0
 
 
 settings = Settings()

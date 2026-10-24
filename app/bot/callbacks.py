@@ -39,7 +39,7 @@ from app.bot.keyboards import TelegramKeyboard
 from app.config import settings
 from app.services.auto_trade_service import (
     MAX_CONSECUTIVE_LOSSES,
-    opposite_direction,
+    next_direction_after_loss,
 )
 from app.services.chart_analysis import (
     MAX_SCREENSHOT_BYTES,
@@ -1995,7 +1995,11 @@ async def _run_auto_trade_loop(update, state) -> None:
                         round(current.base_stake, 2),
                     ),
                     (
-                        opposite_direction(current.direction),
+                        next_direction_after_loss(
+                            current.direction,
+                            current.original_direction or current.direction,
+                            current.initial_direction_losses,
+                        ),
                         round(
                             current.current_stake * settings.martingale_multiplier,
                             2,
@@ -2142,6 +2146,9 @@ async def _run_auto_trade_loop(update, state) -> None:
                 f"Direction: {current.direction}\n"
                 f"Target: {current.max_cycles} winning cycles\n"
                 f"Smart Scaling factor: {settings.martingale_multiplier:g}x. "
+                "During a losing streak, it allows two losses on the initial "
+                "direction before switching; an opposite-direction loss "
+                "returns to the initial direction for two more losses. "
                 "Auto Trade stops at its winning-cycle target, after "
                 f"{MAX_CONSECUTIVE_LOSSES} consecutive losses, if "
                 "balance/tokens run out, "
@@ -2262,7 +2269,9 @@ async def _prepare_trade_confirmation(
         f"Target: {settings.auto_trade_cycles} winning cycles\n"
         f"Smart Scaling factor: {settings.martingale_multiplier:g}x. Auto Trade "
         f"stops after {MAX_CONSECUTIVE_LOSSES} consecutive losses; "
-        "a settled win advances the cycle and resets the stake.\n\n"
+        "it allows two losses on the initial direction before switching. "
+        "A loss in the opposite direction returns to the initial direction "
+        "for two more losses; a win resets the direction and stake.\n\n"
         "Confirm to begin."
     )
     keyboard = TelegramKeyboard.confirmation_keyboard()

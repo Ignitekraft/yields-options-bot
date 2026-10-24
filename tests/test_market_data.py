@@ -1748,10 +1748,10 @@ class MarketDataTests(unittest.TestCase):
         self.assertEqual(replacement.status, "awaiting_confirmation")
 
     def test_auto_trade_stops_after_five_consecutive_losses(self):
-        self.assertEqual(settings.martingale_multiplier, 2.3)
+        self.assertEqual(settings.martingale_multiplier, 2.0)
         self.assertEqual(
             TradeExecutionService.calculate_next_stake(10.0, 2),
-            23.0,
+            20.0,
         )
 
         service = AutoTradeService()
@@ -1776,17 +1776,21 @@ class MarketDataTests(unittest.TestCase):
             )
             self.assertEqual(state.status, expected_status)
             self.assertEqual(state.consecutive_losses, loss_number)
-            if loss_number < 5:
-                self.assertEqual(
-                    state.direction,
-                    "BEARISH" if loss_number % 2 else "BULLISH",
-                )
+            expected_directions = (
+                "BULLISH",
+                "BEARISH",
+                "BULLISH",
+                "BULLISH",
+                "BULLISH",
+            )
+            self.assertEqual(state.direction, expected_directions[loss_number - 1])
 
         self.assertEqual(state.status, "stopped_consecutive_losses")
-        self.assertEqual(state.current_stake, 55.96)
+        self.assertEqual(state.current_stake, 32.0)
         self.assertEqual(state.martingale_step, 5)
         self.assertEqual(state.consecutive_losses, 5)
         self.assertEqual(state.losses, 5)
+        self.assertEqual(state.initial_direction_losses, 1)
 
     def test_auto_trade_stops_after_five_losses_without_sixth_purchase(self):
         service = AutoTradeService()
@@ -1921,11 +1925,11 @@ class MarketDataTests(unittest.TestCase):
 
         self.assertEqual(
             executed_stakes,
-            [10.0, 23.0, 52.9, 121.67, 279.84],
+            [10.0, 20.0, 40.0, 80.0, 160.0],
         )
         self.assertEqual(
             executed_directions,
-            ["BEARISH", "BULLISH", "BEARISH", "BULLISH", "BEARISH"],
+            ["BEARISH", "BEARISH", "BULLISH", "BEARISH", "BEARISH"],
         )
         self.assertEqual(
             [trade["direction"] for trade in recorded_trades],
@@ -2379,8 +2383,8 @@ class MarketDataTests(unittest.TestCase):
                 return {"status": "accepted"}
             self.assertTrue(kwargs.get("token_pre_reserved"))
             self.assertEqual(
-                kwargs.get("prepared_proposals", {}).get("STPRNG3:PUT:4.60"),
-                {"proposal_id": "cached", "ask_price": 4.6},
+                kwargs.get("prepared_proposals", {}).get("STPRNG3:CALL:4.00"),
+                {"proposal_id": "cached", "ask_price": 4.0},
             )
             return {"status": "rejected", "reason": "stop"}
 
@@ -2401,7 +2405,7 @@ class MarketDataTests(unittest.TestCase):
                     "currency": "USD",
                     "ws_url": "wss://example.test",
                 },
-                {"STPRNG3:PUT:4.60": {"proposal_id": "cached", "ask_price": 4.6}},
+                {"STPRNG3:CALL:4.00": {"proposal_id": "cached", "ask_price": 4.0}},
             )
             return settlement
 
@@ -6076,12 +6080,12 @@ class MarketDataTests(unittest.TestCase):
         self.assertIn("Data available for 1/5 markets", message)
         self.assertIn("Step 500", message)
 
-    def test_fixed_expiry_is_three_ticks_and_session_target_is_three_cycles(self):
+    def test_fixed_expiry_is_three_ticks_and_session_target_is_ten_cycles(self):
         self.assertEqual(settings.default_expiry_duration, 3)
         self.assertEqual(settings.default_expiry_unit, "t")
-        self.assertEqual(settings.auto_trade_cycles, 3)
-        self.assertEqual(settings.auto_trade_multiplier, 2.3)
-        self.assertEqual(settings.martingale_multiplier, 2.3)
+        self.assertEqual(settings.auto_trade_cycles, 10)
+        self.assertEqual(settings.auto_trade_multiplier, 2.0)
+        self.assertEqual(settings.martingale_multiplier, 2.0)
         payload = TradeExecutionService.build_proposal_payload(
             "step_300",
             "BULLISH",
@@ -6104,12 +6108,12 @@ class MarketDataTests(unittest.TestCase):
                 expiry_unit="s",
             )
         run = AutoTradeService().start_run(
-            "three-cycle-default-user",
+            "ten-cycle-default-user",
             "step_300",
             "BULLISH",
             1.0,
         )
-        self.assertEqual(run.max_cycles, 3)
+        self.assertEqual(run.max_cycles, 10)
         self.assertEqual(run.expiry_duration, 3)
         self.assertEqual(run.expiry_unit, "t")
         with self.assertRaisesRegex(ValueError, "YIELDS_EXPIRY_MUST_BE_3_TICKS"):
@@ -6166,8 +6170,9 @@ class MarketDataTests(unittest.TestCase):
             profit=-relative_stake,
         )
         self.assertEqual(state.status, "running")
-        self.assertEqual(state.current_stake, round(relative_stake * 2.3, 2))
-        self.assertEqual(state.direction, "BEARISH")
+        self.assertEqual(state.current_stake, round(relative_stake * 2.0, 2))
+        self.assertEqual(state.direction, "BULLISH")
+        self.assertEqual(state.initial_direction_losses, 1)
         self.assertEqual(state.consecutive_losses, 1)
 
         state = service.advance_after_result(
@@ -6175,8 +6180,25 @@ class MarketDataTests(unittest.TestCase):
             won=False,
             profit=-state.current_stake,
         )
+        self.assertEqual(state.direction, "BEARISH")
+        self.assertEqual(state.initial_direction_losses, 0)
+        self.assertEqual(state.current_stake, round(relative_stake * 2.0**2, 2))
+
+        state = service.advance_after_result(
+            "martingale-user",
+            won=False,
+            profit=-state.current_stake,
+        )
         self.assertEqual(state.direction, "BULLISH")
-        self.assertEqual(state.current_stake, round(relative_stake * 2.3**2, 2))
+        self.assertEqual(state.initial_direction_losses, 0)
+
+        state = service.advance_after_result(
+            "martingale-user",
+            won=False,
+            profit=-state.current_stake,
+        )
+        self.assertEqual(state.direction, "BULLISH")
+        self.assertEqual(state.initial_direction_losses, 1)
 
         state = service.advance_after_result(
             "martingale-user",
@@ -6184,8 +6206,43 @@ class MarketDataTests(unittest.TestCase):
             profit=1.0,
         )
         self.assertEqual(state.direction, "BULLISH")
+        self.assertEqual(state.initial_direction_losses, 0)
         self.assertEqual(state.current_stake, relative_stake)
         self.assertEqual(state.consecutive_losses, 0)
+
+    def test_recovery_win_resets_direction_and_loss_cadence(self):
+        service = AutoTradeService()
+        state = service.start_run(
+            "direction-reset-user",
+            "step_300",
+            "BULLISH",
+            10.0,
+        )
+
+        state = service.advance_after_result(
+            "direction-reset-user",
+            won=False,
+            profit=-10.0,
+        )
+        self.assertEqual(state.direction, "BULLISH")
+        self.assertEqual(state.initial_direction_losses, 1)
+
+        state = service.advance_after_result(
+            "direction-reset-user",
+            won=False,
+            profit=-20.0,
+        )
+        self.assertEqual(state.direction, "BEARISH")
+
+        state = service.advance_after_result(
+            "direction-reset-user",
+            won=True,
+            profit=1.0,
+        )
+        self.assertEqual(state.direction, "BULLISH")
+        self.assertEqual(state.initial_direction_losses, 0)
+        self.assertEqual(state.consecutive_losses, 0)
+        self.assertEqual(state.current_stake, 10.0)
 
     def test_duplicate_auto_trade_start_is_rejected(self):
         service = AutoTradeService()
