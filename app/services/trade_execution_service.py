@@ -76,6 +76,13 @@ class TradeExecutionService:
         raise ValueError(f"UNSUPPORTED_STEP_MARKET:{symbol}")
 
     @staticmethod
+    def normalize_accumulator_symbol(symbol: str) -> str:
+        normalized = str(symbol or "").strip().upper()
+        if normalized != "R_10":
+            raise ValueError("ACCUMULATOR_MUST_USE_R_10")
+        return normalized
+
+    @staticmethod
     def resolve_contract_type(direction: str) -> str:
         normalized = str(direction or "").strip().upper()
 
@@ -128,6 +135,9 @@ class TradeExecutionService:
             if normalized and normalized not in seen:
                 seen.add(normalized)
                 candidates.append(normalized)
+
+        if str(symbol or "").strip().upper() == "R_10":
+            return ["R_10"]
 
         try:
             add(cls.normalize_step_symbol(symbol))
@@ -211,7 +221,11 @@ class TradeExecutionService:
                 else cls.resolve_contract_type(direction)
             ),
             "currency": str(currency or "USD").upper(),
-            "underlying_symbol": cls.normalize_step_symbol(symbol),
+            "underlying_symbol": (
+                cls.normalize_accumulator_symbol(symbol)
+                if contract_mode == "accumulator"
+                else cls.normalize_step_symbol(symbol)
+            ),
             "req_id": cls.next_req_id(),
         }
         if contract_mode == "accumulator":
@@ -578,14 +592,15 @@ class TradeExecutionService:
                     "MISSING_AUTHENTICATED_WS_URL"
                 )
 
-            symbol = self.normalize_step_symbol(
-                market_symbol
-            )
-
             contract_type = (
                 "ACCU"
                 if contract_mode == "accumulator"
                 else self.resolve_contract_type(direction)
+            )
+            symbol = (
+                self.normalize_accumulator_symbol(market_symbol)
+                if contract_mode == "accumulator"
+                else self.normalize_step_symbol(market_symbol)
             )
 
             amount = self.validate_stake(stake)

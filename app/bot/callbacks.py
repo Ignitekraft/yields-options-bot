@@ -1016,7 +1016,11 @@ async def execute_trade(
 
         result = await trade_execution_service.execute_trade(
             user_id=user_id,
-            market_symbol=state.symbol,
+            market_symbol=(
+                "R_10"
+                if state.contract_mode == "accumulator"
+                else state.symbol
+            ),
             direction=state.direction,
             stake=state.current_stake,
             account_id=account_id,
@@ -1984,7 +1988,11 @@ async def _run_auto_trade_loop(update, state) -> None:
 
             preload_proposals = [
                 {
-                    "symbol": current.market_symbol or current.symbol,
+                    "symbol": (
+                        "R_10"
+                        if contract_mode == "accumulator"
+                        else current.market_symbol or current.symbol
+                    ),
                     "direction": direction,
                     "stake": stake,
                     "currency": current.currency,
@@ -2003,7 +2011,7 @@ async def _run_auto_trade_loop(update, state) -> None:
                             * settings.auto_trade_recovery_stake_multiplier,
                             2,
                         ),
-                        current.contract_mode,
+                        "accumulator",
                     ),
                 )
             ]
