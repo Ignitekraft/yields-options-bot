@@ -205,19 +205,6 @@ class TradeExecutionService:
         subscribe: bool = True,
         contract_mode: str = "rise_fall",
     ) -> dict[str, Any]:
-        expected_expiry_unit = (
-            settings.auto_trade_accumulator_duration_unit
-            if contract_mode == "accumulator"
-            else settings.default_expiry_unit
-        )
-        normalized_expiry_unit = str(
-            expiry_unit or expected_expiry_unit
-        ).strip().lower()
-        if normalized_expiry_unit != expected_expiry_unit:
-            raise ValueError(
-                "YIELDS_EXPIRY_UNIT_MUST_BE_"
-                f"{expected_expiry_unit.upper()}"
-            )
         payload = {
             "proposal": 1,
             "amount": cls.validate_stake(stake),
@@ -236,13 +223,21 @@ class TradeExecutionService:
             "req_id": cls.next_req_id(),
         }
         if contract_mode == "accumulator":
-            payload["duration"] = int(settings.auto_trade_accumulator_duration)
-            payload["duration_unit"] = normalized_expiry_unit
-            payload["growth_rate"] = float(settings.auto_trade_accumulator_growth_rate)
+            payload["growth_rate"] = (
+                float(settings.auto_trade_accumulator_growth_rate) / 100
+            )
             payload["limit_order"] = {
                 "take_profit": float(settings.auto_trade_accumulator_take_profit),
             }
         else:
+            normalized_expiry_unit = str(
+                expiry_unit or settings.default_expiry_unit
+            ).strip().lower()
+            if normalized_expiry_unit != settings.default_expiry_unit:
+                raise ValueError(
+                    "YIELDS_EXPIRY_UNIT_MUST_BE_"
+                    f"{settings.default_expiry_unit.upper()}"
+                )
             payload["duration"] = cls.validate_expiry_duration(expiry_duration)
             payload["duration_unit"] = normalized_expiry_unit
         if subscribe:
@@ -613,16 +608,10 @@ class TradeExecutionService:
             )
 
             amount = self.validate_stake(stake)
-            expiry_duration = (
-                settings.auto_trade_accumulator_duration
-                if contract_mode == "accumulator"
-                else self.validate_expiry_duration(settings.default_expiry_duration)
+            expiry_duration = self.validate_expiry_duration(
+                settings.default_expiry_duration
             )
-            expiry_unit = (
-                settings.auto_trade_accumulator_duration_unit
-                if contract_mode == "accumulator"
-                else settings.default_expiry_unit
-            )
+            expiry_unit = settings.default_expiry_unit
 
         except ValueError as exc:
             return {
@@ -858,19 +847,11 @@ class TradeExecutionService:
                         stake=float(preload["stake"]),
                         expiry_duration=int(
                             preload.get("expiry_duration")
-                            or (
-                                settings.auto_trade_accumulator_duration
-                                if preload.get("contract_mode") == "accumulator"
-                                else settings.default_expiry_duration
-                            )
+                            or settings.default_expiry_duration
                         ),
                         expiry_unit=str(
                             preload.get("expiry_unit")
-                            or (
-                                settings.auto_trade_accumulator_duration_unit
-                                if preload.get("contract_mode") == "accumulator"
-                                else settings.default_expiry_unit
-                            )
+                            or settings.default_expiry_unit
                         ),
                         currency=str(preload.get("currency") or "USD"),
                         subscribe=True,

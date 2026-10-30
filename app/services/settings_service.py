@@ -17,7 +17,5 @@ class SettingsService:
             "recovery_stake_multiplier": settings.auto_trade_recovery_stake_multiplier,
             "accumulator_growth_rate": settings.auto_trade_accumulator_growth_rate,
             "accumulator_take_profit": settings.auto_trade_accumulator_take_profit,
-            "accumulator_duration": settings.auto_trade_accumulator_duration,
-            "accumulator_duration_unit": settings.auto_trade_accumulator_duration_unit,
             "minimum_real_trade_balance": settings.minimum_real_trade_balance,
         }

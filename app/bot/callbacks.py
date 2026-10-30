@@ -2003,14 +2003,10 @@ async def _run_auto_trade_loop(update, state) -> None:
                     "currency": current.currency,
                     "contract_mode": contract_mode,
                     "expiry_duration": (
-                        settings.auto_trade_accumulator_duration
-                        if contract_mode == "accumulator"
-                        else settings.default_expiry_duration
+                        settings.default_expiry_duration
                     ),
                     "expiry_unit": (
-                        settings.auto_trade_accumulator_duration_unit
-                        if contract_mode == "accumulator"
-                        else settings.default_expiry_unit
+                        settings.default_expiry_unit
                     ),
                 }
                 for direction, stake, contract_mode in (

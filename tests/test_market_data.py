@@ -6139,6 +6139,27 @@ class MarketDataTests(unittest.TestCase):
         self.assertEqual(payload["duration"], 3)
         self.assertEqual(payload["duration_unit"], "t")
 
+    def test_accumulator_proposal_omits_expiry_fields(self):
+        payload = TradeExecutionService.build_proposal_payload(
+            "R_10",
+            "BUY",
+            20.30,
+            contract_mode="accumulator",
+        )
+
+        self.assertEqual(payload["proposal"], 1)
+        self.assertEqual(payload["amount"], 20.3)
+        self.assertEqual(payload["basis"], "stake")
+        self.assertEqual(payload["contract_type"], "ACCU")
+        self.assertEqual(payload["currency"], "USD")
+        self.assertEqual(payload["underlying_symbol"], "R_10")
+        self.assertEqual(payload["growth_rate"], 0.02)
+        self.assertEqual(payload["limit_order"], {"take_profit": 0.01})
+        self.assertEqual(payload["subscribe"], 1)
+        self.assertIsInstance(payload["req_id"], int)
+        self.assertNotIn("duration", payload)
+        self.assertNotIn("duration_unit", payload)
+
     def test_bearish_direction_maps_to_put(self):
         payload = TradeExecutionService.build_proposal_payload(
             "step_300",
