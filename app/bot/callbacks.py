@@ -1478,16 +1478,21 @@ def _auto_trade_failure_message(
             "trying again."
         )
 
-    error_details = f"{deriv_error_code or ''} {reason}".lower()
-    if "contractbuyvalidationerror" in error_details and "maximum payout" in error_details:
+    raw_error = str(reason or "").strip()
+    if raw_error:
+        code = str(deriv_error_code or "").strip()
+        if code and code.lower() not in raw_error.lower():
+            details = f"{code}: {raw_error}"
+        else:
+            details = raw_error
         return (
-            "Deriv's maximum payout would be exceeded for this trade. "
-            "Please choose a lower stake or a different setup."
+            "Deriv rejected this trade: "
+            f"{details}. Auto Trade stopped safely."
         )
-    if re.search(r"rate.?limit|too many requests|http\s*429", error_details):
+    if deriv_error_code:
         return (
-            "Deriv is temporarily limiting requests. Auto Trade stopped safely. "
-            "Please wait a little before starting another session."
+            f"Deriv rejected this trade ({deriv_error_code}). "
+            "Auto Trade stopped safely."
         )
     return (
         "Deriv couldn't place the next trade, so Auto Trade stopped safely. "

@@ -145,7 +145,7 @@ class MarketDataTests(unittest.TestCase):
         self.rate_limiter_patch.start()
         self.addCleanup(self.rate_limiter_patch.stop)
 
-    def test_auto_trade_failure_messages_are_user_friendly(self):
+    def test_auto_trade_failure_messages_surface_deriv_error_details(self):
         rate_limit_message = _auto_trade_failure_message(
             "rejected",
             "RateLimit: Too many requests",
@@ -160,11 +160,10 @@ class MarketDataTests(unittest.TestCase):
             "INVALID_CONTRACT_SPECIFICATION",
         )
 
-        self.assertIn("temporarily limiting requests", rate_limit_message)
-        self.assertNotIn("RateLimit", rate_limit_message)
-        self.assertIn("maximum payout", payout_message)
-        self.assertNotIn("ContractBuyValidationError", payout_message)
-        self.assertNotIn("INVALID_CONTRACT_SPECIFICATION", generic_message)
+        self.assertIn("RateLimit: Too many requests", rate_limit_message)
+        self.assertIn("maximum payout exceeded", payout_message)
+        self.assertIn("ContractBuyValidationError", payout_message)
+        self.assertIn("INVALID_CONTRACT_SPECIFICATION", generic_message)
         self.assertIn("stopped safely", generic_message)
 
     def test_auto_trade_start_failure_messages_hide_internal_codes(self):
