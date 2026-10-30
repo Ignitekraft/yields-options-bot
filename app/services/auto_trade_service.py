@@ -9,8 +9,7 @@ from typing import Any
 from app.config import settings
 
 AUTO_TRADE_STALE_SECONDS = int(getattr(settings, "auto_trade_stale_seconds", 1800))
-MAX_CONSECUTIVE_LOSSES = 5
-INITIAL_DIRECTION_LOSSES_BEFORE_SWITCH = 2
+MAX_CONSECUTIVE_LOSSES = 1
 
 
 def opposite_direction(direction: str) -> str:
@@ -74,6 +73,9 @@ class TradeRunState:
     contract_type: str | None = None
     last_result: str | None = None
     last_profit: float = 0.0
+    contract_mode: str = "rise_fall"
+    profit_target: float = 0.0
+    recovery_attempted: bool = False
 
 
 class AutoTradeService:
@@ -200,6 +202,10 @@ class AutoTradeService:
                 max_cycles=int(max_cycles),
                 status="awaiting_confirmation",
                 account_mode=mode,
+                profit_target=round(
+                    stake * float(settings.auto_trade_profit_target_multiplier),
+                    2,
+                ),
             )
             self._runs[key] = state
             return state
@@ -277,6 +283,28 @@ class AutoTradeService:
             state.last_profit = settled_profit
             state.last_result = "won" if won else "lost"
 
+            if won and state.contract_mode == "accumulator":
+                state.wins += 1
+                state.contract_mode = "rise_fall"
+                state.current_stake = state.base_stake
+                state.martingale_step = 1
+                state.consecutive_losses = 0
+                if state.total_profit_loss >= state.profit_target:
+                    state.status = "completed"
+                    state.completed_at = _now()
+                    self._executing.discard(key)
+                    return state
+                state.status = "running"
+                self._executing.discard(key)
+                return state
+
+            if not won and state.contract_mode == "accumulator":
+                state.losses += 1
+                state.status = "recovery_failed"
+                state.completed_at = _now()
+                self._executing.discard(key)
+                return state
+
             if won:
                 state.wins += 1
                 state.consecutive_losses = 0
@@ -285,7 +313,7 @@ class AutoTradeService:
                 state.direction = state.original_direction or state.direction
                 state.initial_direction_losses = 0
 
-                if state.cycle >= state.max_cycles:
+                if state.total_profit_loss >= state.profit_target:
                     state.status = "completed"
                     state.completed_at = _now()
                     self._executing.discard(key)
@@ -298,33 +326,14 @@ class AutoTradeService:
 
             state.losses += 1
             state.consecutive_losses += 1
-            if state.consecutive_losses >= MAX_CONSECUTIVE_LOSSES:
-                state.status = "stopped_consecutive_losses"
-                state.completed_at = _now()
-                self._executing.discard(key)
-                return state
-
-            state.martingale_step += 1
-            original_direction = state.original_direction or state.direction
-            previous_direction = state.direction
-            state.direction = next_direction_after_loss(
-                previous_direction,
-                original_direction,
-                state.initial_direction_losses,
-            )
-            if (
-                previous_direction == original_direction
-                and state.direction == original_direction
-            ):
-                state.initial_direction_losses += 1
-            else:
-                state.initial_direction_losses = 0
-
-            multiplier = float(getattr(settings, "martingale_multiplier", 2.0))
+            state.recovery_attempted = True
+            state.contract_mode = "accumulator"
             state.current_stake = round(
-                state.current_stake * multiplier,
+                state.base_stake
+                * float(settings.auto_trade_recovery_stake_multiplier),
                 2,
             )
+            state.martingale_step += 1
             state.status = "running"
             self._executing.discard(key)
             return state

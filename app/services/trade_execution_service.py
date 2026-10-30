@@ -193,6 +193,7 @@ class TradeExecutionService:
         expiry_unit: str = settings.default_expiry_unit,
         currency: str = "USD",
         subscribe: bool = True,
+        contract_mode: str = "rise_fall",
     ) -> dict[str, Any]:
         normalized_expiry_unit = str(expiry_unit or "").strip().lower()
         if normalized_expiry_unit != settings.default_expiry_unit:
@@ -204,13 +205,23 @@ class TradeExecutionService:
             "proposal": 1,
             "amount": cls.validate_stake(stake),
             "basis": "stake",
-            "contract_type": cls.resolve_contract_type(direction),
+            "contract_type": (
+                "ACCU"
+                if contract_mode == "accumulator"
+                else cls.resolve_contract_type(direction)
+            ),
             "currency": str(currency or "USD").upper(),
-            "duration": cls.validate_expiry_duration(expiry_duration),
-            "duration_unit": normalized_expiry_unit,
             "underlying_symbol": cls.normalize_step_symbol(symbol),
             "req_id": cls.next_req_id(),
         }
+        if contract_mode == "accumulator":
+            payload["growth_rate"] = float(settings.auto_trade_accumulator_growth_rate)
+            payload["limit_order"] = {
+                "take_profit": float(settings.auto_trade_accumulator_take_profit),
+            }
+        else:
+            payload["duration"] = cls.validate_expiry_duration(expiry_duration)
+            payload["duration_unit"] = normalized_expiry_unit
         if subscribe:
             payload["subscribe"] = 1
         return payload
@@ -343,6 +354,7 @@ class TradeExecutionService:
         expiry_unit: str,
         currency: str,
         subscribe: bool = True,
+        contract_mode: str = "rise_fall",
     ) -> dict[str, Any]:
         payload = cls.build_proposal_payload(
             symbol=symbol,
@@ -352,6 +364,7 @@ class TradeExecutionService:
             expiry_unit=expiry_unit,
             currency=currency,
             subscribe=subscribe,
+            contract_mode=contract_mode,
         )
 
         response = await cls._request(
@@ -535,6 +548,7 @@ class TradeExecutionService:
         account_type: str | None = None,
         websocket: Any | None = None,
         prepared_proposals: dict[str, dict[str, Any]] | None = None,
+        contract_mode: str = "rise_fall",
     ) -> dict[str, Any]:
         """Place one Rise/Fall contract on the selected account."""
 
@@ -568,13 +582,17 @@ class TradeExecutionService:
                 market_symbol
             )
 
-            contract_type = self.resolve_contract_type(
-                direction
+            contract_type = (
+                "ACCU"
+                if contract_mode == "accumulator"
+                else self.resolve_contract_type(direction)
             )
 
             amount = self.validate_stake(stake)
-            expiry_duration = self.validate_expiry_duration(
-                settings.default_expiry_duration
+            expiry_duration = (
+                None
+                if contract_mode == "accumulator"
+                else self.validate_expiry_duration(settings.default_expiry_duration)
             )
 
         except ValueError as exc:
@@ -606,10 +624,11 @@ class TradeExecutionService:
                                 symbol=candidate_symbol,
                                 direction=contract_type,
                                 stake=amount,
-                                expiry_duration=expiry_duration,
+                                    expiry_duration=expiry_duration or settings.default_expiry_duration,
                                 expiry_unit=settings.default_expiry_unit,
                                 currency=currency,
                                 subscribe=not reuse_websocket,
+                                    contract_mode=contract_mode,
                             )
                         else:
                             logger.info(
@@ -638,10 +657,11 @@ class TradeExecutionService:
                                     symbol=candidate_symbol,
                                     direction=contract_type,
                                     stake=amount,
-                                    expiry_duration=expiry_duration,
+                                    expiry_duration=expiry_duration or settings.default_expiry_duration,
                                     expiry_unit=settings.default_expiry_unit,
                                     currency=currency,
                                     subscribe=not reuse_websocket,
+                                    contract_mode=contract_mode,
                                 )
                             )
 
@@ -663,6 +683,7 @@ class TradeExecutionService:
                             "stake": amount,
                             "expiry_duration": expiry_duration,
                             "expiry_unit": settings.default_expiry_unit,
+                            "contract_mode": contract_mode,
                             "proposal_id": proposal_id,
                             "contract_id": buy[
                                 "contract_id"
@@ -810,6 +831,7 @@ class TradeExecutionService:
                         expiry_unit=settings.default_expiry_unit,
                         currency=str(preload.get("currency") or "USD"),
                         subscribe=True,
+                        contract_mode=str(preload.get("contract_mode") or "rise_fall"),
                     )
                     proposal_request_keys[proposal_payload["req_id"]] = (
                         f"{proposal_payload['underlying_symbol']}:"

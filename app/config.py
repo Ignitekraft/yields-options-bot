@@ -51,11 +51,16 @@ class Settings:
         "step_400",
         "step_500",
     )
-    default_expiry_duration: int = 3
-    default_expiry_unit: str = "t"
-    auto_trade_cycles: int = 10
+    default_expiry_duration: int = 20
+    default_expiry_unit: str = "s"
+    auto_trade_cycles: int = 1
     auto_trade_multiplier: float = 2.0
     martingale_multiplier: float = 2.0
+    auto_trade_profit_target_multiplier: float = 8.6
+    auto_trade_recovery_stake_multiplier: float = 58.0
+    auto_trade_accumulator_growth_rate: float = 2.0
+    auto_trade_accumulator_take_profit: float = 0.01
+    minimum_real_trade_balance: float = 35.0
 
 
 settings = Settings()

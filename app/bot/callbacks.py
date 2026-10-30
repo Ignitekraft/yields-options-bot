@@ -800,10 +800,9 @@ async def handle_chart_screenshot(update, context=None) -> None:
         "(not a win probability)\n"
         f"Reason: {analysis.reasoning}\n\n"
         f"This setup is based on the screenshot for the first "
-        f"{settings.default_expiry_duration}-tick contract only. "
-        f"A {settings.auto_trade_cycles}-win session needs at least "
-        f"{settings.default_expiry_duration * settings.auto_trade_cycles} "
-        "ticks; elapsed time varies with market ticks and losses.\n\n"
+        f"{settings.default_expiry_duration}-second contract only. "
+        "The session runs until its profit target; elapsed time varies "
+        "with market conditions and recovery trades.\n\n"
         "This is an AI interpretation of your screenshot, not a guarantee. "
         "Choose your stake to continue.",
         reply_markup=TelegramKeyboard.stake_keyboard(
@@ -1027,6 +1026,7 @@ async def execute_trade(
             account_type=state.account_mode,
             websocket=websocket,
             prepared_proposals=prepared_proposals,
+            contract_mode=state.contract_mode,
         )
         purchase_confirmed = result.get("status") == "accepted"
         purchase_uncertain = result.get("status") == "unknown_buy_outcome"
@@ -1743,17 +1743,17 @@ async def _run_auto_trade_loop(update, state) -> None:
             f"Direction: {html.escape(record['direction'])}\n"
             f"<pre>{html.escape(step_details)}</pre>"
         )
-        if record["next_status"] == "stopped_consecutive_losses":
+        if record["next_status"] == "recovery_failed":
             result_text += (
-                "\n\n🛑 Auto Trade stopped after "
-                f"{MAX_CONSECUTIVE_LOSSES} consecutive losses. "
-                "No further trade will be placed."
+                "\n\n🛑 Accumulator recovery failed. "
+                "The session ended as a loss."
             )
         elif not record["won"] and record["next_status"] == "running":
             result_text += (
-                "\n\n🔄 Smart Scaling Activated\n"
+                "\n\n🔄 Accumulator recovery activated\n"
                 f"Next stake: ${record['next_stake']:.2f}\n"
-                f"Next direction: {record['next_direction']}"
+                f"Growth rate: {settings.auto_trade_accumulator_growth_rate:g}%\n"
+                f"Take profit: ${settings.auto_trade_accumulator_take_profit:.2f}"
             )
         elif record["won"]:
             result_text += "\n\n✅ Cycle completed."
@@ -1886,7 +1886,7 @@ async def _run_auto_trade_loop(update, state) -> None:
         if current.status not in {"running", "monitoring"}:
             await refund_unused_token_reservation()
             await flush_pending_settlement(current)
-            stopped_for_losses = current.status == "stopped_consecutive_losses"
+            stopped_for_losses = current.status == "recovery_failed"
             await _save_session_summary(
                 current,
                 "stopped" if stopped_for_losses else "failed",
@@ -1988,22 +1988,22 @@ async def _run_auto_trade_loop(update, state) -> None:
                     "direction": direction,
                     "stake": stake,
                     "currency": current.currency,
+                    "contract_mode": contract_mode,
                 }
-                for direction, stake in (
+                for direction, stake, contract_mode in (
                     (
                         current.original_direction or current.direction,
                         round(current.base_stake, 2),
+                        "rise_fall",
                     ),
                     (
-                        next_direction_after_loss(
-                            current.direction,
-                            current.original_direction or current.direction,
-                            current.initial_direction_losses,
-                        ),
+                        current.direction,
                         round(
-                            current.current_stake * settings.martingale_multiplier,
+                            current.base_stake
+                            * settings.auto_trade_recovery_stake_multiplier,
                             2,
                         ),
+                        current.contract_mode,
                     ),
                 )
             ]
@@ -2144,13 +2144,12 @@ async def _run_auto_trade_loop(update, state) -> None:
                 f"Account mode: {current.account_mode.upper()}\n"
                 f"Market: {market_label}\n"
                 f"Direction: {current.direction}\n"
-                f"Target: {current.max_cycles} winning cycles\n"
-                f"Smart Scaling factor: {settings.martingale_multiplier:g}x. "
-                "During a losing streak, it allows two losses on the initial "
-                "direction before switching; an opposite-direction loss "
-                "returns to the initial direction for two more losses. "
-                "Auto Trade stops at its winning-cycle target, after "
-                f"{MAX_CONSECUTIVE_LOSSES} consecutive losses, if "
+                f"Profit target: ${current.profit_target:.2f}\n"
+                f"Recovery: accumulator at {settings.auto_trade_recovery_stake_multiplier:g}x, "
+                f"{settings.auto_trade_accumulator_growth_rate:g}% growth, "
+                f"${settings.auto_trade_accumulator_take_profit:.2f} take profit. "
+                "Auto Trade stops when the target is reached, after a failed "
+                "recovery, if "
                 "balance/tokens run out, "
                 "or if Deriv rejects a trade.",
             )
@@ -2164,8 +2163,7 @@ async def _run_auto_trade_loop(update, state) -> None:
             f"Step {current.martingale_step} — Direction: {current.direction}\n"
             "⏳ Purchased for "
             f"${current.current_stake:.2f}. Waiting for the "
-            f"{current.expiry_duration} "
-            f"{'tick' if current.expiry_unit == 't' and current.expiry_duration == 1 else 'ticks' if current.expiry_unit == 't' else 'seconds'} "
+            f"{current.expiry_duration} seconds "
             "to settle."
         )
         active_pending_step = pending_step
@@ -2220,6 +2218,22 @@ async def _prepare_trade_confirmation(
         await report("⚠️ An Auto Trade run is already active.")
         return False
 
+    if account_mode == "real":
+        try:
+            if float(account_balance) < settings.minimum_real_trade_balance:
+                await report(
+                    "⚠️ Real Auto Trade requires a minimum balance of "
+                    f"${settings.minimum_real_trade_balance:.2f} {currency}. "
+                    "No trade has been placed."
+                )
+                return False
+        except (TypeError, ValueError):
+            await report(
+                "⚠️ Your Real account balance could not be verified. "
+                "No trade has been placed."
+            )
+            return False
+
     try:
         auto_trade_service.start_run(
             user_id=user_id,
@@ -2259,7 +2273,8 @@ async def _prepare_trade_confirmation(
         f"Direction: {setup['direction']}\n"
         "Indicator scan selected this setup; it does not guarantee a win. "
         f"Auto Trade stops after {settings.auto_trade_cycles} winning cycles; "
-        f"it also stops after {MAX_CONSECUTIVE_LOSSES} consecutive losses.\n"
+        f"the profit target is {settings.auto_trade_profit_target_multiplier:g}x "
+        "the initial stake.\n"
         f"Account mode: {account_mode.upper()}\n"
         f"Initial stake: {stake_value:,.2f} {currency}"
         f"{stake_description}\n"
@@ -2267,11 +2282,11 @@ async def _prepare_trade_confirmation(
         f"Expiry: {settings.default_expiry_duration} "
         f"{expiry_unit}\n"
         f"Target: {settings.auto_trade_cycles} winning cycles\n"
-        f"Smart Scaling factor: {settings.martingale_multiplier:g}x. Auto Trade "
-        f"stops after {MAX_CONSECUTIVE_LOSSES} consecutive losses; "
-        "it allows two losses on the initial direction before switching. "
-        "A loss in the opposite direction returns to the initial direction "
-        "for two more losses; a win resets the direction and stake.\n\n"
+        f"After one Rise/Fall loss, one accumulator recovery runs at "
+        f"{settings.auto_trade_recovery_stake_multiplier:g}x stake, "
+        f"{settings.auto_trade_accumulator_growth_rate:g}% growth, and "
+        f"${settings.auto_trade_accumulator_take_profit:.2f} take profit. "
+        "A failed recovery ends the session as a loss.\n\n"
         "Confirm to begin."
     )
     keyboard = TelegramKeyboard.confirmation_keyboard()
@@ -2899,6 +2914,31 @@ async def _dispatch_callback(update, context) -> None:
                     account_mode=state.account_mode,
                 )
                 state.starting_balance = float(selected_account.get("balance"))
+                if (
+                    state.account_mode == "real"
+                    and state.starting_balance < settings.minimum_real_trade_balance
+                ):
+                    await _safe_edit_message(
+                        query,
+                        "⚠️ Real Auto Trade requires a minimum balance of "
+                        f"${settings.minimum_real_trade_balance:.2f} "
+                        f"{state.currency}. No trade has been placed.",
+                    )
+                    return
+            elif state.account_mode == "real":
+                selected_account = await account_service.get_trade_account(
+                    user_id,
+                    account_mode=state.account_mode,
+                )
+                state.starting_balance = float(selected_account.get("balance"))
+                if state.starting_balance < settings.minimum_real_trade_balance:
+                    await _safe_edit_message(
+                        query,
+                        "⚠️ Real Auto Trade requires a minimum balance of "
+                        f"${settings.minimum_real_trade_balance:.2f} "
+                        f"{state.currency}. No trade has been placed.",
+                    )
+                    return
                 refreshed_stake = calculate_relative_stake(
                     selected_account.get("balance"),
                     state.stake_percentage_key,
