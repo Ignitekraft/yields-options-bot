@@ -60,6 +60,8 @@ class Settings:
     auto_trade_recovery_stake_multiplier: float = 58.0
     auto_trade_accumulator_growth_rate: float = 2.0
     auto_trade_accumulator_take_profit: float = 0.01
+    auto_trade_accumulator_duration: int = 100
+    auto_trade_accumulator_duration_unit: str = "t"
     minimum_real_trade_balance: float = 35.0
 
 

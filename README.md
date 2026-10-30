@@ -78,9 +78,9 @@ through confirmation. Rise/Fall contracts expire after 20 seconds. Each
 session runs once until profit reaches 8.6 times the initial stake. The first
 Rise/Fall loss triggers exactly one accumulator buy contract on Volatility 10
 (`R_10`) using 58 times the initial stake, a 2% growth rate, and a $0.01
-take-profit limit. A failed accumulator recovery ends the session as a loss; a
-successful recovery returns to Rise/Fall at the initial stake. After a contract
-is bought, settlement
+take-profit limit over a 100-tick accumulator duration. A failed accumulator
+recovery ends the session as a loss; a successful recovery returns to Rise/Fall
+at the initial stake. After a contract is bought, settlement
 monitoring reconnects with a fresh account URL
 and retries transient errors until Deriv confirms the result; no next contract
 is purchased before that confirmation. This recovery depends on the bot process
