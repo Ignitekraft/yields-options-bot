@@ -6153,12 +6153,47 @@ class MarketDataTests(unittest.TestCase):
         self.assertEqual(payload["contract_type"], "ACCU")
         self.assertEqual(payload["currency"], "USD")
         self.assertEqual(payload["underlying_symbol"], "R_10")
-        self.assertEqual(payload["growth_rate"], 0.02)
+        self.assertEqual(payload["growth_rate"], 0.05)
         self.assertEqual(payload["limit_order"], {"take_profit": 0.01})
         self.assertEqual(payload["subscribe"], 1)
         self.assertIsInstance(payload["req_id"], int)
         self.assertNotIn("duration", payload)
         self.assertNotIn("duration_unit", payload)
+
+    def test_accumulator_recovery_requires_two_wins_before_rise_fall(self):
+        service = AutoTradeService()
+        state = service.start_run("two-accumulator-runs", "step_300", "BULLISH", 2.0)
+
+        state = service.advance_after_result(
+            "two-accumulator-runs", won=False, profit=-2.0
+        )
+        self.assertEqual(state.contract_mode, "accumulator")
+        self.assertEqual(state.current_stake, 20.0)
+        self.assertEqual(state.accumulator_runs, 0)
+
+        state = service.advance_after_result(
+            "two-accumulator-runs", won=True, profit=1.0
+        )
+        self.assertEqual(state.contract_mode, "accumulator")
+        self.assertEqual(state.current_stake, 20.0)
+        self.assertEqual(state.accumulator_runs, 1)
+
+        state = service.advance_after_result(
+            "two-accumulator-runs", won=True, profit=1.0
+        )
+        self.assertEqual(state.contract_mode, "rise_fall")
+        self.assertEqual(state.current_stake, 2.0)
+        self.assertEqual(state.accumulator_runs, 0)
+
+    def test_accumulator_loss_ends_session(self):
+        service = AutoTradeService()
+        service.start_run("accumulator-loss", "step_300", "BULLISH", 2.0)
+        service.advance_after_result("accumulator-loss", won=False, profit=-2.0)
+
+        state = service.advance_after_result(
+            "accumulator-loss", won=False, profit=-20.0
+        )
+        self.assertEqual(state.status, "recovery_failed")
 
     def test_bearish_direction_maps_to_put(self):
         payload = TradeExecutionService.build_proposal_payload(

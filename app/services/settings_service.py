@@ -15,6 +15,7 @@ class SettingsService:
             "expiry_unit": settings.default_expiry_unit,
             "profit_target_multiplier": settings.auto_trade_profit_target_multiplier,
             "recovery_stake_multiplier": settings.auto_trade_recovery_stake_multiplier,
+            "accumulator_runs": settings.auto_trade_accumulator_runs,
             "accumulator_growth_rate": settings.auto_trade_accumulator_growth_rate,
             "accumulator_take_profit": settings.auto_trade_accumulator_take_profit,
             "minimum_real_trade_balance": settings.minimum_real_trade_balance,

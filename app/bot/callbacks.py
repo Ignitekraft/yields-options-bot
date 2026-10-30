@@ -1761,6 +1761,7 @@ async def _run_auto_trade_loop(update, state) -> None:
             result_text += (
                 "\n\n🔄 Accumulator recovery activated\n"
                 f"Next stake: ${record['next_stake']:.2f}\n"
+                f"Runs: {settings.auto_trade_accumulator_runs}\n"
                 f"Growth rate: {settings.auto_trade_accumulator_growth_rate:g}%\n"
                 f"Take profit: ${settings.auto_trade_accumulator_take_profit:.2f}"
             )
@@ -2164,7 +2165,8 @@ async def _run_auto_trade_loop(update, state) -> None:
                 f"Market: {market_label}\n"
                 f"Direction: {current.direction}\n"
                 f"Profit target: ${current.profit_target:.2f}\n"
-                f"Recovery: accumulator at {settings.auto_trade_recovery_stake_multiplier:g}x, "
+                f"Recovery: {settings.auto_trade_accumulator_runs} accumulator runs at "
+                f"{settings.auto_trade_recovery_stake_multiplier:g}x, "
                 f"{settings.auto_trade_accumulator_growth_rate:g}% growth, "
                 f"${settings.auto_trade_accumulator_take_profit:.2f} take profit. "
                 "Auto Trade stops when the target is reached, after a failed "
@@ -2301,7 +2303,8 @@ async def _prepare_trade_confirmation(
         f"Expiry: {settings.default_expiry_duration} "
         f"{expiry_unit}\n"
         f"Target: {settings.auto_trade_cycles} winning cycles\n"
-        f"After one Rise/Fall loss, one accumulator recovery runs at "
+        f"After one Rise/Fall loss, {settings.auto_trade_accumulator_runs} accumulator "
+        f"recovery runs at "
         f"{settings.auto_trade_recovery_stake_multiplier:g}x stake, "
         f"{settings.auto_trade_accumulator_growth_rate:g}% growth, and "
         f"${settings.auto_trade_accumulator_take_profit:.2f} take profit. "
