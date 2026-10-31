@@ -6160,7 +6160,7 @@ class MarketDataTests(unittest.TestCase):
         self.assertNotIn("duration", payload)
         self.assertNotIn("duration_unit", payload)
 
-    def test_accumulator_recovery_requires_two_wins_before_rise_fall(self):
+    def test_accumulator_recovery_runs_twice_then_ends_by_total_profit(self):
         service = AutoTradeService()
         state = service.start_run("two-accumulator-runs", "step_300", "BULLISH", 2.0)
 
@@ -6172,20 +6172,20 @@ class MarketDataTests(unittest.TestCase):
         self.assertEqual(state.accumulator_runs, 0)
 
         state = service.advance_after_result(
-            "two-accumulator-runs", won=True, profit=1.0
+            "two-accumulator-runs", won=True, profit=2.0
         )
+        self.assertEqual(state.status, "running")
         self.assertEqual(state.contract_mode, "accumulator")
         self.assertEqual(state.current_stake, 20.0)
         self.assertEqual(state.accumulator_runs, 1)
 
         state = service.advance_after_result(
-            "two-accumulator-runs", won=True, profit=1.0
+            "two-accumulator-runs", won=True, profit=2.0
         )
-        self.assertEqual(state.contract_mode, "rise_fall")
-        self.assertEqual(state.current_stake, 2.0)
-        self.assertEqual(state.accumulator_runs, 0)
+        self.assertEqual(state.status, "completed")
+        self.assertEqual(state.total_profit_loss, 2.0)
 
-    def test_accumulator_loss_ends_session(self):
+    def test_accumulator_loss_still_allows_second_run(self):
         service = AutoTradeService()
         service.start_run("accumulator-loss", "step_300", "BULLISH", 2.0)
         service.advance_after_result("accumulator-loss", won=False, profit=-2.0)
@@ -6193,7 +6193,14 @@ class MarketDataTests(unittest.TestCase):
         state = service.advance_after_result(
             "accumulator-loss", won=False, profit=-20.0
         )
+        self.assertEqual(state.status, "running")
+        self.assertEqual(state.accumulator_runs, 1)
+
+        state = service.advance_after_result(
+            "accumulator-loss", won=False, profit=-20.0
+        )
         self.assertEqual(state.status, "recovery_failed")
+        self.assertEqual(state.accumulator_runs, 2)
 
     def test_bearish_direction_maps_to_put(self):
         payload = TradeExecutionService.build_proposal_payload(
@@ -6253,7 +6260,7 @@ class MarketDataTests(unittest.TestCase):
             profit=-state.current_stake,
         )
         self.assertEqual(state.direction, "BULLISH")
-        self.assertEqual(state.initial_direction_losses, 1)
+        self.assertEqual(state.initial_direction_losses, 0)
 
         state = service.advance_after_result(
             "martingale-user",
@@ -6265,39 +6272,38 @@ class MarketDataTests(unittest.TestCase):
         self.assertEqual(state.current_stake, relative_stake)
         self.assertEqual(state.consecutive_losses, 0)
 
-    def test_recovery_win_resets_direction_and_loss_cadence(self):
+    def test_accumulator_recovery_ends_after_two_runs(self):
         service = AutoTradeService()
         state = service.start_run(
-            "direction-reset-user",
+            "accumulator-terminal-user",
             "step_300",
             "BULLISH",
             10.0,
         )
 
         state = service.advance_after_result(
-            "direction-reset-user",
+            "accumulator-terminal-user",
             won=False,
             profit=-10.0,
         )
         self.assertEqual(state.direction, "BULLISH")
-        self.assertEqual(state.initial_direction_losses, 1)
-
-        state = service.advance_after_result(
-            "direction-reset-user",
-            won=False,
-            profit=-20.0,
-        )
-        self.assertEqual(state.direction, "BEARISH")
-
-        state = service.advance_after_result(
-            "direction-reset-user",
-            won=True,
-            profit=1.0,
-        )
-        self.assertEqual(state.direction, "BULLISH")
         self.assertEqual(state.initial_direction_losses, 0)
-        self.assertEqual(state.consecutive_losses, 0)
-        self.assertEqual(state.current_stake, 10.0)
+
+        state = service.advance_after_result(
+            "accumulator-terminal-user",
+            won=True,
+            profit=100.0,
+        )
+        self.assertEqual(state.status, "running")
+        self.assertEqual(state.accumulator_runs, 1)
+
+        state = service.advance_after_result(
+            "accumulator-terminal-user",
+            won=True,
+            profit=100.0,
+        )
+        self.assertEqual(state.status, "completed")
+        self.assertEqual(state.accumulator_runs, 2)
 
     def test_duplicate_auto_trade_start_is_rejected(self):
         service = AutoTradeService()

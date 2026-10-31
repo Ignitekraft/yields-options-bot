@@ -284,33 +284,28 @@ class AutoTradeService:
             state.last_profit = settled_profit
             state.last_result = "won" if won else "lost"
 
-            if won and state.contract_mode == "accumulator":
-                state.wins += 1
-                state.accumulator_runs += 1
-                if state.total_profit_loss >= state.profit_target:
-                    state.status = "completed"
-                    state.completed_at = _now()
-                    self._executing.discard(key)
-                    return state
-                if state.accumulator_runs >= settings.auto_trade_accumulator_runs:
-                    state.contract_mode = "rise_fall"
-                    state.accumulator_runs = 0
-                    state.current_stake = state.base_stake
-                    state.martingale_step = 1
-                    state.consecutive_losses = 0
+            if state.contract_mode == "accumulator":
+                if won:
+                    state.wins += 1
                 else:
+                    state.losses += 1
+                state.accumulator_runs += 1
+
+                if state.accumulator_runs < settings.auto_trade_accumulator_runs:
                     state.current_stake = round(
                         state.base_stake
                         * float(settings.auto_trade_recovery_stake_multiplier),
                         2,
                     )
-                state.status = "running"
-                self._executing.discard(key)
-                return state
+                    state.status = "running"
+                    self._executing.discard(key)
+                    return state
 
-            if not won and state.contract_mode == "accumulator":
-                state.losses += 1
-                state.status = "recovery_failed"
+                state.status = (
+                    "completed"
+                    if state.total_profit_loss > 0
+                    else "recovery_failed"
+                )
                 state.completed_at = _now()
                 self._executing.discard(key)
                 return state

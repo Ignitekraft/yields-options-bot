@@ -1754,8 +1754,13 @@ async def _run_auto_trade_loop(update, state) -> None:
         )
         if record["next_status"] == "recovery_failed":
             result_text += (
-                "\n\n🛑 Accumulator recovery failed. "
-                "The session ended as a loss."
+                "\n\n🛑 Accumulator recovery completed with a negative "
+                "session result. The session ended as a loss."
+            )
+        elif record["next_status"] == "completed" and current.contract_mode == "accumulator":
+            result_text += (
+                "\n\n✅ Accumulator recovery completed with a positive "
+                "session result. The session ended in profit."
             )
         elif not record["won"] and record["next_status"] == "running":
             result_text += (
@@ -2308,7 +2313,8 @@ async def _prepare_trade_confirmation(
         f"{settings.auto_trade_recovery_stake_multiplier:g}x stake, "
         f"{settings.auto_trade_accumulator_growth_rate:g}% growth, and "
         f"${settings.auto_trade_accumulator_take_profit:.2f} take profit. "
-        "A failed recovery ends the session as a loss.\n\n"
+        "After both accumulator runs settle, the session ends in profit "
+        "if cumulative profit is positive, otherwise it ends as a loss.\n\n"
         "Confirm to begin."
     )
     keyboard = TelegramKeyboard.confirmation_keyboard()
