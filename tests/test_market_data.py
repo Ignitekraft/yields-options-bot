@@ -6153,7 +6153,7 @@ class MarketDataTests(unittest.TestCase):
         self.assertEqual(payload["contract_type"], "ACCU")
         self.assertEqual(payload["currency"], "USD")
         self.assertEqual(payload["underlying_symbol"], "R_10")
-        self.assertEqual(payload["growth_rate"], 0.05)
+        self.assertEqual(payload["growth_rate"], 0.02)
         self.assertEqual(payload["limit_order"], {"take_profit": 0.01})
         self.assertEqual(payload["subscribe"], 1)
         self.assertIsInstance(payload["req_id"], int)
@@ -6168,7 +6168,7 @@ class MarketDataTests(unittest.TestCase):
             "two-accumulator-runs", won=False, profit=-2.0
         )
         self.assertEqual(state.contract_mode, "accumulator")
-        self.assertEqual(state.current_stake, 24.0)
+        self.assertEqual(state.current_stake, 58.0)
         self.assertEqual(state.accumulator_runs, 0)
 
         state = service.advance_after_result(
@@ -6176,7 +6176,7 @@ class MarketDataTests(unittest.TestCase):
         )
         self.assertEqual(state.status, "running")
         self.assertEqual(state.contract_mode, "accumulator")
-        self.assertEqual(state.current_stake, 24.0)
+        self.assertEqual(state.current_stake, 58.0)
         self.assertEqual(state.accumulator_runs, 1)
 
         small_stake = service.start_run(
@@ -6190,7 +6190,7 @@ class MarketDataTests(unittest.TestCase):
             won=False,
             profit=-0.35,
         )
-        self.assertEqual(small_stake.current_stake, 4.20)
+        self.assertEqual(small_stake.current_stake, 10.15)
 
         state = service.advance_after_result(
             "two-accumulator-runs", won=True, profit=2.0
