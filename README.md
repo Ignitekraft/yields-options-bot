@@ -75,7 +75,7 @@ $0.35, no more than 1% of the selected account balance, and have no more than
 two decimal places. Real Auto Trade requires at least $5 in the selected
 real account. The selected market and direction remain pinned from analysis
 through confirmation. Rise/Fall contracts expire after 20 seconds. Each
-session runs once until profit reaches 14.5 times the initial stake. The first
+session runs once until profit reaches 9.6 times the initial stake. The first
 Rise/Fall loss triggers two accumulator buy contracts on Volatility 10
 (`R_10`) using 10 times the initial stake, a 5% growth rate, and a $0.01
 take-profit limit. Accumulators have no user-supplied duration; Deriv determines

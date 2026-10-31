@@ -1763,13 +1763,7 @@ async def _run_auto_trade_loop(update, state) -> None:
                 "session result. The session ended in profit."
             )
         elif not record["won"] and record["next_status"] == "running":
-            result_text += (
-                "\n\n🔄 Accumulator recovery activated\n"
-                f"Next stake: ${record['next_stake']:.2f}\n"
-                f"Runs: {settings.auto_trade_accumulator_runs}\n"
-                f"Growth rate: {settings.auto_trade_accumulator_growth_rate:g}%\n"
-                f"Take profit: ${settings.auto_trade_accumulator_take_profit:.2f}"
-            )
+            result_text += "\n\n🔄 Recovery activated."
         elif record["won"]:
             result_text += "\n\n✅ Cycle completed."
             if record["direction"] != record["next_direction"]:
@@ -2168,12 +2162,6 @@ async def _run_auto_trade_loop(update, state) -> None:
                 "🤖 AUTO TRADE RUNNING\n\n"
                 f"Account mode: {current.account_mode.upper()}\n"
                 f"Market: {market_label}\n"
-                f"Direction: {current.direction}\n"
-                f"Profit target: ${current.profit_target:.2f}\n"
-                f"Recovery: {settings.auto_trade_accumulator_runs} accumulator runs at "
-                f"{settings.auto_trade_recovery_stake_multiplier:g}x, "
-                f"{settings.auto_trade_accumulator_growth_rate:g}% growth, "
-                f"${settings.auto_trade_accumulator_take_profit:.2f} take profit. "
                 "Auto Trade stops when the target is reached, after a failed "
                 "recovery, if "
                 "balance/tokens run out, "
@@ -2285,36 +2273,14 @@ async def _prepare_trade_confirmation(
         )
         return False
 
-    expiry_unit = (
-        "tick"
-        if settings.default_expiry_unit == "t"
-        and settings.default_expiry_duration == 1
-        else "ticks"
-        if settings.default_expiry_unit == "t"
-        else "seconds"
-    )
     confirmation = (
         "⚡ TRADE CONFIRMATION\n\n"
         f"Market: {setup.get('display_name', setup['symbol'])}\n"
         f"Direction: {setup['direction']}\n"
-        "Indicator scan selected this setup; it does not guarantee a win. "
-        f"Auto Trade stops after {settings.auto_trade_cycles} winning cycles; "
-        f"the profit target is {settings.auto_trade_profit_target_multiplier:g}x "
-        "the initial stake.\n"
         f"Account mode: {account_mode.upper()}\n"
         f"Initial stake: {stake_value:,.2f} {currency}"
         f"{stake_description}\n"
-        f"Available tokens: {token_balance}\n"
-        f"Expiry: {settings.default_expiry_duration} "
-        f"{expiry_unit}\n"
-        f"Target: {settings.auto_trade_cycles} winning cycles\n"
-        f"After one Rise/Fall loss, {settings.auto_trade_accumulator_runs} accumulator "
-        f"recovery runs at "
-        f"{settings.auto_trade_recovery_stake_multiplier:g}x stake, "
-        f"{settings.auto_trade_accumulator_growth_rate:g}% growth, and "
-        f"${settings.auto_trade_accumulator_take_profit:.2f} take profit. "
-        "After both accumulator runs settle, the session ends in profit "
-        "if cumulative profit is positive, otherwise it ends as a loss.\n\n"
+        f"Available tokens: {token_balance}\n\n"
         "Confirm to begin."
     )
     keyboard = TelegramKeyboard.confirmation_keyboard()
