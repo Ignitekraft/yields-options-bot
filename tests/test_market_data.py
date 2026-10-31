@@ -6160,7 +6160,7 @@ class MarketDataTests(unittest.TestCase):
         self.assertNotIn("duration", payload)
         self.assertNotIn("duration_unit", payload)
 
-    def test_accumulator_recovery_runs_twice_then_ends_by_total_profit(self):
+    def test_accumulator_recovery_runs_twice_then_returns_to_rise_fall(self):
         service = AutoTradeService()
         state = service.start_run("two-accumulator-runs", "step_300", "BULLISH", 2.0)
 
@@ -6168,7 +6168,7 @@ class MarketDataTests(unittest.TestCase):
             "two-accumulator-runs", won=False, profit=-2.0
         )
         self.assertEqual(state.contract_mode, "accumulator")
-        self.assertEqual(state.current_stake, 20.0)
+        self.assertEqual(state.current_stake, 24.0)
         self.assertEqual(state.accumulator_runs, 0)
 
         state = service.advance_after_result(
@@ -6176,13 +6176,29 @@ class MarketDataTests(unittest.TestCase):
         )
         self.assertEqual(state.status, "running")
         self.assertEqual(state.contract_mode, "accumulator")
-        self.assertEqual(state.current_stake, 20.0)
+        self.assertEqual(state.current_stake, 24.0)
         self.assertEqual(state.accumulator_runs, 1)
+
+        small_stake = service.start_run(
+            "small-recovery-stake",
+            "step_300",
+            "BULLISH",
+            0.35,
+        )
+        small_stake = service.advance_after_result(
+            "small-recovery-stake",
+            won=False,
+            profit=-0.35,
+        )
+        self.assertEqual(small_stake.current_stake, 4.20)
 
         state = service.advance_after_result(
             "two-accumulator-runs", won=True, profit=2.0
         )
-        self.assertEqual(state.status, "completed")
+        self.assertEqual(state.status, "running")
+        self.assertEqual(state.contract_mode, "rise_fall")
+        self.assertEqual(state.current_stake, 2.0)
+        self.assertEqual(state.accumulator_runs, 0)
         self.assertEqual(state.total_profit_loss, 2.0)
 
     def test_accumulator_loss_still_allows_second_run(self):

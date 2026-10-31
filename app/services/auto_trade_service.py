@@ -75,6 +75,7 @@ class TradeRunState:
     last_profit: float = 0.0
     contract_mode: str = "rise_fall"
     accumulator_runs: int = 0
+    accumulator_losses: int = 0
     profit_target: float = 0.0
     recovery_attempted: bool = False
 
@@ -289,6 +290,7 @@ class AutoTradeService:
                     state.wins += 1
                 else:
                     state.losses += 1
+                    state.accumulator_losses += 1
                 state.accumulator_runs += 1
 
                 if state.accumulator_runs < settings.auto_trade_accumulator_runs:
@@ -301,12 +303,17 @@ class AutoTradeService:
                     self._executing.discard(key)
                     return state
 
-                state.status = (
-                    "completed"
-                    if state.total_profit_loss > 0
-                    else "recovery_failed"
-                )
-                state.completed_at = _now()
+                if state.accumulator_losses:
+                    state.status = "recovery_failed"
+                    state.completed_at = _now()
+                else:
+                    state.contract_mode = "rise_fall"
+                    state.accumulator_runs = 0
+                    state.accumulator_losses = 0
+                    state.current_stake = state.base_stake
+                    state.martingale_step = 1
+                    state.consecutive_losses = 0
+                    state.status = "running"
                 self._executing.discard(key)
                 return state
 
@@ -334,6 +341,7 @@ class AutoTradeService:
             state.recovery_attempted = True
             state.contract_mode = "accumulator"
             state.accumulator_runs = 0
+            state.accumulator_losses = 0
             state.current_stake = round(
                 state.base_stake
                 * float(settings.auto_trade_recovery_stake_multiplier),
