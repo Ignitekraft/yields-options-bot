@@ -76,13 +76,12 @@ two decimal places. Real Auto Trade requires at least $5 in the selected
 real account. The selected market and direction remain pinned from analysis
 through confirmation. Rise/Fall contracts expire after 20 seconds. Each
 session runs once until profit reaches 9.6 times the initial stake. The first
-Rise/Fall loss triggers two accumulator buy contracts on Volatility 10
-(`R_10`) using 29 times the initial stake, a 2% growth rate, and a $0.01
+Rise/Fall loss triggers one accumulator buy contract on Volatility 10
+(`R_10`) using 58 times the initial stake, a 1% growth rate, and a $0.01
 take-profit limit. Accumulators have no user-supplied duration; Deriv determines
-the contract's maximum duration from the market and proposal. Both accumulator
-runs always settle, even if the first loses. The session ends in profit when
-either accumulator run loses; if both win, trading continues with Rise/Fall
-at the initial stake. After a contract is bought, settlement
+the contract's maximum duration from the market and proposal. If the
+accumulator loses, the session ends as a loss; if it wins, trading continues
+with Rise/Fall at the initial stake. After a contract is bought, settlement
 monitoring reconnects with a fresh account URL
 and retries transient errors until Deriv confirms the result; no next contract
 is purchased before that confirmation. This recovery depends on the bot process
