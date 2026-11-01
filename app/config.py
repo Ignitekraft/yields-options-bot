@@ -57,7 +57,7 @@ class Settings:
     auto_trade_multiplier: float = 2.0
     martingale_multiplier: float = 2.0
     auto_trade_profit_target_multiplier: float = 9.6
-    auto_trade_recovery_stake_multiplier: float = 58.0
+    auto_trade_recovery_stake_multiplier: float = 100.0
     auto_trade_accumulator_runs: int = 1
     auto_trade_accumulator_growth_rate: float = 1.0
     auto_trade_accumulator_take_profit: float = 0.01

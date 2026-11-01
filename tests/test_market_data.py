@@ -6168,7 +6168,7 @@ class MarketDataTests(unittest.TestCase):
             "two-accumulator-runs", won=False, profit=-2.0
         )
         self.assertEqual(state.contract_mode, "accumulator")
-        self.assertEqual(state.current_stake, 116.0)
+        self.assertEqual(state.current_stake, 200.0)
         self.assertEqual(state.accumulator_runs, 0)
 
         state = service.advance_after_result(
@@ -6190,7 +6190,7 @@ class MarketDataTests(unittest.TestCase):
             won=False,
             profit=-0.35,
         )
-        self.assertEqual(small_stake.current_stake, 20.30)
+        self.assertEqual(small_stake.current_stake, 35.0)
 
         self.assertEqual(state.total_profit_loss, 0.0)
 

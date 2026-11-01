@@ -77,7 +77,7 @@ real account. The selected market and direction remain pinned from analysis
 through confirmation. Rise/Fall contracts expire after 20 seconds. Each
 session runs once until profit reaches 9.6 times the initial stake. The first
 Rise/Fall loss triggers one accumulator buy contract on Volatility 10
-(`R_10`) using 58 times the initial stake, a 1% growth rate, and a $0.01
+(`R_10`) using 100 times the initial stake, a 1% growth rate, and a $0.01
 take-profit limit. Accumulators have no user-supplied duration; Deriv determines
 the contract's maximum duration from the market and proposal. If the
 accumulator loses, the session ends as a loss; if it wins, trading continues
